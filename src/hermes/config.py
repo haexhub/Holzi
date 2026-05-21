@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     proxy_url: str = "http://haex-claude-proxy:8080"
     signal_url: str = "http://signal-cli-rest-api:8080"
     signal_number: str = ""
+    model: str = "claude-opus-4-7"
 
 
 settings = Settings()  # type: ignore[call-arg]
