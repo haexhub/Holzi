@@ -32,6 +32,31 @@ For a box with no Traefik yet, use the bundled one:
 PROXY_NETWORK_EXTERNAL=false make up-traefik
 ```
 
+## Linking Signal (one-time)
+
+The Signal worker is disabled unless `HERMES_SIGNAL_NUMBER` is set. To use
+Hermes via Signal, link `signal-cli-rest-api` to your account as a secondary
+device (your phone stays the primary). Do this once:
+
+```bash
+# 1. Generate a linking URI on the container.
+make up                      # ensure signal-cli-rest-api is running
+docker compose -p hermes exec signal-cli-rest-api \
+    signal-cli link -n hermes
+# The command prints a tsdevice:/... URI.
+
+# 2. Open Signal on your phone → Settings → Linked devices → Add device,
+#    then scan the QR code generated from that URI (e.g. paste it into
+#    https://qrcode.show or a local qrencode).
+
+# 3. Set HERMES_SIGNAL_NUMBER to YOUR Signal number in .env (E.164, e.g.
+#    +491701234567) and restart:
+make down && make up
+```
+
+The worker only acts on **Note-to-Self** messages — anything from another
+number is dropped. Replies are sent back to Note-to-Self too.
+
 ## Repo layout
 
 ```
@@ -48,5 +73,6 @@ PROXY_NETWORK_EXTERNAL=false make up-traefik
 
 ## Status
 
-Phase 0 (project skeleton) complete. Phase 1 (hermes-server skeleton with
-`/healthz` + Bearer-token middleware) is next.
+Phases 0–4 complete (skeleton, FastAPI + Bearer auth, SQLite/FTS5 memory,
+OpenAI-compatible chat-completions proxy, Signal worker with canned reply).
+Phase 5 — agent loop with tool-use — is next.
