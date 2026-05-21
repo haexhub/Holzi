@@ -6,16 +6,22 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from hermes import __version__
 from hermes.auth import bearer_auth_middleware
+from hermes.config import settings
+from hermes.db import init_db
 from hermes.logging import configure_logging, logger
 
 configure_logging()
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    logger.info("hermes_starting", version=__version__)
-    yield
-    logger.info("hermes_stopping")
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    logger.info("hermes_starting", version=__version__, db_path=settings.db_path)
+    app.state.db = await init_db(settings.db_path)
+    try:
+        yield
+    finally:
+        await app.state.db.close()
+        logger.info("hermes_stopping")
 
 
 app = FastAPI(title="Hermes", version=__version__, lifespan=lifespan)
