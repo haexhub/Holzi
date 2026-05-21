@@ -1,0 +1,97 @@
+import aiosqlite
+import pytest
+
+from hermes.repository import conversations, messages
+
+
+@pytest.fixture
+async def convo_id(conn: aiosqlite.Connection) -> int:
+    convo = await conversations.create(conn, channel="signal", ts=1000)
+    return convo.id
+
+
+async def test_append_returns_message_with_id_and_fields(
+    conn: aiosqlite.Connection, convo_id: int
+) -> None:
+    msg = await messages.append(
+        conn,
+        conversation_id=convo_id,
+        role="user",
+        content="hello world",
+        ts=1100,
+    )
+    assert msg.id > 0
+    assert msg.conversation_id == convo_id
+    assert msg.role == "user"
+    assert msg.content == "hello world"
+    assert msg.ts == 1100
+    assert msg.meta_json is None
+
+
+async def test_list_by_conversation_returns_messages_in_chronological_order(
+    conn: aiosqlite.Connection, convo_id: int
+) -> None:
+    a = await messages.append(conn, conversation_id=convo_id, role="user", content="first", ts=10)
+    b = await messages.append(
+        conn, conversation_id=convo_id, role="assistant", content="second", ts=20
+    )
+    c = await messages.append(conn, conversation_id=convo_id, role="user", content="third", ts=30)
+
+    listed = await messages.list_by_conversation(conn, convo_id)
+    assert [m.id for m in listed] == [a.id, b.id, c.id]
+
+
+async def test_list_by_conversation_does_not_leak_other_conversations(
+    conn: aiosqlite.Connection,
+) -> None:
+    convo_a = await conversations.create(conn, channel="signal", ts=1)
+    convo_b = await conversations.create(conn, channel="web", ts=2)
+    await messages.append(conn, conversation_id=convo_a.id, role="user", content="A", ts=10)
+    await messages.append(conn, conversation_id=convo_b.id, role="user", content="B", ts=20)
+
+    a_msgs = await messages.list_by_conversation(conn, convo_a.id)
+    assert [m.content for m in a_msgs] == ["A"]
+
+
+async def test_fts_search_finds_matching_messages(
+    conn: aiosqlite.Connection, convo_id: int
+) -> None:
+    await messages.append(
+        conn, conversation_id=convo_id, role="user", content="reschedule the meeting", ts=10
+    )
+    await messages.append(conn, conversation_id=convo_id, role="user", content="buy milk", ts=20)
+    await messages.append(
+        conn, conversation_id=convo_id, role="user", content="cancel the meeting", ts=30
+    )
+
+    hits = await messages.fts_search(conn, query="meeting")
+    assert {m.content for m in hits} == {"reschedule the meeting", "cancel the meeting"}
+
+
+async def test_fts_search_can_be_scoped_to_conversation(
+    conn: aiosqlite.Connection,
+) -> None:
+    convo_a = await conversations.create(conn, channel="signal", ts=1)
+    convo_b = await conversations.create(conn, channel="web", ts=2)
+    await messages.append(
+        conn, conversation_id=convo_a.id, role="user", content="meeting at noon", ts=10
+    )
+    await messages.append(
+        conn, conversation_id=convo_b.id, role="user", content="meeting tomorrow", ts=20
+    )
+
+    hits = await messages.fts_search(conn, query="meeting", conversation_id=convo_a.id)
+    assert [m.content for m in hits] == ["meeting at noon"]
+
+
+async def test_fts_index_updates_when_message_is_deleted(
+    conn: aiosqlite.Connection, convo_id: int
+) -> None:
+    msg = await messages.append(
+        conn, conversation_id=convo_id, role="user", content="zorblax", ts=10
+    )
+    await conn.execute("DELETE FROM messages WHERE id = ?", (msg.id,))
+    await conn.commit()
+
+    hits = await messages.fts_search(conn, query="zorblax")
+    assert hits == []
