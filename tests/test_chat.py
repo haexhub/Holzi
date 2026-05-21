@@ -1,0 +1,183 @@
+import json
+
+import httpx
+import pytest
+from asgi_lifespan import LifespanManager
+
+from hermes.main import app
+from hermes.repository import conversations, messages
+
+VALID_TOKEN = "test-token-for-pytest"
+AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
+
+
+def _non_stream_handler(content: str = "canned reply"):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "claude-opus-4-7",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+
+    return handler
+
+
+def _stream_handler(deltas: list[str]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        events = []
+        for d in deltas:
+            chunk = {
+                "id": "chatcmpl-test",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"content": d}, "finish_reason": None}],
+            }
+            events.append(f"data: {json.dumps(chunk)}\n\n".encode())
+        events.append(b"data: [DONE]\n\n")
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(b"".join(events)),
+        )
+
+    return handler
+
+
+def _install_upstream(handler):
+    transport = httpx.MockTransport(handler)
+    app.state.upstream = httpx.AsyncClient(transport=transport, base_url="http://fake-proxy")
+
+
+@pytest.fixture
+async def client():
+    async with (
+        LifespanManager(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as c,
+    ):
+        yield c
+
+
+async def test_chat_completions_requires_auth(client: httpx.AsyncClient) -> None:
+    _install_upstream(_non_stream_handler())
+    response = await client.post(
+        "/v1/chat/completions",
+        json={"model": "claude-opus-4-7", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 401
+
+
+async def test_chat_completions_non_streaming_creates_conversation_and_persists(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream(_non_stream_handler(content="hello back"))
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=AUTH,
+        json={
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "hello back"
+    session_id = int(response.headers["x-hermes-session"])
+
+    msgs = await messages.list_by_conversation(app.state.db, session_id)
+    assert [m.role for m in msgs] == ["user", "assistant"]
+    assert [m.content for m in msgs] == ["hi", "hello back"]
+
+
+async def test_chat_completions_uses_existing_session_header(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream(_non_stream_handler())
+    convo = await conversations.create(app.state.db, channel="vscode", ts=1000)
+
+    response = await client.post(
+        "/v1/chat/completions",
+        headers={**AUTH, "X-Hermes-Session": str(convo.id)},
+        json={
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "round 2"}],
+        },
+    )
+    assert response.status_code == 200
+    assert int(response.headers["x-hermes-session"]) == convo.id
+
+    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    assert [m.content for m in msgs] == ["round 2", "canned reply"]
+
+
+async def test_chat_completions_unknown_session_returns_404(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream(_non_stream_handler())
+    response = await client.post(
+        "/v1/chat/completions",
+        headers={**AUTH, "X-Hermes-Session": "99999"},
+        json={
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 404
+
+
+async def test_chat_completions_invalid_session_header_returns_400(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream(_non_stream_handler())
+    response = await client.post(
+        "/v1/chat/completions",
+        headers={**AUTH, "X-Hermes-Session": "not-a-number"},
+        json={
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 400
+
+
+async def test_chat_completions_streaming_passes_sse_and_persists(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream(_stream_handler(deltas=["Hello", " ", "world"]))
+
+    async with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers=AUTH,
+        json={
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "stream please"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        session_id = int(response.headers["x-hermes-session"])
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    # SSE pass-through
+    assert b"data: [DONE]" in body
+    assert b"Hello" in body and b"world" in body
+
+    msgs = await messages.list_by_conversation(app.state.db, session_id)
+    assert [m.role for m in msgs] == ["user", "assistant"]
+    assert msgs[1].content == "Hello world"
