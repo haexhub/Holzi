@@ -25,18 +25,23 @@ SIGNAL_SYSTEM_PROMPT = (
 )
 
 
+def build_upstream_client(llm_url: str, llm_api_key: str) -> httpx.AsyncClient:
+    headers = {"Authorization": f"Bearer {llm_api_key}"} if llm_api_key else None
+    return httpx.AsyncClient(base_url=llm_url, headers=headers, timeout=60.0)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info(
         "hermes_starting",
         version=__version__,
         db_path=settings.db_path,
-        proxy_url=settings.proxy_url,
+        llm_url=settings.llm_url,
         signal_enabled=bool(settings.signal_number),
         model=settings.model,
     )
     app.state.db = await init_db(settings.db_path)
-    app.state.upstream = httpx.AsyncClient(base_url=settings.proxy_url, timeout=60.0)
+    app.state.upstream = build_upstream_client(settings.llm_url, settings.llm_api_key)
     app.state.signal_http = None
     app.state.signal_worker = None
 

@@ -28,7 +28,7 @@ services:
       - .env
     environment:
       HERMES_DB_PATH: /data/hermes.db
-      HERMES_PROXY_URL: http://haex-claude-proxy:8080
+      HERMES_LLM_URL: http://haex-claude-proxy:8080
       HERMES_SIGNAL_URL: http://signal-cli-rest-api:8080
     volumes:
       - hermes-data:/data
