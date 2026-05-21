@@ -1,0 +1,103 @@
+# Hermes — personal AI assistant
+#
+# Default: services join the `proxy` network so an EXTERNAL Traefik (running
+# on the host) can discover them via the Docker provider. Service containers
+# carry `traefik.*` labels and the host's Traefik picks them up.
+#
+# For greenfield boxes without an existing Traefik:
+#   docker compose --profile traefik up
+# brings up a bundled Traefik with Let's Encrypt + ACME-HTTP-01 challenge.
+
+networks:
+  proxy:
+    name: ${PROXY_NETWORK:-proxy}
+    external: ${PROXY_NETWORK_EXTERNAL:-true}
+  internal:
+    name: hermes-internal
+
+services:
+  hermes-server:
+    # Phase 0: placeholder — image/build added when the FastAPI app lands in Phase 1.
+    image: hermes-server:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hermes-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HERMES_DB_PATH: /data/hermes.db
+      HERMES_PROXY_URL: http://haex-claude-proxy:8080
+      HERMES_SIGNAL_URL: http://signal-cli-rest-api:8080
+    volumes:
+      - hermes-data:/data
+    networks:
+      - proxy
+      - internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK:-proxy}"
+      - "traefik.http.routers.hermes.rule=Host(`${HERMES_DOMAIN}`)"
+      - "traefik.http.routers.hermes.entrypoints=websecure"
+      - "traefik.http.routers.hermes.tls.certresolver=letsencrypt"
+      - "traefik.http.services.hermes.loadbalancer.server.port=8082"
+    depends_on:
+      - haex-claude-proxy
+      - signal-cli-rest-api
+
+  signal-cli-rest-api:
+    image: bbernhard/signal-cli-rest-api:latest
+    container_name: signal-cli-rest-api
+    restart: unless-stopped
+    environment:
+      MODE: json-rpc
+    volumes:
+      - signal-data:/home/.local/share/signal-cli
+    networks:
+      - internal
+
+  haex-claude-proxy:
+    # Built from the existing project; image tag bumped from outside this repo.
+    image: haex-claude-proxy:latest
+    container_name: haex-claude-proxy
+    restart: unless-stopped
+    environment:
+      PROXY_RESOLVER: file
+      PROXY_CREDENTIALS_HOME: /data/claude
+    volumes:
+      - claude-credentials:/data/claude
+    networks:
+      - internal
+
+  traefik:
+    image: traefik:v3.2
+    container_name: traefik
+    restart: unless-stopped
+    profiles: ["traefik"]
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=${PROXY_NETWORK:-proxy}
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.letsencrypt.acme.email=${LETSENCRYPT_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-acme:/letsencrypt
+    networks:
+      - proxy
+
+volumes:
+  hermes-data:
+  signal-data:
+  claude-credentials:
+  traefik-acme:
