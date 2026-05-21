@@ -31,7 +31,8 @@ async def create(
         (channel, external_id, title, now, now),
     )
     await conn.commit()
-    assert cursor.lastrowid is not None
+    if cursor.lastrowid is None:
+        raise RuntimeError("INSERT into conversations did not yield a rowid")
     return Conversation(
         id=cursor.lastrowid,
         channel=channel,

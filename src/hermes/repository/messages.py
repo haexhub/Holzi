@@ -32,7 +32,8 @@ async def append(
         (conversation_id, role, content, now, meta_json),
     )
     await conn.commit()
-    assert cursor.lastrowid is not None
+    if cursor.lastrowid is None:
+        raise RuntimeError("INSERT into messages did not yield a rowid")
     return Message(
         id=cursor.lastrowid,
         conversation_id=conversation_id,

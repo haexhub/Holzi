@@ -35,7 +35,8 @@ async def upsert(
     ) as cursor:
         row = await cursor.fetchone()
     await conn.commit()
-    assert row is not None
+    if row is None:
+        raise RuntimeError("upsert into notes ... RETURNING returned no row")
     return _row_to_note(row)
 
 

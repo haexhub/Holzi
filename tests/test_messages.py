@@ -1,19 +1,7 @@
-from pathlib import Path
-
 import aiosqlite
 import pytest
 
-from hermes.db import init_db
 from hermes.repository import conversations, messages
-
-
-@pytest.fixture
-async def conn(tmp_path: Path):
-    connection = await init_db(str(tmp_path / "hermes.db"))
-    try:
-        yield connection
-    finally:
-        await connection.close()
 
 
 @pytest.fixture

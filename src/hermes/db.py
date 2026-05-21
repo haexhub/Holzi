@@ -12,10 +12,14 @@ async def init_db(path: str) -> aiosqlite.Connection:
     `IF NOT EXISTS` everywhere.
     """
     conn = await aiosqlite.connect(path)
-    conn.row_factory = aiosqlite.Row
-    await conn.execute("PRAGMA foreign_keys = ON")
-    if path != ":memory:":
-        await conn.execute("PRAGMA journal_mode = WAL")
-    await conn.executescript(SCHEMA_SQL)
-    await conn.commit()
+    try:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA foreign_keys = ON")
+        if path != ":memory:":
+            await conn.execute("PRAGMA journal_mode = WAL")
+        await conn.executescript(SCHEMA_SQL)
+        await conn.commit()
+    except BaseException:
+        await conn.close()
+        raise
     return conn
