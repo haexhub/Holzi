@@ -99,3 +99,8 @@ async def test_api_todos_delete_missing_returns_404(
 ) -> None:
     response = await client.delete("/api/todos/99999", headers=AUTH)
     assert response.status_code == 404
+
+
+async def test_api_todos_rejects_invalid_limit(client: httpx.AsyncClient) -> None:
+    response = await client.get("/api/todos?limit=-1", headers=AUTH)
+    assert response.status_code == 400

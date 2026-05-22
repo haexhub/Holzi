@@ -100,3 +100,8 @@ async def test_api_notes_delete_missing_returns_404(
 ) -> None:
     response = await client.delete("/api/notes/missing", headers=AUTH)
     assert response.status_code == 404
+
+
+async def test_api_notes_rejects_invalid_limit(client: httpx.AsyncClient) -> None:
+    response = await client.get("/api/notes?limit=-1", headers=AUTH)
+    assert response.status_code == 400

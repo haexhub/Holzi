@@ -29,6 +29,19 @@ WEB_SYSTEM_PROMPT = (
 
 WEB_CHANNEL = "web"
 
+# Negative LIMIT disables LIMIT in SQLite — refuse non-positive values at the
+# API boundary so an authenticated client can't trigger an unbounded scan.
+MAX_LIST_LIMIT = 500
+
+
+def _validate_limit(limit: int, *, max_limit: int = MAX_LIST_LIMIT) -> int:
+    if limit < 1 or limit > max_limit:
+        raise HTTPException(
+            status_code=400,
+            detail=f"limit must be between 1 and {max_limit}",
+        )
+    return limit
+
 
 # ---------------------------------------------------------------------------
 # /api/chat
@@ -65,6 +78,14 @@ async def api_chat(request: Request) -> Response:
         existing = await conversations.get(db, payload.conversation_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="unknown conversation_id")
+        # /api/chat is the web surface — never let it append into a Signal or
+        # VSCode thread, which would blur channel semantics and bypass the
+        # per-channel system prompt + tool catalog.
+        if existing.channel != WEB_CHANNEL:
+            raise HTTPException(
+                status_code=400,
+                detail="conversation_id must reference a web conversation",
+            )
         convo = existing
 
     await messages.append(
@@ -111,6 +132,7 @@ async def api_chat(request: Request) -> Response:
 async def api_list_conversations(
     request: Request, channel: str | None = None, limit: int = 50
 ) -> list[dict[str, Any]]:
+    limit = _validate_limit(limit)
     db: aiosqlite.Connection = request.app.state.db
     convos = await conversations.list_all(db, channel=channel, limit=limit)
     out: list[dict[str, Any]] = []
@@ -133,6 +155,7 @@ async def api_list_conversations(
 async def api_get_conversation(
     request: Request, conv_id: int, limit: int = 200
 ) -> dict[str, Any]:
+    limit = _validate_limit(limit)
     db: aiosqlite.Connection = request.app.state.db
     convo = await conversations.get(db, conv_id)
     if convo is None:
@@ -181,6 +204,7 @@ def _note_to_dict(n: Any) -> dict[str, Any]:
 
 @router.get("/notes")
 async def api_list_notes(request: Request, limit: int = 100) -> list[dict[str, Any]]:
+    limit = _validate_limit(limit)
     db: aiosqlite.Connection = request.app.state.db
     items = await notes.list_all(db, limit=limit)
     return [_note_to_dict(n) for n in items]
@@ -252,6 +276,7 @@ async def api_list_todos(
     tag: str | None = None,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
+    limit = _validate_limit(limit)
     db: aiosqlite.Connection = request.app.state.db
     items = await todos.list_all(db, only_open=only_open, tag=tag, limit=limit)
     return [_todo_to_dict(t) for t in items]
@@ -321,6 +346,7 @@ def _reminder_to_dict(r: Any) -> dict[str, Any]:
 async def api_list_reminders(
     request: Request, include_fired: bool = False, limit: int = 100
 ) -> list[dict[str, Any]]:
+    limit = _validate_limit(limit)
     db: aiosqlite.Connection = request.app.state.db
     items = await reminders.list_all(db, include_fired=include_fired, limit=limit)
     return [_reminder_to_dict(r) for r in items]

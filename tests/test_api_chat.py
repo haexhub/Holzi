@@ -156,6 +156,24 @@ async def test_api_chat_unknown_conversation_returns_404(
     assert response.status_code == 404
 
 
+async def test_api_chat_rejects_non_web_conversation(
+    client: httpx.AsyncClient,
+) -> None:
+    """Channel semantics: /api/chat must not inject web messages into Signal threads."""
+    signal_convo = await conversations.create(app.state.db, channel="signal", ts=1000)
+    _install_upstream_responses([_assistant_oneshot("never reached")])
+
+    response = await client.post(
+        "/api/chat",
+        headers=AUTH,
+        json={"message": "hijack", "conversation_id": signal_convo.id},
+    )
+    assert response.status_code == 400
+    # Nothing should have been written into the signal conversation.
+    msgs = await messages.list_by_conversation(app.state.db, signal_convo.id)
+    assert msgs == []
+
+
 async def test_api_chat_missing_message_returns_400(
     client: httpx.AsyncClient,
 ) -> None:

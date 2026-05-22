@@ -92,3 +92,10 @@ async def test_api_reminders_delete_missing_returns_404(
 ) -> None:
     response = await client.delete("/api/reminders/99999", headers=AUTH)
     assert response.status_code == 404
+
+
+async def test_api_reminders_rejects_invalid_limit(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.get("/api/reminders?limit=-1", headers=AUTH)
+    assert response.status_code == 400

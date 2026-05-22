@@ -91,3 +91,22 @@ async def test_api_conversation_detail_unknown_id_returns_404(
 ) -> None:
     response = await client.get("/api/conversations/99999", headers=AUTH)
     assert response.status_code == 404
+
+
+async def test_api_conversations_rejects_invalid_limit(
+    client: httpx.AsyncClient,
+) -> None:
+    # Negative LIMIT disables limiting in SQLite — must be rejected at the API.
+    for bad in ("-1", "0", "10000"):
+        response = await client.get(f"/api/conversations?limit={bad}", headers=AUTH)
+        assert response.status_code == 400, f"expected 400 for limit={bad}"
+
+
+async def test_api_conversation_detail_rejects_invalid_limit(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    response = await client.get(
+        f"/api/conversations/{convo.id}?limit=-5", headers=AUTH
+    )
+    assert response.status_code == 400
