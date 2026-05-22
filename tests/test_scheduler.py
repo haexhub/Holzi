@@ -1,0 +1,85 @@
+import json
+from typing import Any
+
+import aiosqlite
+import httpx
+
+from hermes.repository import reminders
+from hermes.scheduler import ReminderScheduler
+from hermes.signal.client import SignalClient
+
+SELF_NUMBER = "+491701234567"
+
+
+def _make_signal_client(sends: list[dict[str, Any]] | None = None) -> SignalClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/send":
+            if sends is not None:
+                sends.append(json.loads(request.content))
+            return httpx.Response(201, json={"timestamp": 1700000000000})
+        return httpx.Response(200, json=[])
+
+    transport = httpx.MockTransport(handler)
+    http = httpx.AsyncClient(transport=transport, base_url="http://fake-signal")
+    return SignalClient(http, SELF_NUMBER)
+
+
+async def test_fire_due_sends_and_marks_only_past_reminders(
+    conn: aiosqlite.Connection,
+) -> None:
+    past = await reminders.create(conn, due_at=1000, message="past", ts=500)
+    future = await reminders.create(conn, due_at=5000, message="future", ts=500)
+
+    sends: list[dict[str, Any]] = []
+    sched = ReminderScheduler(conn, _make_signal_client(sends), SELF_NUMBER)
+    fired = await sched.fire_due(now=2000)
+
+    assert fired == 1
+    assert [s["message"] for s in sends] == ["past"]
+
+    all_reminders = await reminders.list_all(conn, include_fired=True)
+    by_id = {r.id: r for r in all_reminders}
+    assert by_id[past.id].fired_at == 2000
+    assert by_id[future.id].fired_at is None
+
+
+async def test_fire_due_skips_when_signal_disabled(conn: aiosqlite.Connection) -> None:
+    await reminders.create(conn, due_at=1000, message="x", ts=500)
+
+    sched = ReminderScheduler(conn, None, None)
+    fired = await sched.fire_due(now=2000)
+
+    assert fired == 0
+    pending = await reminders.list_all(conn)
+    assert len(pending) == 1  # still pending
+
+
+async def test_fire_due_skips_non_signal_channels(conn: aiosqlite.Connection) -> None:
+    await reminders.create(conn, due_at=1000, message="web", channel="web", ts=500)
+
+    sends: list[dict[str, Any]] = []
+    sched = ReminderScheduler(conn, _make_signal_client(sends), SELF_NUMBER)
+    fired = await sched.fire_due(now=2000)
+
+    assert fired == 0
+    assert sends == []
+
+
+async def test_fire_due_leaves_reminder_pending_when_send_fails(
+    conn: aiosqlite.Connection,
+) -> None:
+    await reminders.create(conn, due_at=1000, message="boom", ts=500)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "down"})
+
+    failing = SignalClient(
+        httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://fake"),
+        SELF_NUMBER,
+    )
+    sched = ReminderScheduler(conn, failing, SELF_NUMBER)
+    fired = await sched.fire_due(now=2000)
+
+    assert fired == 0
+    pending = await reminders.list_all(conn)
+    assert len(pending) == 1  # next tick will retry

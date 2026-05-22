@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     signal_url: str = "http://signal-cli-rest-api:8080"
     signal_number: str = ""
     model: str = "claude-opus-4-7"
+    brave_api_key: str = ""
 
 
 settings = Settings()  # type: ignore[call-arg]

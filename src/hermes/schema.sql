@@ -89,3 +89,33 @@ CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
   INSERT INTO notes_fts(rowid, key, content, tags)
     VALUES (new.id, new.key, new.content, new.tags);
 END;
+
+-- ---------------------------------------------------------------------------
+-- Reminders (Phase 7).
+-- Scheduled outbound messages. The scheduler loop polls the table once per
+-- minute and fires every row whose due_at <= now() and fired_at IS NULL.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS reminders (
+  id         INTEGER PRIMARY KEY,
+  due_at     INTEGER NOT NULL,        -- unix epoch
+  message    TEXT NOT NULL,
+  channel    TEXT NOT NULL DEFAULT 'signal',
+  fired_at   INTEGER,                 -- null until the scheduler has delivered it
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS reminders_due_pending
+  ON reminders(due_at) WHERE fired_at IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- Todos (Phase 7).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS todos (
+  id         INTEGER PRIMARY KEY,
+  content    TEXT NOT NULL,
+  tags       TEXT,                    -- comma-separated
+  done_at    INTEGER,                 -- null = open
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS todos_open ON todos(done_at) WHERE done_at IS NULL;
