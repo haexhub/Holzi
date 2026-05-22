@@ -32,6 +32,25 @@ For a box with no Traefik yet, use the bundled one:
 PROXY_NETWORK_EXTERNAL=false make up-traefik
 ```
 
+## Switching LLM providers
+
+Hermes talks to its upstream over the OpenAI `/v1/chat/completions`
+contract, so anything that speaks that dialect is a drop-in replacement.
+Set `HERMES_LLM_URL` (and `HERMES_LLM_API_KEY` if the provider needs one)
+plus `HERMES_MODEL`:
+
+| Provider | `HERMES_LLM_URL` | `HERMES_LLM_API_KEY` | `HERMES_MODEL` |
+|---|---|---|---|
+| Claude Max via bundled proxy *(default)* | `http://haex-claude-proxy:8080` | *(empty — OAuth via `claude login`)* | `claude-opus-4-7` |
+| OpenAI | `https://api.openai.com` | `sk-...` | `gpt-4o` |
+| OpenRouter | `https://openrouter.ai/api/v1` | `sk-or-...` | `anthropic/claude-3.5-sonnet` |
+| Ollama (local) | `http://ollama:11434/v1` | *(empty)* | `llama3.1` |
+| LiteLLM proxy | `http://litellm:4000` | per LiteLLM config | per LiteLLM config |
+
+When switching away from `haex-claude-proxy` you can also drop the
+`haex-claude-proxy` service from `docker-compose.yml` (or gate it behind
+a Compose profile).
+
 ## Linking Signal (one-time)
 
 The Signal worker is disabled unless `HERMES_SIGNAL_NUMBER` is set. To use

@@ -1,11 +1,13 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import aiosqlite
 import httpx
 from fastapi import FastAPI
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from hermes import __version__
+from hermes.agent import run_agent
 from hermes.auth import bearer_auth_middleware
 from hermes.config import settings
 from hermes.db import init_db
@@ -16,6 +18,17 @@ from hermes.signal.worker import SignalWorker
 
 configure_logging()
 
+SIGNAL_SYSTEM_PROMPT = (
+    "You are Hermes, a personal AI assistant for Marko, reached via Signal "
+    "Note-to-Self. Be concise — usually one to three short sentences. Match "
+    "Marko's preference for terse, technical communication."
+)
+
+
+def build_upstream_client(llm_url: str, llm_api_key: str) -> httpx.AsyncClient:
+    headers = {"Authorization": f"Bearer {llm_api_key}"} if llm_api_key else None
+    return httpx.AsyncClient(base_url=llm_url, headers=headers, timeout=60.0)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -23,19 +36,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "hermes_starting",
         version=__version__,
         db_path=settings.db_path,
-        proxy_url=settings.proxy_url,
+        llm_url=settings.llm_url,
         signal_enabled=bool(settings.signal_number),
+        model=settings.model,
     )
     app.state.db = await init_db(settings.db_path)
-    app.state.upstream = httpx.AsyncClient(base_url=settings.proxy_url, timeout=60.0)
+    app.state.upstream = build_upstream_client(settings.llm_url, settings.llm_api_key)
     app.state.signal_http = None
     app.state.signal_worker = None
 
     if settings.signal_number:
         app.state.signal_http = httpx.AsyncClient(base_url=settings.signal_url, timeout=60.0)
         signal_client = SignalClient(app.state.signal_http, settings.signal_number)
+
+        async def signal_agent_runner(
+            db: aiosqlite.Connection, conversation_id: int
+        ) -> str:
+            return await run_agent(
+                upstream=app.state.upstream,
+                db=db,
+                conversation_id=conversation_id,
+                system_prompt=SIGNAL_SYSTEM_PROMPT,
+                model=settings.model,
+            )
+
         app.state.signal_worker = SignalWorker(
-            signal_client, app.state.db, settings.signal_number
+            signal_client,
+            app.state.db,
+            settings.signal_number,
+            agent_runner=signal_agent_runner,
         )
         await app.state.signal_worker.start()
 

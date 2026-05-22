@@ -1,17 +1,20 @@
 import asyncio
 import contextlib
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import aiosqlite
 
 from hermes.logging import logger
 from hermes.repository import conversations, messages
+from hermes.repository.models import Conversation
 from hermes.signal.client import SignalClient
 
-CANNED_REPLY = "received"
 DEFAULT_CONVO_GAP_SECONDS = 6 * 3600
 DEFAULT_POLL_TIMEOUT = 30
+
+AgentRunner = Callable[[aiosqlite.Connection, int], Awaitable[str]]
 
 
 class SignalWorker:
@@ -21,12 +24,14 @@ class SignalWorker:
         db: aiosqlite.Connection,
         self_number: str,
         *,
+        agent_runner: AgentRunner,
         convo_gap_seconds: int = DEFAULT_CONVO_GAP_SECONDS,
         poll_timeout: int = DEFAULT_POLL_TIMEOUT,
     ) -> None:
         self.client = client
         self.db = db
         self.self_number = self_number
+        self.agent_runner = agent_runner
         self.convo_gap_seconds = convo_gap_seconds
         self.poll_timeout = poll_timeout
         self._task: asyncio.Task[None] | None = None
@@ -79,21 +84,16 @@ class SignalWorker:
             self.db, conversation_id=convo.id, role="user", content=text, ts=current
         )
         try:
-            await self.client.send(recipient=self.self_number, message=CANNED_REPLY)
-            await messages.append(
-                self.db,
-                conversation_id=convo.id,
-                role="assistant",
-                content=CANNED_REPLY,
-                ts=current,
-            )
+            # Agent persists the assistant turn (and any tool turns) itself.
+            reply = await self.agent_runner(self.db, convo.id)
+            await self.client.send(recipient=self.self_number, message=reply)
         finally:
-            # Touch even if send fails, otherwise the 6h gap heuristic in
-            # _resolve_conversation can pick a stale conversation on the next
-            # inbound message.
+            # Touch even if agent_runner or send fails, otherwise the 6h gap
+            # heuristic in _resolve_conversation can pick a stale conversation
+            # on the next inbound message.
             await conversations.touch(self.db, convo.id, ts=current)
 
-    async def _resolve_conversation(self, now: int) -> Any:
+    async def _resolve_conversation(self, now: int) -> Conversation:
         latest = await conversations.list_by_channel(self.db, "signal", limit=1)
         if latest and now - latest[0].updated_at < self.convo_gap_seconds:
             return latest[0]

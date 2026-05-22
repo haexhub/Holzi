@@ -4,6 +4,7 @@ from typing import Any
 
 import aiosqlite
 import httpx
+import pytest
 
 from hermes.repository import conversations, messages
 from hermes.signal.client import SignalClient
@@ -43,11 +44,38 @@ def _envelope(
     return {"envelope": inner, "account": SELF_NUMBER}
 
 
-async def test_process_envelope_persists_note_to_self_and_replies(
+def _echoing_agent_runner():
+    """Stand-in for run_agent: echoes the last user message back and persists it."""
+
+    async def runner(db: aiosqlite.Connection, conversation_id: int) -> str:
+        msgs = await messages.list_by_conversation(db, conversation_id)
+        last_user = next((m for m in reversed(msgs) if m.role == "user"), None)
+        reply = f"agent says: {last_user.content if last_user else ''}"
+        await messages.append(
+            db, conversation_id=conversation_id, role="assistant", content=reply
+        )
+        return reply
+
+    return runner
+
+
+def _never_called_agent_runner():
+    async def runner(db: aiosqlite.Connection, conversation_id: int) -> str:
+        raise AssertionError("agent runner should not have been called")
+
+    return runner
+
+
+async def test_process_envelope_persists_note_to_self_and_replies_via_agent(
     conn: aiosqlite.Connection,
 ) -> None:
     sends: list[dict[str, Any]] = []
-    worker = SignalWorker(_make_signal_client(sends), conn, SELF_NUMBER)
+    worker = SignalWorker(
+        _make_signal_client(sends),
+        conn,
+        SELF_NUMBER,
+        agent_runner=_echoing_agent_runner(),
+    )
 
     await worker.process_envelope(_envelope(SELF_NUMBER, "hi"))
 
@@ -56,10 +84,14 @@ async def test_process_envelope_persists_note_to_self_and_replies(
     msgs = await messages.list_by_conversation(conn, convos[0].id)
     assert [(m.role, m.content) for m in msgs] == [
         ("user", "hi"),
-        ("assistant", "received"),
+        ("assistant", "agent says: hi"),
     ]
     assert sends == [
-        {"message": "received", "number": SELF_NUMBER, "recipients": [SELF_NUMBER]}
+        {
+            "message": "agent says: hi",
+            "number": SELF_NUMBER,
+            "recipients": [SELF_NUMBER],
+        }
     ]
 
 
@@ -67,7 +99,12 @@ async def test_process_envelope_ignores_messages_from_other_numbers(
     conn: aiosqlite.Connection,
 ) -> None:
     sends: list[dict[str, Any]] = []
-    worker = SignalWorker(_make_signal_client(sends), conn, SELF_NUMBER)
+    worker = SignalWorker(
+        _make_signal_client(sends),
+        conn,
+        SELF_NUMBER,
+        agent_runner=_never_called_agent_runner(),
+    )
 
     await worker.process_envelope(_envelope(OTHER_NUMBER, "hi"))
 
@@ -79,7 +116,12 @@ async def test_process_envelope_ignores_envelopes_without_text(
     conn: aiosqlite.Connection,
 ) -> None:
     sends: list[dict[str, Any]] = []
-    worker = SignalWorker(_make_signal_client(sends), conn, SELF_NUMBER)
+    worker = SignalWorker(
+        _make_signal_client(sends),
+        conn,
+        SELF_NUMBER,
+        agent_runner=_never_called_agent_runner(),
+    )
 
     await worker.process_envelope(_envelope(SELF_NUMBER, data_message=False))
 
@@ -94,7 +136,12 @@ async def test_process_envelope_appends_to_existing_conversation_within_6h(
     existing = await conversations.create(conn, channel="signal", ts=one_hour_ago)
 
     sends: list[dict[str, Any]] = []
-    worker = SignalWorker(_make_signal_client(sends), conn, SELF_NUMBER)
+    worker = SignalWorker(
+        _make_signal_client(sends),
+        conn,
+        SELF_NUMBER,
+        agent_runner=_echoing_agent_runner(),
+    )
 
     await worker.process_envelope(_envelope(SELF_NUMBER, "follow-up"))
 
@@ -102,7 +149,7 @@ async def test_process_envelope_appends_to_existing_conversation_within_6h(
     assert len(convos) == 1
     assert convos[0].id == existing.id
     msgs = await messages.list_by_conversation(conn, existing.id)
-    assert [m.content for m in msgs] == ["follow-up", "received"]
+    assert [m.content for m in msgs] == ["follow-up", "agent says: follow-up"]
 
 
 async def test_process_envelope_creates_new_conversation_when_gap_exceeds_6h(
@@ -112,7 +159,12 @@ async def test_process_envelope_creates_new_conversation_when_gap_exceeds_6h(
     existing = await conversations.create(conn, channel="signal", ts=seven_hours_ago)
 
     sends: list[dict[str, Any]] = []
-    worker = SignalWorker(_make_signal_client(sends), conn, SELF_NUMBER)
+    worker = SignalWorker(
+        _make_signal_client(sends),
+        conn,
+        SELF_NUMBER,
+        agent_runner=_echoing_agent_runner(),
+    )
 
     await worker.process_envelope(_envelope(SELF_NUMBER, "new thread"))
 
@@ -121,4 +173,43 @@ async def test_process_envelope_creates_new_conversation_when_gap_exceeds_6h(
     newest = convos[0]
     assert newest.id != existing.id
     msgs = await messages.list_by_conversation(conn, newest.id)
-    assert [m.content for m in msgs] == ["new thread", "received"]
+    assert [m.content for m in msgs] == ["new thread", "agent says: new thread"]
+
+
+def _failing_agent_runner():
+    async def runner(db: aiosqlite.Connection, conversation_id: int) -> str:
+        raise RuntimeError("simulated agent failure")
+
+    return runner
+
+
+async def test_process_envelope_touches_conversation_even_when_agent_fails(
+    conn: aiosqlite.Connection,
+) -> None:
+    one_hour_ago = int(time.time()) - 3600
+    existing = await conversations.create(conn, channel="signal", ts=one_hour_ago)
+    initial_updated_at = existing.updated_at
+
+    sends: list[dict[str, Any]] = []
+    worker = SignalWorker(
+        _make_signal_client(sends),
+        conn,
+        SELF_NUMBER,
+        agent_runner=_failing_agent_runner(),
+    )
+
+    current_ts = int(time.time())
+    with pytest.raises(RuntimeError, match="simulated agent failure"):
+        await worker.process_envelope(_envelope(SELF_NUMBER, "boom"), now=current_ts)
+
+    # User message persisted, no assistant reply, no send attempt.
+    msgs = await messages.list_by_conversation(conn, existing.id)
+    assert [(m.role, m.content) for m in msgs] == [("user", "boom")]
+    assert sends == []
+
+    # Conversation was touched even though agent_runner raised — required for
+    # the 6h gap heuristic to keep working on the next inbound message.
+    refreshed = await conversations.get(conn, existing.id)
+    assert refreshed is not None
+    assert refreshed.updated_at == current_ts
+    assert refreshed.updated_at > initial_updated_at
