@@ -88,13 +88,18 @@
 - **Reminders:** in-process asyncio loop, checks DB every minute
 - **Web UI:** static files served from disk (`/opt/hermes/frontend/dist`)
 
-### 2.4 `hermes-frontend` (Nuxt 3, new, separate repo or `frontend/` subfolder)
-- Nuxt 3 (Vue 3 + Composition API)
-- SSR turned off; built as static SPA
-- Chat view with streaming (Server-Sent Events from `/api/chat/stream`)
-- Sidebar: conversation list filtered by channel
-- Notes/Todos panel
-- Auth: Bearer-token entered once, stored in localStorage
+### 2.4 `holzi-frontend` (Nuxt 4 SPA, **separate repo**)
+Lives at https://github.com/haexhub/holzi-frontend (Phase 9, started 2026-05-22). Decision-rationale for the split: Python+uv vs. Node+pnpm tooling don't co-exist cleanly in one PR-pipeline, build artefact (`dist/`) is what crosses the boundary anyway, and FastAPI's `/openapi.json` is enough to keep API types in sync without source-coupling.
+
+- **Nuxt 4** (Vue 3 + Composition API, TypeScript)
+- SSR turned off; built as static SPA (Hermes-server serves `dist/`)
+- **Tailwind 4** + **shadcn-vue** primitives (`app/components/ui/`)
+- **Pinia** for store, **VueUse** for composables (incl. `useLocalStorage`)
+- **pnpm** package manager
+- Chat view with SSE consumption from `/api/chat` (parses `session`/`text`/`done`/`error` events)
+- Sidebar: conversation list (filtered by `channel=web`)
+- Right panel: Notes / Todos / Reminders tabs (one-call-per-endpoint CRUD)
+- Auth: Bearer-token entered once on `/login`, persisted in localStorage; 401 clears token and bounces back to login
 
 ### 2.5 `traefik` (Docker, optional)
 - External-by-default: most target machines already run a Traefik. Service containers in this Compose carry the standard `traefik.enable=true` + `traefik.http.routers.*` labels so any host-running Traefik picks them up automatically via the Docker provider.
@@ -365,8 +370,8 @@ Hermes connects as an MCP client (configured via `HERMES_EXTERNAL_MCP`). When th
 | 5 — agent loop (+ LLM provider flexibility) | #4 | ✅ on main |
 | 6 — MCP server + 7 tools | #5 | ✅ on main |
 | 7 — productivity/external tools + scheduler | #6 | ✅ on main |
-| 8 — web-UI backend (`/api/*`, recursion guard) | TBD | ⏳ open on `phase-8-web-ui-backend` |
-| 9 — Nuxt frontend | — | ⏭ |
+| 8 — web-UI backend (`/api/*`, recursion guard) | #7 | ⏳ open on `phase-8-web-ui-backend` |
+| 9 — Nuxt frontend (separate repo: holzi-frontend) | — | ⏳ initial scaffolding pushed to https://github.com/haexhub/holzi-frontend |
 | 10 — production deploy | — | ⏭ |
 
 **Important deviation from the original plan.** Phase 5 also delivered the *LLM-provider-flexibility* change: `HERMES_PROXY_URL` became `HERMES_LLM_URL` and `HERMES_LLM_API_KEY` was added so the upstream can be any OpenAI-compatible endpoint, not only `haex-claude-proxy`. The renaming is reflected in `.env.example`, `docker-compose.yml`, and the README provider table.
