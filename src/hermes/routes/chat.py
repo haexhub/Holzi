@@ -1,0 +1,191 @@
+import json
+from collections.abc import AsyncIterator
+from typing import Any
+
+import aiosqlite
+import httpx
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
+
+from hermes.repository import conversations, messages
+from hermes.repository.models import Conversation
+
+router = APIRouter()
+
+CHAT_PATH = "/v1/chat/completions"
+
+
+@router.post(CHAT_PATH)
+async def chat_completions(request: Request) -> Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    is_stream = bool(body.get("stream", False))
+
+    db: aiosqlite.Connection = request.app.state.db
+    upstream: httpx.AsyncClient = request.app.state.upstream
+
+    convo = await _resolve_conversation(request, db)
+    await _persist_last_user_message(db, body.get("messages", []), convo.id)
+
+    response_headers = {"X-Hermes-Session": str(convo.id)}
+
+    if is_stream:
+        return await _stream_forward(upstream, body, response_headers, db, convo.id)
+    return await _oneshot_forward(upstream, body, response_headers, db, convo.id)
+
+
+async def _resolve_conversation(
+    request: Request, db: aiosqlite.Connection
+) -> Conversation:
+    header = request.headers.get("x-hermes-session")
+    channel = request.headers.get("x-hermes-channel", "vscode")
+
+    if header is None:
+        return await conversations.create(db, channel=channel)
+
+    try:
+        conv_id = int(header)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid X-Hermes-Session") from exc
+
+    convo = await conversations.get(db, conv_id)
+    if convo is None:
+        raise HTTPException(status_code=404, detail="unknown session")
+    return convo
+
+
+async def _persist_last_user_message(
+    db: aiosqlite.Connection, msgs: list[dict[str, Any]], conv_id: int
+) -> None:
+    if not msgs:
+        return
+    last = msgs[-1]
+    if last.get("role") != "user":
+        return
+    content = last.get("content", "")
+    if isinstance(content, list):
+        # OpenAI multi-modal: concatenate text parts, ignore others for now.
+        content = "".join(
+            p.get("text", "")
+            for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        )
+    await messages.append(db, conversation_id=conv_id, role="user", content=str(content))
+
+
+async def _oneshot_forward(
+    upstream: httpx.AsyncClient,
+    body: dict[str, Any],
+    headers: dict[str, str],
+    db: aiosqlite.Connection,
+    conv_id: int,
+) -> Response:
+    try:
+        upstream_resp = await upstream.post(CHAT_PATH, json=body)
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="upstream timeout") from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail="upstream unreachable") from exc
+
+    if upstream_resp.status_code >= 400:
+        return Response(
+            content=upstream_resp.content,
+            status_code=upstream_resp.status_code,
+            media_type=upstream_resp.headers.get("content-type", "application/json"),
+            headers=headers,
+        )
+
+    try:
+        data = upstream_resp.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=502, detail="upstream returned non-JSON body"
+        ) from exc
+    assistant_content = _extract_assistant_from_oneshot(data)
+    if assistant_content:
+        await messages.append(
+            db, conversation_id=conv_id, role="assistant", content=assistant_content
+        )
+    await conversations.touch(db, conv_id)
+
+    return Response(
+        content=json.dumps(data),
+        status_code=200,
+        media_type="application/json",
+        headers=headers,
+    )
+
+
+async def _stream_forward(
+    upstream: httpx.AsyncClient,
+    body: dict[str, Any],
+    headers: dict[str, str],
+    db: aiosqlite.Connection,
+    conv_id: int,
+) -> StreamingResponse:
+    request = upstream.build_request("POST", CHAT_PATH, json=body)
+    try:
+        upstream_resp = await upstream.send(request, stream=True)
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="upstream timeout") from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail="upstream unreachable") from exc
+
+    if upstream_resp.status_code >= 400:
+        error_body = await upstream_resp.aread()
+        await upstream_resp.aclose()
+        raise HTTPException(
+            status_code=upstream_resp.status_code,
+            detail=error_body.decode("utf-8", errors="replace"),
+        )
+
+    async def gen() -> AsyncIterator[bytes]:
+        chunks: list[bytes] = []
+        try:
+            async for raw in upstream_resp.aiter_raw():
+                chunks.append(raw)
+                yield raw
+        finally:
+            await upstream_resp.aclose()
+            content = _extract_assistant_from_sse(b"".join(chunks))
+            if content:
+                await messages.append(
+                    db, conversation_id=conv_id, role="assistant", content=content
+                )
+            await conversations.touch(db, conv_id)
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
+
+
+def _extract_assistant_from_oneshot(data: dict[str, Any]) -> str:
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    msg = choices[0].get("message") or {}
+    content = msg.get("content")
+    return str(content) if content else ""
+
+
+def _extract_assistant_from_sse(raw: bytes) -> str:
+    parts: list[str] = []
+    for line in raw.split(b"\n"):
+        line = line.strip()
+        if not line.startswith(b"data: "):
+            continue
+        payload = line[len(b"data: ") :]
+        if payload == b"[DONE]":
+            continue
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        choices = obj.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        content = delta.get("content")
+        if content:
+            parts.append(str(content))
+    return "".join(parts)
