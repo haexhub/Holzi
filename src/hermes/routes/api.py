@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -103,22 +105,54 @@ async def api_chat(request: Request) -> Response:
 
     async def gen() -> AsyncIterator[bytes]:
         yield _sse_event("session", {"conversation_id": convo.id})
+
+        # Bridge run_agent's on_chunk callback (called from inside the agent
+        # task) to the SSE generator via an async queue. `None` is the
+        # sentinel that means "agent finished — drain and emit done/error".
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def on_chunk(chunk: str) -> None:
+            await queue.put(chunk)
+
+        async def run_task() -> None:
+            try:
+                await run_agent(
+                    upstream=upstream,
+                    db=db,
+                    conversation_id=convo.id,
+                    system_prompt=WEB_SYSTEM_PROMPT,
+                    model=settings.model,
+                    tools=tools,
+                    on_chunk=on_chunk,
+                )
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(run_task())
         try:
-            reply = await run_agent(
-                upstream=upstream,
-                db=db,
-                conversation_id=convo.id,
-                system_prompt=WEB_SYSTEM_PROMPT,
-                model=settings.model,
-                tools=tools,
-            )
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield _sse_event("text", {"content": item})
+            # Re-raise any exception the agent task swallowed via its finally.
+            await task
+            await conversations.touch(db, convo.id)
+            yield _sse_event("done", {})
         except Exception as exc:  # noqa: BLE001 — surface to client, don't crash worker
             logger.warning("api_chat_agent_error", error=str(exc))
             yield _sse_event("error", {"message": str(exc)})
-            return
-        await conversations.touch(db, convo.id)
-        yield _sse_event("text", {"content": reply})
-        yield _sse_event("done", {})
+        finally:
+            # `finally` runs both on the error path AND on client disconnect.
+            # Disconnect raises asyncio.CancelledError (BaseException, not
+            # Exception) which would otherwise leak the background task and
+            # let it keep firing tools / writing to the DB after the client
+            # is gone. Cancel + drain — suppressing CancelledError because
+            # we already know it's done.
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

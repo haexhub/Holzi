@@ -387,6 +387,8 @@ Phase 6 added a deliberate scope decision: the Signal worker still calls `run_ag
 
 **Repo additions (minimal, idiomatic to the existing hand-SQL style):** `notes.list_all`, `notes.delete`, `todos.delete`, `reminders.delete`. A follow-up PR will migrate the entire repository layer to SQLAlchemy Core (async) — see "Repo-layer refactor (queued)" below.
 
+**Streaming follow-up (post-Phase-8).** `run_agent` gained an optional `on_chunk` callback in a follow-up branch: when set, the upstream call uses `stream=True` and every `delta.content` is forwarded incrementally. Tool-call deltas are still assembled across chunks (id/type/name first, function.arguments concatenated). `/api/chat` now bridges this via an `asyncio.Queue` and emits one SSE `text` event per upstream chunk — the frontend's `useChatStream` already concatenates multiple `text` events, so no client change was needed. The Signal worker / MCP keep using the non-streaming JSON path (`on_chunk=None`, full backward compat).
+
 ## 6.8 Repo-layer refactor (queued)
 
 After Phase 8 merges, the entire `hermes.repository` layer will move from hand-rolled `aiosqlite` SQL to **SQLAlchemy Core async** in a separate PR. Reason: Marko prefers a typed query builder (Drizzle-style) over plain SQL text. SQLAlchemy Core stays close to raw SQL (no ORM magic), supports SQLite + FTS5 (via `text()` / custom constructs for FTS), and is the most established async-capable option in Python. The migration is intentionally scope-isolated from Phase 8 to keep that PR a pure feature change.

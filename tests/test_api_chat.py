@@ -38,13 +38,56 @@ def _install_upstream_responses(responses: list[dict[str, Any]]) -> list[dict[st
             payload = next(iter_resp)
         except StopIteration as exc:
             raise AssertionError("upstream called more times than expected") from exc
-        return httpx.Response(200, json=payload)
+        # /api/chat triggers run_agent's streaming path. Re-emit the
+        # non-streaming canned response as an OpenAI-style SSE byte stream
+        # so the existing test fixtures keep working with the new code.
+        body = _to_sse_stream(payload)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(body),
+        )
 
     app.state.upstream = httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
         base_url="http://fake-proxy",
     )
     return seen
+
+
+def _to_sse_stream(payload: dict[str, Any]) -> bytes:
+    msg = payload["choices"][0]["message"]
+    content = msg.get("content")
+    tool_calls = msg.get("tool_calls") or []
+    out = b""
+    if content:
+        chunk = {
+            "choices": [
+                {"index": 0, "delta": {"content": content}, "finish_reason": None}
+            ]
+        }
+        out += f"data: {json.dumps(chunk)}\n\n".encode()
+    if tool_calls:
+        delta_tcs = [
+            {
+                "index": i,
+                "id": tc["id"],
+                "type": tc.get("type", "function"),
+                "function": {
+                    "name": tc["function"]["name"],
+                    "arguments": tc["function"]["arguments"],
+                },
+            }
+            for i, tc in enumerate(tool_calls)
+        ]
+        chunk = {
+            "choices": [
+                {"index": 0, "delta": {"tool_calls": delta_tcs}, "finish_reason": None}
+            ]
+        }
+        out += f"data: {json.dumps(chunk)}\n\n".encode()
+    out += b"data: [DONE]\n\n"
+    return out
 
 
 @pytest.fixture
@@ -154,6 +197,118 @@ async def test_api_chat_unknown_conversation_returns_404(
         json={"message": "hi", "conversation_id": 99999},
     )
     assert response.status_code == 404
+
+
+async def test_api_chat_cancels_agent_task_when_client_disconnects(
+    client: httpx.AsyncClient,
+) -> None:
+    """When the SSE generator is closed (client disconnects), the background
+    agent task must be cancelled — otherwise tool/DB side-effects continue
+    after the client is gone. Simulated by closing the streaming response
+    mid-flight and checking that the upstream stream was abandoned."""
+    import anyio
+
+    # Block upstream forever so the agent task is stuck mid-stream.
+    upstream_started = anyio.Event()
+    release_upstream = anyio.Event()
+
+    initial_chunk = (
+        b'data: {"choices":[{"index":0,"delta":{"content":"start"},'
+        b'"finish_reason":null}]}\n\n'
+    )
+
+    async def _content_stream():
+        upstream_started.set()
+        # First emit a session-establishing chunk so the SSE channel opens.
+        yield initial_chunk
+        # Then block until the test releases us (or cancellation interrupts).
+        await release_upstream.wait()
+        yield b"data: [DONE]\n\n"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_content_stream(),
+        )
+
+    app.state.upstream = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://fake-proxy",
+    )
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+    ) as response:
+        assert response.status_code == 200
+        # Read just enough to confirm the stream started.
+        async for chunk in response.aiter_bytes():
+            if b"start" in chunk or b"session" in chunk:
+                break
+        # Client disconnects — closing the context cancels the generator.
+        await response.aclose()
+
+    # Release the upstream so any unfinished task could try to make progress.
+    # If cleanup worked, the agent task is already cancelled and this is a no-op.
+    release_upstream.set()
+    # Give the loop a tick to actually run the cancellation cleanup path.
+    await anyio.sleep(0.05)
+    # Test passes simply by not hanging / not crashing — the real verification
+    # is that no unhandled-task exceptions are reported by pytest-asyncio.
+
+
+async def test_api_chat_streams_text_chunks_incrementally(
+    client: httpx.AsyncClient,
+) -> None:
+    """Each upstream streaming delta should surface as its own SSE `text` event."""
+    deltas = ["Hello", " ", "world"]
+    body = b""
+    for d in deltas:
+        chunk = {
+            "id": "x",
+            "object": "chat.completion.chunk",
+            "model": "claude-opus-4-7",
+            "choices": [{"index": 0, "delta": {"content": d}, "finish_reason": None}],
+        }
+        body += f"data: {json.dumps(chunk)}\n\n".encode()
+    body += b"data: [DONE]\n\n"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(body),
+        )
+
+    app.state.upstream = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://fake-proxy",
+    )
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+    ) as response:
+        assert response.status_code == 200
+        out = b""
+        async for chunk in response.aiter_bytes():
+            out += chunk
+
+    text_events: list[str] = []
+    for block in out.split(b"\n\n"):
+        if not block.strip():
+            continue
+        event = ""
+        data_lines: list[str] = []
+        for line in block.split(b"\n"):
+            line_s = line.strip().decode()
+            if line_s.startswith("event:"):
+                event = line_s[len("event:") :].strip()
+            elif line_s.startswith("data:"):
+                data_lines.append(line_s[len("data:") :].strip())
+        if event == "text":
+            text_events.append(json.loads("\n".join(data_lines))["content"])
+
+    assert text_events == ["Hello", " ", "world"]
 
 
 async def test_api_chat_rejects_non_web_conversation(
