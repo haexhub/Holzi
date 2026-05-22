@@ -226,13 +226,25 @@ def _get_note(db: aiosqlite.Connection) -> Tool:
 def _find_notes(db: aiosqlite.Connection) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         query = str(args.get("query", ""))
-        tags_arg = args.get("tags") or []
+        tags_arg = args.get("tags")
         limit = int(args.get("limit", 10))
+
+        # Accept tags as a list (canonical), a single string, or missing.
+        # Strings-of-characters-treated-as-iterable is a foot-gun; reject anything
+        # else with a tool-level error so the LLM sees a clear message.
+        if tags_arg is None or tags_arg == "":
+            normalized_tags: list[str] = []
+        elif isinstance(tags_arg, str):
+            normalized_tags = [tags_arg]
+        elif isinstance(tags_arg, list):
+            normalized_tags = [str(t) for t in tags_arg]
+        else:
+            return json.dumps({"error": "tags must be a string or array of strings"})
 
         hits = await notes.find(db, query=query, limit=limit)
 
-        if tags_arg:
-            required = {str(t) for t in tags_arg}
+        if normalized_tags:
+            required = {t.strip() for t in normalized_tags if t.strip()}
             filtered = [
                 n
                 for n in hits

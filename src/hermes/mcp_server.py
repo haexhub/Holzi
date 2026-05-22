@@ -15,7 +15,11 @@ SERVER_NAME = "hermes"
 def build_mcp_server(tools: list[Tool]) -> Server:
     """Construct a low-level MCP Server bound to the given Hermes tool catalog."""
     server: Server = Server(SERVER_NAME)
-    lookup = {t.name: t for t in tools}
+    lookup: dict[str, Tool] = {}
+    for t in tools:
+        if t.name in lookup:
+            raise ValueError(f"duplicate tool name in MCP catalog: {t.name!r}")
+        lookup[t.name] = t
 
     @server.list_tools()
     async def _list_tools() -> list[types.Tool]:
@@ -33,7 +37,18 @@ def build_mcp_server(tools: list[Tool]) -> Server:
         tool = lookup.get(name)
         if tool is None:
             return [types.TextContent(type="text", text=f"error: unknown tool {name!r}")]
-        result = await tool.handler(arguments or {})
+        if arguments is None:
+            safe_args: dict[str, Any] = {}
+        elif not isinstance(arguments, dict):
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"error: arguments for tool {name!r} must be a JSON object",
+                )
+            ]
+        else:
+            safe_args = arguments
+        result = await tool.handler(safe_args)
         return [types.TextContent(type="text", text=result)]
 
     return server

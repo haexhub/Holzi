@@ -73,13 +73,13 @@ async def test_list_all_can_filter_by_channel_and_since(
 ) -> None:
     a = await conversations.create(conn, channel="signal", ts=1000)
     b = await conversations.create(conn, channel="signal", ts=3000)
-    await conversations.create(conn, channel="web", ts=2500)
+    web = await conversations.create(conn, channel="web", ts=2500)
 
     only_signal = await conversations.list_all(conn, channel="signal")
     assert {c.id for c in only_signal} == {a.id, b.id}
 
     recent = await conversations.list_all(conn, since_unix=2500)
-    assert {c.id for c in recent} == {b.id} | {c.id for c in recent if c.channel == "web"}
+    assert {c.id for c in recent} == {b.id, web.id}
 
 
 async def test_message_count_returns_zero_for_empty_conversation(

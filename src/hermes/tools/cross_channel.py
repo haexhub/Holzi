@@ -36,6 +36,10 @@ def _cross_channel_send(
         if signal_client is None or not self_number:
             return json.dumps({"error": "signal is not configured on this hermes instance"})
 
+        # Send first — if signal-cli rejects the call, leave the DB untouched
+        # so the conversation log never claims a delivery that didn't happen.
+        await signal_client.send(recipient=self_number, message=message)
+
         now = int(time.time())
         latest = await conversations.list_by_channel(db, "signal", limit=1)
         if latest and now - latest[0].updated_at < SIGNAL_CONVO_GAP_SECONDS:
@@ -46,7 +50,6 @@ def _cross_channel_send(
         await messages.append(
             db, conversation_id=convo.id, role="assistant", content=message, ts=now
         )
-        await signal_client.send(recipient=self_number, message=message)
         await conversations.touch(db, convo.id, ts=now)
 
         return json.dumps({"sent": True, "channel": "signal", "conversation_id": convo.id})

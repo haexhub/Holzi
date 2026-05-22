@@ -147,3 +147,75 @@ async def test_mcp_endpoint_lists_tools_via_jsonrpc(
     tool_names = {t["name"] for t in body["result"]["tools"]}
     assert "recall_memory" in tool_names
     assert "cross_channel_send" in tool_names
+
+
+# ---------------------------------------------------------------------------
+# Tool-catalog hygiene + arguments validation
+# ---------------------------------------------------------------------------
+def test_build_mcp_server_rejects_duplicate_tool_names() -> None:
+    duplicate = Tool(
+        name="echo",
+        description="duplicate",
+        parameters_schema={"type": "object", "properties": {}},
+        handler=_echo_handler,
+    )
+    with pytest.raises(ValueError, match="duplicate tool name"):
+        build_mcp_server([_ECHO_TOOL, duplicate])
+
+
+async def test_mcp_endpoint_rejects_non_object_arguments(
+    client: httpx.AsyncClient,
+) -> None:
+    init_response = await client.post(
+        "/mcp/",
+        headers={**AUTH, "Accept": "application/json, text/event-stream"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "0.0.0"},
+            },
+        },
+    )
+    assert init_response.status_code == 200
+    session_id = init_response.headers.get("mcp-session-id") or ""
+    await client.post(
+        "/mcp/",
+        headers={
+            **AUTH,
+            "Accept": "application/json, text/event-stream",
+            "mcp-session-id": session_id,
+        },
+        json={
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        },
+    )
+
+    call_response = await client.post(
+        "/mcp/",
+        headers={
+            **AUTH,
+            "Accept": "application/json, text/event-stream",
+            "mcp-session-id": session_id,
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "get_note", "arguments": "not-an-object"},
+        },
+    )
+    # MCP protocol surfaces this as a tool-level error in the response content,
+    # not as a transport-level failure.
+    body = call_response.json()
+    if "result" in body:
+        text = body["result"]["content"][0]["text"]
+        assert "must be a JSON object" in text
+    else:
+        # Some MCP versions reject malformed arguments at the protocol layer.
+        assert "error" in body

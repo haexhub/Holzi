@@ -105,3 +105,32 @@ async def test_cross_channel_send_creates_new_conversation_when_gap_exceeds_6h(
 
     convos = await conversations.list_by_channel(conn, "signal")
     assert len(convos) == 2
+
+
+async def test_cross_channel_send_does_not_persist_when_signal_send_fails(
+    conn: aiosqlite.Connection,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/send":
+            return httpx.Response(500, json={"error": "signal-cli down"})
+        return httpx.Response(200, json=[])
+
+    transport = httpx.MockTransport(handler)
+    http = httpx.AsyncClient(transport=transport, base_url="http://fake-signal")
+    failing_client = SignalClient(http, SELF_NUMBER)
+
+    tools = build_cross_channel_tools(conn, failing_client, SELF_NUMBER)
+    tool = _by_name(tools, "cross_channel_send")
+
+    import httpx as _httpx
+
+    try:
+        await tool.handler({"channel": "signal", "message": "won't arrive"})
+        raised = False
+    except _httpx.HTTPStatusError:
+        raised = True
+    assert raised, "expected signal_client.send to raise"
+
+    # No conversation should have been touched because the send failed first.
+    convos = await conversations.list_by_channel(conn, "signal")
+    assert convos == []

@@ -80,18 +80,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.signal_number or None,
     )
 
-    async with mcp_session_manager(app.state.tool_catalog) as mcp_mgr:
-        app.state.mcp_manager = mcp_mgr
-        try:
+    try:
+        async with mcp_session_manager(app.state.tool_catalog) as mcp_mgr:
+            app.state.mcp_manager = mcp_mgr
             yield
-        finally:
-            if app.state.signal_worker is not None:
-                await app.state.signal_worker.stop()
-            if app.state.signal_http is not None:
-                await app.state.signal_http.aclose()
-            await app.state.upstream.aclose()
-            await app.state.db.close()
-            logger.info("hermes_stopping")
+    finally:
+        if app.state.signal_worker is not None:
+            await app.state.signal_worker.stop()
+        if app.state.signal_http is not None:
+            await app.state.signal_http.aclose()
+        await app.state.upstream.aclose()
+        await app.state.db.close()
+        logger.info("hermes_stopping")
 
 
 app = FastAPI(title="Hermes", version=__version__, lifespan=lifespan)
