@@ -3,8 +3,9 @@ from contextlib import asynccontextmanager
 
 import aiosqlite
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import Receive, Scope, Send
 
 from hermes import __version__
 from hermes.agent import run_agent
@@ -12,9 +13,12 @@ from hermes.auth import bearer_auth_middleware
 from hermes.config import settings
 from hermes.db import init_db
 from hermes.logging import configure_logging, logger
+from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.routes.chat import router as chat_router
 from hermes.signal.client import SignalClient
 from hermes.signal.worker import SignalWorker
+from hermes.tools.cross_channel import build_cross_channel_tools
+from hermes.tools.memory import build_memory_tools
 
 configure_logging()
 
@@ -44,10 +48,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.upstream = build_upstream_client(settings.llm_url, settings.llm_api_key)
     app.state.signal_http = None
     app.state.signal_worker = None
+    signal_client_for_tools: SignalClient | None = None
 
     if settings.signal_number:
         app.state.signal_http = httpx.AsyncClient(base_url=settings.signal_url, timeout=60.0)
-        signal_client = SignalClient(app.state.signal_http, settings.signal_number)
+        signal_client_for_tools = SignalClient(app.state.signal_http, settings.signal_number)
 
         async def signal_agent_runner(
             db: aiosqlite.Connection, conversation_id: int
@@ -61,15 +66,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
 
         app.state.signal_worker = SignalWorker(
-            signal_client,
+            signal_client_for_tools,
             app.state.db,
             settings.signal_number,
             agent_runner=signal_agent_runner,
         )
         await app.state.signal_worker.start()
 
+    # Tool catalog: shared between MCP exposure and (later) the internal agent.
+    app.state.tool_catalog = build_memory_tools(app.state.db) + build_cross_channel_tools(
+        app.state.db,
+        signal_client_for_tools,
+        settings.signal_number or None,
+    )
+
     try:
-        yield
+        async with mcp_session_manager(app.state.tool_catalog) as mcp_mgr:
+            app.state.mcp_manager = mcp_mgr
+            yield
     finally:
         if app.state.signal_worker is not None:
             await app.state.signal_worker.stop()
@@ -93,3 +107,15 @@ def healthz() -> dict[str, str]:
 @app.get("/api/ping")
 def ping() -> dict[str, bool]:
     return {"pong": True}
+
+
+@app.get("/mcp/manifest")
+def mcp_manifest(request: Request) -> dict:
+    return tool_manifest(request.app.state.tool_catalog)
+
+
+async def _mcp_endpoint(scope: Scope, receive: Receive, send: Send) -> None:
+    await app.state.mcp_manager.handle_request(scope, receive, send)
+
+
+app.mount("/mcp", _mcp_endpoint)

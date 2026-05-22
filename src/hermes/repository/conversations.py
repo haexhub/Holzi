@@ -69,6 +69,44 @@ async def list_by_channel(
     return [_row_to_conversation(r) for r in rows]
 
 
+async def list_all(
+    conn: aiosqlite.Connection,
+    *,
+    channel: str | None = None,
+    since_unix: int | None = None,
+    limit: int = 20,
+) -> list[Conversation]:
+    """List conversations across all channels, optionally filtered."""
+    sql = (
+        "SELECT id, channel, external_id, title, started_at, updated_at FROM conversations"
+    )
+    clauses: list[str] = []
+    params: list[object] = []
+    if channel is not None:
+        clauses.append("channel = ?")
+        params.append(channel)
+    if since_unix is not None:
+        clauses.append("updated_at >= ?")
+        params.append(since_unix)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY updated_at DESC LIMIT ?"
+    params.append(limit)
+
+    async with conn.execute(sql, tuple(params)) as cursor:
+        rows = await cursor.fetchall()
+    return [_row_to_conversation(r) for r in rows]
+
+
+async def message_count(conn: aiosqlite.Connection, conversation_id: int) -> int:
+    async with conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
+        (conversation_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
 async def touch(
     conn: aiosqlite.Connection,
     conversation_id: int,
