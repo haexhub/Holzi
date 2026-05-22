@@ -49,6 +49,26 @@ async def get(conn: aiosqlite.Connection, key: str) -> Note | None:
     return _row_to_note(row) if row is not None else None
 
 
+async def list_all(
+    conn: aiosqlite.Connection,
+    *,
+    limit: int = 100,
+) -> list[Note]:
+    async with conn.execute(
+        "SELECT id, key, content, tags, updated_at FROM notes "
+        "ORDER BY updated_at DESC LIMIT ?",
+        (limit,),
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return [_row_to_note(r) for r in rows]
+
+
+async def delete(conn: aiosqlite.Connection, key: str) -> bool:
+    cursor = await conn.execute("DELETE FROM notes WHERE key = ?", (key,))
+    await conn.commit()
+    return cursor.rowcount > 0
+
+
 async def find(
     conn: aiosqlite.Connection,
     *,

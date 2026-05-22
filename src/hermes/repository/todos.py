@@ -87,3 +87,9 @@ async def mark_done(
     )
     await conn.commit()
     return cursor.rowcount > 0
+
+
+async def delete(conn: aiosqlite.Connection, todo_id: int) -> bool:
+    cursor = await conn.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
+    await conn.commit()
+    return cursor.rowcount > 0

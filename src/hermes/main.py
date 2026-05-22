@@ -14,14 +14,12 @@ from hermes.config import settings
 from hermes.db import init_db
 from hermes.logging import configure_logging, logger
 from hermes.mcp_server import mcp_session_manager, tool_manifest
+from hermes.routes.api import router as api_router
 from hermes.routes.chat import router as chat_router
 from hermes.scheduler import ReminderScheduler
 from hermes.signal.client import SignalClient
 from hermes.signal.worker import SignalWorker
-from hermes.tools.cross_channel import build_cross_channel_tools
-from hermes.tools.external import build_external_tools
-from hermes.tools.memory import build_memory_tools
-from hermes.tools.productivity import build_productivity_tools
+from hermes.tool_catalog import build_tool_catalog
 
 configure_logging()
 
@@ -50,11 +48,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.db = None
     app.state.upstream = None
     app.state.signal_http = None
+    app.state.signal_client = None
+    app.state.signal_self_number = None
     app.state.signal_worker = None
     app.state.external_http = None
+    app.state.brave_api_key = None
     app.state.scheduler = None
     app.state.tool_catalog = []
-    signal_client_for_tools: SignalClient | None = None
 
     try:
         app.state.db = await init_db(settings.db_path)
@@ -62,7 +62,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         if settings.signal_number:
             app.state.signal_http = httpx.AsyncClient(base_url=settings.signal_url, timeout=60.0)
-            signal_client_for_tools = SignalClient(app.state.signal_http, settings.signal_number)
+            app.state.signal_client = SignalClient(app.state.signal_http, settings.signal_number)
+            app.state.signal_self_number = settings.signal_number
 
             async def signal_agent_runner(
                 db: aiosqlite.Connection, conversation_id: int
@@ -76,7 +77,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
 
             app.state.signal_worker = SignalWorker(
-                signal_client_for_tools,
+                app.state.signal_client,
                 app.state.db,
                 settings.signal_number,
                 agent_runner=signal_agent_runner,
@@ -84,25 +85,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.signal_worker.start()
 
         app.state.external_http = httpx.AsyncClient(timeout=20.0)
+        app.state.brave_api_key = settings.brave_api_key or None
 
-        app.state.tool_catalog = (
-            build_memory_tools(app.state.db)
-            + build_cross_channel_tools(
-                app.state.db,
-                signal_client_for_tools,
-                settings.signal_number or None,
-            )
-            + build_productivity_tools(app.state.db)
-            + build_external_tools(
-                app.state.external_http,
-                settings.brave_api_key or None,
-            )
+        # MCP and the /mcp/manifest surface use a current_channel=None catalog
+        # — external callers (Cline, HaexChat) don't carry a single
+        # "current channel" notion. /api/chat rebuilds per request with
+        # current_channel="web" via build_tool_catalog() for the recursion
+        # guard.
+        app.state.tool_catalog = build_tool_catalog(
+            db=app.state.db,
+            signal_client=app.state.signal_client,
+            signal_self_number=app.state.signal_self_number,
+            external_http=app.state.external_http,
+            brave_api_key=app.state.brave_api_key,
+            current_channel=None,
         )
 
         app.state.scheduler = ReminderScheduler(
             app.state.db,
-            signal_client_for_tools,
-            settings.signal_number or None,
+            app.state.signal_client,
+            app.state.signal_self_number,
         )
         await app.state.scheduler.start()
 
@@ -128,6 +130,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Hermes", version=__version__, lifespan=lifespan)
 app.add_middleware(BaseHTTPMiddleware, dispatch=bearer_auth_middleware)
 app.include_router(chat_router)
+app.include_router(api_router)
 
 
 @app.get("/healthz")

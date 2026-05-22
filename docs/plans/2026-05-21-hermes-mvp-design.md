@@ -364,14 +364,27 @@ Hermes connects as an MCP client (configured via `HERMES_EXTERNAL_MCP`). When th
 | 4 — Signal worker | #3 | ✅ on main |
 | 5 — agent loop (+ LLM provider flexibility) | #4 | ✅ on main |
 | 6 — MCP server + 7 tools | #5 | ✅ on main |
-| 7 — productivity/external tools + scheduler | #6 | ⏳ open, awaiting CodeRabbit re-review after rate-limit reset |
-| 8 — web-UI backend (`/api/chat`) | — | ⏭ next |
+| 7 — productivity/external tools + scheduler | #6 | ✅ on main |
+| 8 — web-UI backend (`/api/*`, recursion guard) | TBD | ⏳ open on `phase-8-web-ui-backend` |
 | 9 — Nuxt frontend | — | ⏭ |
 | 10 — production deploy | — | ⏭ |
 
 **Important deviation from the original plan.** Phase 5 also delivered the *LLM-provider-flexibility* change: `HERMES_PROXY_URL` became `HERMES_LLM_URL` and `HERMES_LLM_API_KEY` was added so the upstream can be any OpenAI-compatible endpoint, not only `haex-claude-proxy`. The renaming is reflected in `.env.example`, `docker-compose.yml`, and the README provider table.
 
-Phase 6 added a deliberate scope decision: the Signal worker still calls `run_agent` with `tools=None`, even though the tool catalogue now exists. The Phase 8 web-UI backend will be the first internal caller that hands the catalogue to the agent loop, avoiding the obvious `cross_channel_send`-from-Signal-conversation recursion risk until we have a guard for it.
+Phase 6 added a deliberate scope decision: the Signal worker still calls `run_agent` with `tools=None`, even though the tool catalogue now exists. Phase 8 is the first internal caller that hands the catalogue to the agent loop — via the new `/api/chat` endpoint. The catalog is built per request with `current_channel="web"` (see `hermes.tool_catalog.build_tool_catalog`); `cross_channel_send` refuses to write back to the channel that produced the request (recursion guard). The Signal worker is intentionally **not** switched over in this phase and stays at `tools=None` until we revisit it.
+
+**Phase 8 surfaces shipped.**
+- `POST /api/chat` — JSON in (`message`, optional `conversation_id`), SSE out with `session` / `text` / `done` events. Runs the full agent loop with the Hermes tool catalog scoped to `current_channel="web"`.
+- `GET /api/conversations`, `GET /api/conversations/{id}` — list + detail with messages.
+- `GET/POST/PUT/DELETE /api/notes` (+ `GET /api/notes/{key}`) — REST CRUD over the notes repo.
+- `GET/POST/PATCH/DELETE /api/todos` — REST CRUD; PATCH only supports `{"done": true}` (mark as completed).
+- `GET/POST/DELETE /api/reminders` — REST CRUD.
+
+**Repo additions (minimal, idiomatic to the existing hand-SQL style):** `notes.list_all`, `notes.delete`, `todos.delete`, `reminders.delete`. A follow-up PR will migrate the entire repository layer to SQLAlchemy Core (async) — see "Repo-layer refactor (queued)" below.
+
+## 6.8 Repo-layer refactor (queued)
+
+After Phase 8 merges, the entire `hermes.repository` layer will move from hand-rolled `aiosqlite` SQL to **SQLAlchemy Core async** in a separate PR. Reason: Marko prefers a typed query builder (Drizzle-style) over plain SQL text. SQLAlchemy Core stays close to raw SQL (no ORM magic), supports SQLite + FTS5 (via `text()` / custom constructs for FTS), and is the most established async-capable option in Python. The migration is intentionally scope-isolated from Phase 8 to keep that PR a pure feature change.
 
 ## 7. Out of scope (defer until after MVP works)
 
