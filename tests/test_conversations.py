@@ -55,3 +55,50 @@ async def test_touch_updates_updated_at_only(conn: aiosqlite.Connection) -> None
     assert fetched is not None
     assert fetched.started_at == 1000
     assert fetched.updated_at == 2500
+
+
+async def test_list_all_returns_every_channel_in_updated_desc(
+    conn: aiosqlite.Connection,
+) -> None:
+    a = await conversations.create(conn, channel="signal", ts=1000)
+    b = await conversations.create(conn, channel="web", ts=3000)
+    c = await conversations.create(conn, channel="vscode", ts=2000)
+
+    all_convos = await conversations.list_all(conn)
+    assert [x.id for x in all_convos] == [b.id, c.id, a.id]
+
+
+async def test_list_all_can_filter_by_channel_and_since(
+    conn: aiosqlite.Connection,
+) -> None:
+    a = await conversations.create(conn, channel="signal", ts=1000)
+    b = await conversations.create(conn, channel="signal", ts=3000)
+    await conversations.create(conn, channel="web", ts=2500)
+
+    only_signal = await conversations.list_all(conn, channel="signal")
+    assert {c.id for c in only_signal} == {a.id, b.id}
+
+    recent = await conversations.list_all(conn, since_unix=2500)
+    assert {c.id for c in recent} == {b.id} | {c.id for c in recent if c.channel == "web"}
+
+
+async def test_message_count_returns_zero_for_empty_conversation(
+    conn: aiosqlite.Connection,
+) -> None:
+    convo = await conversations.create(conn, channel="signal", ts=1000)
+    assert await conversations.message_count(conn, convo.id) == 0
+
+
+async def test_message_count_counts_only_target_conversation(
+    conn: aiosqlite.Connection,
+) -> None:
+    from hermes.repository import messages
+
+    a = await conversations.create(conn, channel="signal", ts=1)
+    b = await conversations.create(conn, channel="web", ts=2)
+    await messages.append(conn, conversation_id=a.id, role="user", content="x", ts=10)
+    await messages.append(conn, conversation_id=a.id, role="assistant", content="y", ts=11)
+    await messages.append(conn, conversation_id=b.id, role="user", content="z", ts=12)
+
+    assert await conversations.message_count(conn, a.id) == 2
+    assert await conversations.message_count(conn, b.id) == 1
