@@ -1,7 +1,7 @@
 import time
 
 from sqlalchemy import desc, func, select
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository.models import Conversation
 from hermes.schema import conversations as t_conversations
@@ -20,7 +20,7 @@ def _row_to_conversation(row) -> Conversation:
 
 
 async def create(
-    conn: AsyncConnection,
+    engine: AsyncEngine,
     *,
     channel: str,
     external_id: str | None = None,
@@ -28,19 +28,19 @@ async def create(
     ts: int | None = None,
 ) -> Conversation:
     now = ts if ts is not None else int(time.time())
-    result = await conn.execute(
-        t_conversations.insert()
-        .values(
-            channel=channel,
-            external_id=external_id,
-            title=title,
-            started_at=now,
-            updated_at=now,
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            t_conversations.insert()
+            .values(
+                channel=channel,
+                external_id=external_id,
+                title=title,
+                started_at=now,
+                updated_at=now,
+            )
+            .returning(t_conversations.c.id)
         )
-        .returning(t_conversations.c.id)
-    )
-    await conn.commit()
-    row = result.first()
+        row = result.first()
     if row is None:
         raise RuntimeError("INSERT into conversations did not yield a rowid")
     return Conversation(
@@ -53,31 +53,34 @@ async def create(
     )
 
 
-async def get(conn: AsyncConnection, conversation_id: int) -> Conversation | None:
-    result = await conn.execute(
-        select(t_conversations).where(t_conversations.c.id == conversation_id)
-    )
-    row = result.first()
+async def get(engine: AsyncEngine, conversation_id: int) -> Conversation | None:
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            select(t_conversations).where(t_conversations.c.id == conversation_id)
+        )
+        row = result.first()
     return _row_to_conversation(row) if row is not None else None
 
 
 async def list_by_channel(
-    conn: AsyncConnection,
+    engine: AsyncEngine,
     channel: str,
     *,
     limit: int = 20,
 ) -> list[Conversation]:
-    result = await conn.execute(
-        select(t_conversations)
-        .where(t_conversations.c.channel == channel)
-        .order_by(desc(t_conversations.c.updated_at))
-        .limit(limit)
-    )
-    return [_row_to_conversation(r) for r in result]
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            select(t_conversations)
+            .where(t_conversations.c.channel == channel)
+            .order_by(desc(t_conversations.c.updated_at))
+            .limit(limit)
+        )
+        rows = result.all()
+    return [_row_to_conversation(r) for r in rows]
 
 
 async def list_all(
-    conn: AsyncConnection,
+    engine: AsyncEngine,
     *,
     channel: str | None = None,
     since_unix: int | None = None,
@@ -91,30 +94,33 @@ async def list_all(
         stmt = stmt.where(t_conversations.c.updated_at >= since_unix)
     stmt = stmt.order_by(desc(t_conversations.c.updated_at)).limit(limit)
 
-    result = await conn.execute(stmt)
-    return [_row_to_conversation(r) for r in result]
+    async with engine.connect() as conn:
+        result = await conn.execute(stmt)
+        rows = result.all()
+    return [_row_to_conversation(r) for r in rows]
 
 
-async def message_count(conn: AsyncConnection, conversation_id: int) -> int:
-    result = await conn.execute(
-        select(func.count())
-        .select_from(t_messages)
-        .where(t_messages.c.conversation_id == conversation_id)
-    )
-    row = result.first()
+async def message_count(engine: AsyncEngine, conversation_id: int) -> int:
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            select(func.count())
+            .select_from(t_messages)
+            .where(t_messages.c.conversation_id == conversation_id)
+        )
+        row = result.first()
     return int(row[0]) if row else 0
 
 
 async def touch(
-    conn: AsyncConnection,
+    engine: AsyncEngine,
     conversation_id: int,
     *,
     ts: int | None = None,
 ) -> None:
     now = ts if ts is not None else int(time.time())
-    await conn.execute(
-        t_conversations.update()
-        .where(t_conversations.c.id == conversation_id)
-        .values(updated_at=now)
-    )
-    await conn.commit()
+    async with engine.begin() as conn:
+        await conn.execute(
+            t_conversations.update()
+            .where(t_conversations.c.id == conversation_id)
+            .values(updated_at=now)
+        )

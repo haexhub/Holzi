@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository import messages
 
@@ -24,7 +24,7 @@ class Tool:
 async def run_agent(
     *,
     upstream: httpx.AsyncClient,
-    db: AsyncConnection,
+    db: AsyncEngine,
     conversation_id: int,
     system_prompt: str,
     model: str,

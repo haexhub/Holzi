@@ -1,72 +1,94 @@
 """Database bootstrap.
 
-Owns the single long-lived `AsyncConnection` that the rest of the app
-uses for queries. We keep a single connection (not a pool) because the
-app is single-user with low concurrency — pool overhead would buy
-nothing.
+Owns the single `AsyncEngine` for the app. Consumers (route handlers,
+scheduler tick, signal worker) open their own short-lived
+`AsyncConnection` via `engine.begin()` so that each logical operation
+sits in its own transaction. Sharing a single long-lived connection
+across concurrent tasks is unsafe per SQLAlchemy's ownership model —
+two coroutines committing on the same connection would race.
 
 Schema lives in two places:
 - `schema.py` — SQLAlchemy Core `Table` definitions for the regular
-  tables (conversations, messages, notes, reminders, todos). Applied via
-  `metadata.create_all()`.
+  tables. Applied via `metadata.create_all()`.
 - `schema.sql` — SQLite-specific bits SQLAlchemy doesn't model: FTS5
-  virtual tables and the triggers that keep them in sync with the
-  content tables. Applied as raw SQL after the metadata create.
+  virtual tables, sync triggers, the partial reminders index. Applied
+  as raw SQL after the metadata create.
 """
 from importlib.resources import files
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from sqlalchemy import event, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from hermes.schema import metadata
 
-# Read raw FTS5 schema (virtual tables + triggers + the partial index for
-# pending reminders) — these are SQLite-specific and not modelled in
-# `schema.py`.
 _FTS_SCHEMA_SQL = files("hermes").joinpath("schema.sql").read_text(encoding="utf-8")
 
 
-async def init_db(path: str) -> AsyncConnection:
-    """Open an AsyncConnection, apply schema, return it.
+@event.listens_for(Engine, "connect")
+def _sqlite_set_pragmas(dbapi_connection, _record) -> None:
+    """Apply per-connection SQLite PRAGMAs on every pool checkout.
+
+    `PRAGMA foreign_keys` is per-connection, not per-database — without
+    this every new connection from the pool would silently disable FK
+    enforcement and lose the integrity guarantees the schema relies on.
+    """
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
+
+
+async def init_db(path: str) -> AsyncEngine:
+    """Open an `AsyncEngine`, apply schema, return it.
 
     Re-running against an existing DB is safe — `metadata.create_all`
-    issues `CREATE TABLE IF NOT EXISTS` and the FTS5 schema in
-    `schema.sql` is also idempotent.
+    issues `CREATE TABLE IF NOT EXISTS` and the FTS5 schema is also
+    idempotent.
+
+    Callers acquire connections via `async with engine.begin() as conn:`
+    (auto-commits on success, rolls back on exception) for writes, or
+    `engine.connect()` for read-only operations.
     """
-    url = (
-        "sqlite+aiosqlite:///:memory:"
-        if path == ":memory:"
-        else f"sqlite+aiosqlite:///{path}"
-    )
-    engine = create_async_engine(url)
-    conn = await engine.connect()
+    if path == ":memory:":
+        # `:memory:` databases are per-connection by default — every new
+        # checkout from the pool would open a fresh empty DB. StaticPool
+        # plus check_same_thread=False keeps a single shared in-memory DB
+        # alive for the lifetime of the engine. **Warning**: StaticPool
+        # serialises every operation through one connection, so any
+        # concurrent caller (e.g. the reminder scheduler running in
+        # parallel with a request) will race on transaction state. Use
+        # file-based paths for anything beyond toy/scripts; the test
+        # suite explicitly switches to tmp_path SQLite files for this
+        # reason.
+        engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+    else:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     try:
-        await conn.execute(text("PRAGMA foreign_keys = ON"))
-        if path != ":memory:":
-            await conn.execute(text("PRAGMA journal_mode = WAL"))
-        # Managed-table DDL via SQLAlchemy.
-        await conn.run_sync(metadata.create_all)
-        # FTS5 virtual tables + triggers via raw SQL.
-        for stmt in _split_statements(_FTS_SCHEMA_SQL):
-            await conn.execute(text(stmt))
-        await conn.commit()
+        async with engine.begin() as conn:
+            if path != ":memory:":
+                # journal_mode is per-DB and persists in the file; one-time
+                # set is enough. foreign_keys is per-connection — handled
+                # by the global connect listener above.
+                await conn.execute(text("PRAGMA journal_mode = WAL"))
+            await conn.run_sync(metadata.create_all)
+            for stmt in _split_statements(_FTS_SCHEMA_SQL):
+                await conn.execute(text(stmt))
     except BaseException:
-        await conn.close()
         await engine.dispose()
         raise
-    # SQLAlchemy's connection holds a reference to the engine via
-    # `conn.sync_engine`; close() will dispose, so we don't need to track
-    # the engine separately.
-    return conn
+    return engine
 
 
 def _split_statements(sql: str) -> list[str]:
     """Split a SQL script into individual statements, respecting BEGIN/END
     blocks (which contain semicolons of their own — used by FTS5 triggers).
-
-    The parser is intentionally tiny: it only handles what `schema.sql`
-    actually contains. Strip comments and blank lines, then track whether
-    we're inside a `BEGIN ... END;` block.
     """
     statements: list[str] = []
     buf: list[str] = []
@@ -91,5 +113,4 @@ def _split_statements(sql: str) -> list[str]:
             buf = []
     if buf:
         statements.append(" ".join(buf))
-    # Drop the trailing semicolon since SQLAlchemy's `text()` doesn't need it.
     return [s.rstrip(";").strip() for s in statements if s.strip(";").strip()]

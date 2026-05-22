@@ -2,7 +2,7 @@ import json
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import Tool, run_agent
 from hermes.repository import conversations, messages
@@ -70,7 +70,7 @@ def _mock_upstream(handler) -> httpx.AsyncClient:
 
 
 async def test_run_agent_with_on_chunk_streams_each_text_delta(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, channel="web", ts=1000)
     await messages.append(
@@ -102,7 +102,7 @@ async def test_run_agent_with_on_chunk_streams_each_text_delta(
 
 
 async def test_run_agent_with_on_chunk_sets_stream_true_on_upstream(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, channel="web", ts=1000)
     await messages.append(
@@ -136,7 +136,7 @@ async def test_run_agent_with_on_chunk_sets_stream_true_on_upstream(
 
 
 async def test_run_agent_streaming_handles_tool_call_round(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, channel="web", ts=1000)
     await messages.append(
@@ -209,7 +209,7 @@ async def test_run_agent_streaming_handles_tool_call_round(
 
 
 async def test_run_agent_streaming_raises_on_truncated_stream(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     """If the upstream connection drops before [DONE], the partial text must
     not be silently persisted as a completed assistant turn."""
@@ -254,7 +254,7 @@ async def test_run_agent_streaming_raises_on_truncated_stream(
 
 
 async def test_run_agent_streaming_accepts_finish_reason_as_terminal(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     """Some providers don't emit `[DONE]` but do set finish_reason on the
     last chunk — that should also count as a clean completion."""
@@ -292,7 +292,7 @@ async def test_run_agent_streaming_accepts_finish_reason_as_terminal(
 
 
 async def test_run_agent_without_on_chunk_stays_non_streaming(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     """Backwards-compat: callers without on_chunk (Signal worker, MCP, tests)
     keep getting the JSON-response path."""

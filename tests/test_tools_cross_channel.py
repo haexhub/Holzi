@@ -3,7 +3,7 @@ import time
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository import conversations, messages
 from hermes.signal.client import SignalClient
@@ -33,7 +33,7 @@ def _by_name(tools, name):
 
 
 async def test_cross_channel_send_unsupported_channel_returns_error(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     tools = build_cross_channel_tools(conn, _make_signal_client(), SELF_NUMBER)
     tool = _by_name(tools, "cross_channel_send")
@@ -42,7 +42,7 @@ async def test_cross_channel_send_unsupported_channel_returns_error(
 
 
 async def test_cross_channel_send_signal_not_configured_returns_error(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     tools = build_cross_channel_tools(conn, None, None)
     tool = _by_name(tools, "cross_channel_send")
@@ -52,7 +52,7 @@ async def test_cross_channel_send_signal_not_configured_returns_error(
 
 
 async def test_cross_channel_send_signal_persists_and_sends(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     sends: list[dict[str, Any]] = []
     tools = build_cross_channel_tools(conn, _make_signal_client(sends), SELF_NUMBER)
@@ -76,7 +76,7 @@ async def test_cross_channel_send_signal_persists_and_sends(
 
 
 async def test_cross_channel_send_reuses_recent_conversation(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     one_hour_ago = int(time.time()) - 3600
     existing = await conversations.create(conn, channel="signal", ts=one_hour_ago)
@@ -92,7 +92,7 @@ async def test_cross_channel_send_reuses_recent_conversation(
 
 
 async def test_cross_channel_send_creates_new_conversation_when_gap_exceeds_6h(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     seven_hours_ago = int(time.time()) - 7 * 3600
     existing = await conversations.create(conn, channel="signal", ts=seven_hours_ago)
@@ -108,7 +108,7 @@ async def test_cross_channel_send_creates_new_conversation_when_gap_exceeds_6h(
 
 
 async def test_cross_channel_send_refuses_when_current_channel_matches(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     """Recursion guard: agent running on channel X cannot write back to X."""
     tools = build_cross_channel_tools(
@@ -126,7 +126,7 @@ async def test_cross_channel_send_refuses_when_current_channel_matches(
 
 
 async def test_cross_channel_send_allows_different_current_channel(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     tools = build_cross_channel_tools(
         conn, _make_signal_client(), SELF_NUMBER, current_channel="web"
@@ -138,7 +138,7 @@ async def test_cross_channel_send_allows_different_current_channel(
 
 
 async def test_cross_channel_send_does_not_persist_when_signal_send_fails(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v2/send":

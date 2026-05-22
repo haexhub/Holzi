@@ -1,5 +1,5 @@
 import httpx
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import Tool
 from hermes.signal.client import SignalClient
@@ -11,7 +11,7 @@ from hermes.tools.productivity import build_productivity_tools
 
 def build_tool_catalog(
     *,
-    db: AsyncConnection,
+    db: AsyncEngine,
     signal_client: SignalClient | None,
     signal_self_number: str | None,
     external_http: httpx.AsyncClient | None,

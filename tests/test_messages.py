@@ -1,17 +1,17 @@
 import pytest
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository import conversations, messages
 
 
 @pytest.fixture
-async def convo_id(conn: AsyncConnection) -> int:
+async def convo_id(conn: AsyncEngine) -> int:
     convo = await conversations.create(conn, channel="signal", ts=1000)
     return convo.id
 
 
 async def test_append_returns_message_with_id_and_fields(
-    conn: AsyncConnection, convo_id: int
+    conn: AsyncEngine, convo_id: int
 ) -> None:
     msg = await messages.append(
         conn,
@@ -29,7 +29,7 @@ async def test_append_returns_message_with_id_and_fields(
 
 
 async def test_list_by_conversation_returns_messages_in_chronological_order(
-    conn: AsyncConnection, convo_id: int
+    conn: AsyncEngine, convo_id: int
 ) -> None:
     a = await messages.append(conn, conversation_id=convo_id, role="user", content="first", ts=10)
     b = await messages.append(
@@ -42,7 +42,7 @@ async def test_list_by_conversation_returns_messages_in_chronological_order(
 
 
 async def test_list_by_conversation_does_not_leak_other_conversations(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     convo_a = await conversations.create(conn, channel="signal", ts=1)
     convo_b = await conversations.create(conn, channel="web", ts=2)
@@ -54,7 +54,7 @@ async def test_list_by_conversation_does_not_leak_other_conversations(
 
 
 async def test_fts_search_finds_matching_messages(
-    conn: AsyncConnection, convo_id: int
+    conn: AsyncEngine, convo_id: int
 ) -> None:
     await messages.append(
         conn, conversation_id=convo_id, role="user", content="reschedule the meeting", ts=10
@@ -69,7 +69,7 @@ async def test_fts_search_finds_matching_messages(
 
 
 async def test_fts_search_can_be_scoped_to_conversation(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     convo_a = await conversations.create(conn, channel="signal", ts=1)
     convo_b = await conversations.create(conn, channel="web", ts=2)
@@ -85,15 +85,17 @@ async def test_fts_search_can_be_scoped_to_conversation(
 
 
 async def test_fts_index_updates_when_message_is_deleted(
-    conn: AsyncConnection, convo_id: int
+    conn: AsyncEngine, convo_id: int
 ) -> None:
     msg = await messages.append(
         conn, conversation_id=convo_id, role="user", content="zorblax", ts=10
     )
     from sqlalchemy import text as _text
 
-    await conn.execute(_text("DELETE FROM messages WHERE id = :id"), {"id": msg.id})
-    await conn.commit()
+    async with conn.begin() as raw:
+        await raw.execute(
+            _text("DELETE FROM messages WHERE id = :id"), {"id": msg.id}
+        )
 
     hits = await messages.fts_search(conn, query="zorblax")
     assert hits == []

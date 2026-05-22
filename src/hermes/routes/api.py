@@ -8,7 +8,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import run_agent
 from hermes.config import settings
@@ -71,7 +71,7 @@ async def api_chat(request: Request) -> Response:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     upstream: httpx.AsyncClient = request.app.state.upstream
 
     if payload.conversation_id is None:
@@ -191,7 +191,7 @@ async def api_list_conversations(
     request: Request, channel: str | None = None, limit: int = 50
 ) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     convos = await conversations.list_all(db, channel=channel, limit=limit)
     out: list[dict[str, Any]] = []
     for c in convos:
@@ -214,7 +214,7 @@ async def api_get_conversation(
     request: Request, conv_id: int, limit: int = 200
 ) -> dict[str, Any]:
     limit = _validate_limit(limit)
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     convo = await conversations.get(db, conv_id)
     if convo is None:
         raise HTTPException(status_code=404, detail="conversation not found")
@@ -271,14 +271,14 @@ def _note_to_dict(n: Any) -> dict[str, Any]:
 @router.get("/notes", response_model=list[NoteResponse])
 async def api_list_notes(request: Request, limit: int = 100) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     items = await notes.list_all(db, limit=limit)
     return [_note_to_dict(n) for n in items]
 
 
 @router.get("/notes/{key}", response_model=NoteResponse)
 async def api_get_note(request: Request, key: str) -> dict[str, Any]:
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     n = await notes.get(db, key)
     if n is None:
         raise HTTPException(status_code=404, detail="note not found")
@@ -287,7 +287,7 @@ async def api_get_note(request: Request, key: str) -> dict[str, Any]:
 
 @router.post("/notes", response_model=NoteResponse)
 async def api_create_note(request: Request, body: NoteCreate) -> dict[str, Any]:
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     tags = ",".join(body.tags) if body.tags else None
     n = await notes.upsert(db, key=body.key, content=body.content, tags=tags)
     return _note_to_dict(n)
@@ -297,7 +297,7 @@ async def api_create_note(request: Request, body: NoteCreate) -> dict[str, Any]:
 async def api_update_note(
     request: Request, key: str, body: NoteUpdate
 ) -> dict[str, Any]:
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     tags = ",".join(body.tags) if body.tags else None
     n = await notes.upsert(db, key=key, content=body.content, tags=tags)
     return _note_to_dict(n)
@@ -305,7 +305,7 @@ async def api_update_note(
 
 @router.delete("/notes/{key}", status_code=status.HTTP_204_NO_CONTENT)
 async def api_delete_note(request: Request, key: str) -> Response:
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     if not await notes.delete(db, key):
         raise HTTPException(status_code=404, detail="note not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -351,14 +351,14 @@ async def api_list_todos(
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     items = await todos.list_all(db, only_open=only_open, tag=tag, limit=limit)
     return [_todo_to_dict(t) for t in items]
 
 
 @router.post("/todos", response_model=TodoResponse)
 async def api_create_todo(request: Request, body: TodoCreate) -> dict[str, Any]:
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     tags = ",".join(body.tags) if body.tags else None
     t = await todos.add(db, content=body.content, tags=tags)
     return _todo_to_dict(t)
@@ -368,7 +368,7 @@ async def api_create_todo(request: Request, body: TodoCreate) -> dict[str, Any]:
 async def api_patch_todo(
     request: Request, todo_id: int, body: TodoUpdate
 ) -> dict[str, Any]:
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     if not body.done:
         raise HTTPException(
             status_code=400,
@@ -388,7 +388,7 @@ async def api_patch_todo(
 
 @router.delete("/todos/{todo_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def api_delete_todo(request: Request, todo_id: int) -> Response:
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     if not await todos.delete(db, todo_id):
         raise HTTPException(status_code=404, detail="todo not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -430,7 +430,7 @@ async def api_list_reminders(
     request: Request, include_fired: bool = False, limit: int = 100
 ) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     items = await reminders.list_all(db, include_fired=include_fired, limit=limit)
     return [_reminder_to_dict(r) for r in items]
 
@@ -439,7 +439,7 @@ async def api_list_reminders(
 async def api_create_reminder(
     request: Request, body: ReminderCreate
 ) -> dict[str, Any]:
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     r = await reminders.create(
         db, due_at=body.due_at, message=body.message, channel=body.channel
     )
@@ -448,7 +448,7 @@ async def api_create_reminder(
 
 @router.delete("/reminders/{reminder_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def api_delete_reminder(request: Request, reminder_id: int) -> Response:
-    db: AsyncConnection = request.app.state.db
+    db: AsyncEngine = request.app.state.db
     if not await reminders.delete(db, reminder_id):
         raise HTTPException(status_code=404, detail="reminder not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

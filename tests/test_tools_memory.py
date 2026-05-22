@@ -1,6 +1,6 @@
 import json
 
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository import conversations, messages, notes
 from hermes.tools.memory import build_memory_tools
@@ -17,7 +17,7 @@ def _by_name(tools, name):
 # build_memory_tools catalog shape
 # ----------------------------------------------------------------------------
 async def test_build_memory_tools_returns_expected_catalog(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     catalog = build_memory_tools(conn)
     names = {t.name for t in catalog}
@@ -35,7 +35,7 @@ async def test_build_memory_tools_returns_expected_catalog(
 # recall_memory
 # ----------------------------------------------------------------------------
 async def test_recall_memory_finds_messages_and_notes(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, channel="signal", ts=1)
     await messages.append(
@@ -55,7 +55,7 @@ async def test_recall_memory_finds_messages_and_notes(
     assert {n["key"] for n in data["notes"]} == {"standup.tips"}
 
 
-async def test_recall_memory_respects_limit(conn: AsyncConnection) -> None:
+async def test_recall_memory_respects_limit(conn: AsyncEngine) -> None:
     convo = await conversations.create(conn, channel="signal", ts=1)
     for i in range(5):
         await messages.append(
@@ -72,7 +72,7 @@ async def test_recall_memory_respects_limit(conn: AsyncConnection) -> None:
 # list_conversations
 # ----------------------------------------------------------------------------
 async def test_list_conversations_returns_all_with_message_count(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     a = await conversations.create(conn, channel="signal", title="A", ts=1)
     b = await conversations.create(conn, channel="web", title="B", ts=3)
@@ -92,7 +92,7 @@ async def test_list_conversations_returns_all_with_message_count(
 
 
 async def test_list_conversations_can_filter_by_channel(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     await conversations.create(conn, channel="signal", ts=1)
     await conversations.create(conn, channel="web", ts=2)
@@ -109,7 +109,7 @@ async def test_list_conversations_can_filter_by_channel(
 # get_conversation
 # ----------------------------------------------------------------------------
 async def test_get_conversation_returns_metadata_and_messages(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, channel="signal", title="t", ts=1)
     await messages.append(conn, conversation_id=convo.id, role="user", content="a", ts=10)
@@ -125,7 +125,7 @@ async def test_get_conversation_returns_metadata_and_messages(
 
 
 async def test_get_conversation_returns_error_for_missing_id(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     tool = _by_name(build_memory_tools(conn), "get_conversation")
     payload = await tool.handler({"id": 99999})
@@ -137,7 +137,7 @@ async def test_get_conversation_returns_error_for_missing_id(
 # save_note / get_note / find_notes
 # ----------------------------------------------------------------------------
 async def test_save_note_upserts_and_returns_payload(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     tool = _by_name(build_memory_tools(conn), "save_note")
     payload = await tool.handler(
@@ -156,7 +156,7 @@ async def test_save_note_upserts_and_returns_payload(
 
 
 async def test_get_note_returns_null_for_missing(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     tool = _by_name(build_memory_tools(conn), "get_note")
     payload = await tool.handler({"key": "does-not-exist"})
@@ -164,7 +164,7 @@ async def test_get_note_returns_null_for_missing(
 
 
 async def test_get_note_returns_stored_note(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     await notes.upsert(conn, key="k", content="hello", tags="x,y", ts=1)
     tool = _by_name(build_memory_tools(conn), "get_note")
@@ -173,7 +173,7 @@ async def test_get_note_returns_stored_note(
     assert data["tags"] == "x,y"
 
 
-async def test_find_notes_returns_matches(conn: AsyncConnection) -> None:
+async def test_find_notes_returns_matches(conn: AsyncEngine) -> None:
     await notes.upsert(conn, key="a", content="standup notes", ts=1)
     await notes.upsert(conn, key="b", content="grocery", ts=2)
 
@@ -182,7 +182,7 @@ async def test_find_notes_returns_matches(conn: AsyncConnection) -> None:
     assert {n["key"] for n in data} == {"a"}
 
 
-async def test_find_notes_filters_by_tags(conn: AsyncConnection) -> None:
+async def test_find_notes_filters_by_tags(conn: AsyncEngine) -> None:
     await notes.upsert(conn, key="a", content="something", tags="urgent,work", ts=1)
     await notes.upsert(conn, key="b", content="something else", tags="urgent", ts=2)
     await notes.upsert(conn, key="c", content="another", tags="later", ts=3)

@@ -2,7 +2,7 @@ import json
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository import reminders
 from hermes.scheduler import ReminderScheduler
@@ -25,7 +25,7 @@ def _make_signal_client(sends: list[dict[str, Any]] | None = None) -> SignalClie
 
 
 async def test_fire_due_sends_and_marks_only_past_reminders(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     past = await reminders.create(conn, due_at=1000, message="past", ts=500)
     future = await reminders.create(conn, due_at=5000, message="future", ts=500)
@@ -43,7 +43,7 @@ async def test_fire_due_sends_and_marks_only_past_reminders(
     assert by_id[future.id].fired_at is None
 
 
-async def test_fire_due_skips_when_signal_disabled(conn: AsyncConnection) -> None:
+async def test_fire_due_skips_when_signal_disabled(conn: AsyncEngine) -> None:
     await reminders.create(conn, due_at=1000, message="x", ts=500)
 
     sched = ReminderScheduler(conn, None, None)
@@ -54,7 +54,7 @@ async def test_fire_due_skips_when_signal_disabled(conn: AsyncConnection) -> Non
     assert len(pending) == 1  # still pending
 
 
-async def test_fire_due_skips_non_signal_channels(conn: AsyncConnection) -> None:
+async def test_fire_due_skips_non_signal_channels(conn: AsyncEngine) -> None:
     await reminders.create(conn, due_at=1000, message="web", channel="web", ts=500)
 
     sends: list[dict[str, Any]] = []
@@ -66,7 +66,7 @@ async def test_fire_due_skips_non_signal_channels(conn: AsyncConnection) -> None
 
 
 async def test_fire_due_leaves_reminder_pending_when_send_fails(
-    conn: AsyncConnection,
+    conn: AsyncEngine,
 ) -> None:
     await reminders.create(conn, due_at=1000, message="boom", ts=500)
 

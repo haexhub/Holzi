@@ -1,13 +1,13 @@
 import json
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import Tool
 from hermes.repository import conversations, messages, notes
 
 
-def build_memory_tools(db: AsyncConnection) -> list[Tool]:
+def build_memory_tools(db: AsyncEngine) -> list[Tool]:
     return [
         _recall_memory(db),
         _list_conversations(db),
@@ -19,7 +19,7 @@ def build_memory_tools(db: AsyncConnection) -> list[Tool]:
 
 
 # ----------------------------------------------------------------------------
-def _recall_memory(db: AsyncConnection) -> Tool:
+def _recall_memory(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         query = str(args.get("query", ""))
         limit = int(args.get("limit", 10))
@@ -65,7 +65,7 @@ def _recall_memory(db: AsyncConnection) -> Tool:
 
 
 # ----------------------------------------------------------------------------
-def _list_conversations(db: AsyncConnection) -> Tool:
+def _list_conversations(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         channel = args.get("channel")
         since_unix = args.get("since_unix")
@@ -118,7 +118,7 @@ def _list_conversations(db: AsyncConnection) -> Tool:
 
 
 # ----------------------------------------------------------------------------
-def _get_conversation(db: AsyncConnection) -> Tool:
+def _get_conversation(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         conv_id = int(args.get("id", 0))
         limit = int(args.get("limit", 50))
@@ -160,13 +160,23 @@ def _get_conversation(db: AsyncConnection) -> Tool:
 
 
 # ----------------------------------------------------------------------------
-def _save_note(db: AsyncConnection) -> Tool:
+def _save_note(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         key = str(args["key"])
         content = str(args["content"])
-        tags_arg = args.get("tags") or []
-        tags = ",".join(str(t) for t in tags_arg) if isinstance(tags_arg, list) else str(tags_arg)
-        note = await notes.upsert(db, key=key, content=content, tags=tags or None)
+        tags_arg = args.get("tags")
+        # Reject scalar non-string types (numbers, bools) early instead of
+        # str()-coercing them into noisy tag values.
+        if tags_arg is None or tags_arg == "":
+            tags: str | None = None
+        elif isinstance(tags_arg, str):
+            tags = tags_arg.strip() or None
+        elif isinstance(tags_arg, list):
+            tags = ",".join(str(t) for t in tags_arg if str(t).strip()) or None
+        else:
+            return json.dumps({"error": "tags must be a string or array of strings"})
+
+        note = await notes.upsert(db, key=key, content=content, tags=tags)
         return json.dumps(
             {
                 "id": note.id,
@@ -194,7 +204,7 @@ def _save_note(db: AsyncConnection) -> Tool:
 
 
 # ----------------------------------------------------------------------------
-def _get_note(db: AsyncConnection) -> Tool:
+def _get_note(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         key = str(args["key"])
         note = await notes.get(db, key)
@@ -223,7 +233,7 @@ def _get_note(db: AsyncConnection) -> Tool:
 
 
 # ----------------------------------------------------------------------------
-def _find_notes(db: AsyncConnection) -> Tool:
+def _find_notes(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         query = str(args.get("query", ""))
         tags_arg = args.get("tags")
@@ -243,8 +253,10 @@ def _find_notes(db: AsyncConnection) -> Tool:
 
         hits = await notes.find(db, query=query, limit=limit)
 
-        if normalized_tags:
-            required = {t.strip() for t in normalized_tags if t.strip()}
+        # Whitespace-only tag entries shouldn't act as "filter out untagged
+        # notes" — treat that case as no-filter.
+        required = {t.strip() for t in normalized_tags if t.strip()}
+        if required:
             filtered = [
                 n
                 for n in hits

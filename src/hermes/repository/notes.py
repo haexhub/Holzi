@@ -2,7 +2,7 @@ import time
 
 from sqlalchemy import desc, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository.models import Note
 from hermes.schema import notes as t_notes
@@ -19,7 +19,7 @@ def _row_to_note(row) -> Note:
 
 
 async def upsert(
-    conn: AsyncConnection,
+    engine: AsyncEngine,
     *,
     key: str,
     content: str,
@@ -44,39 +44,42 @@ async def upsert(
         t_notes.c.tags,
         t_notes.c.updated_at,
     )
-    result = await conn.execute(upsert_stmt)
-    await conn.commit()
-    row = result.first()
+    async with engine.begin() as conn:
+        result = await conn.execute(upsert_stmt)
+        row = result.first()
     if row is None:
         raise RuntimeError("upsert into notes ... RETURNING returned no row")
     return _row_to_note(row)
 
 
-async def get(conn: AsyncConnection, key: str) -> Note | None:
-    result = await conn.execute(select(t_notes).where(t_notes.c.key == key))
-    row = result.first()
+async def get(engine: AsyncEngine, key: str) -> Note | None:
+    async with engine.connect() as conn:
+        result = await conn.execute(select(t_notes).where(t_notes.c.key == key))
+        row = result.first()
     return _row_to_note(row) if row is not None else None
 
 
 async def list_all(
-    conn: AsyncConnection,
+    engine: AsyncEngine,
     *,
     limit: int = 100,
 ) -> list[Note]:
-    result = await conn.execute(
-        select(t_notes).order_by(desc(t_notes.c.updated_at)).limit(limit)
-    )
-    return [_row_to_note(r) for r in result]
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            select(t_notes).order_by(desc(t_notes.c.updated_at)).limit(limit)
+        )
+        rows = result.all()
+    return [_row_to_note(r) for r in rows]
 
 
-async def delete(conn: AsyncConnection, key: str) -> bool:
-    result = await conn.execute(t_notes.delete().where(t_notes.c.key == key))
-    await conn.commit()
+async def delete(engine: AsyncEngine, key: str) -> bool:
+    async with engine.begin() as conn:
+        result = await conn.execute(t_notes.delete().where(t_notes.c.key == key))
     return (result.rowcount or 0) > 0
 
 
 async def find(
-    conn: AsyncConnection,
+    engine: AsyncEngine,
     *,
     query: str,
     limit: int = 10,
@@ -88,5 +91,7 @@ async def find(
         "WHERE notes_fts MATCH :q "
         "ORDER BY rank LIMIT :limit"
     )
-    result = await conn.execute(sql, {"q": query, "limit": limit})
-    return [_row_to_note(r) for r in result]
+    async with engine.connect() as conn:
+        result = await conn.execute(sql, {"q": query, "limit": limit})
+        rows = result.all()
+    return [_row_to_note(r) for r in rows]

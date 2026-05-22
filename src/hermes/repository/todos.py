@@ -1,7 +1,7 @@
 import time
 
 from sqlalchemy import desc, select, text
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository.models import Todo
 from hermes.schema import todos as t_todos
@@ -18,20 +18,20 @@ def _row_to_todo(row) -> Todo:
 
 
 async def add(
-    conn: AsyncConnection,
+    engine: AsyncEngine,
     *,
     content: str,
     tags: str | None = None,
     ts: int | None = None,
 ) -> Todo:
     now = ts if ts is not None else int(time.time())
-    result = await conn.execute(
-        t_todos.insert()
-        .values(content=content, tags=tags, created_at=now)
-        .returning(t_todos.c.id)
-    )
-    await conn.commit()
-    row = result.first()
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            t_todos.insert()
+            .values(content=content, tags=tags, created_at=now)
+            .returning(t_todos.c.id)
+        )
+        row = result.first()
     if row is None:
         raise RuntimeError("INSERT into todos did not yield a rowid")
     return Todo(
@@ -44,7 +44,7 @@ async def add(
 
 
 async def list_all(
-    conn: AsyncConnection,
+    engine: AsyncEngine,
     *,
     only_open: bool = True,
     tag: str | None = None,
@@ -62,31 +62,34 @@ async def list_all(
         ).params(tag_pattern=f"%,{tag},%")
     stmt = stmt.order_by(desc(t_todos.c.created_at)).limit(limit)
 
-    result = await conn.execute(stmt)
-    return [_row_to_todo(r) for r in result]
+    async with engine.connect() as conn:
+        result = await conn.execute(stmt)
+        rows = result.all()
+    return [_row_to_todo(r) for r in rows]
 
 
-async def get(conn: AsyncConnection, todo_id: int) -> Todo | None:
-    result = await conn.execute(select(t_todos).where(t_todos.c.id == todo_id))
-    row = result.first()
+async def get(engine: AsyncEngine, todo_id: int) -> Todo | None:
+    async with engine.connect() as conn:
+        result = await conn.execute(select(t_todos).where(t_todos.c.id == todo_id))
+        row = result.first()
     return _row_to_todo(row) if row is not None else None
 
 
 async def mark_done(
-    conn: AsyncConnection, todo_id: int, *, ts: int | None = None
+    engine: AsyncEngine, todo_id: int, *, ts: int | None = None
 ) -> bool:
     now = ts if ts is not None else int(time.time())
-    result = await conn.execute(
-        t_todos.update()
-        .where(t_todos.c.id == todo_id)
-        .where(t_todos.c.done_at.is_(None))
-        .values(done_at=now)
-    )
-    await conn.commit()
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            t_todos.update()
+            .where(t_todos.c.id == todo_id)
+            .where(t_todos.c.done_at.is_(None))
+            .values(done_at=now)
+        )
     return (result.rowcount or 0) > 0
 
 
-async def delete(conn: AsyncConnection, todo_id: int) -> bool:
-    result = await conn.execute(t_todos.delete().where(t_todos.c.id == todo_id))
-    await conn.commit()
+async def delete(engine: AsyncEngine, todo_id: int) -> bool:
+    async with engine.begin() as conn:
+        result = await conn.execute(t_todos.delete().where(t_todos.c.id == todo_id))
     return (result.rowcount or 0) > 0

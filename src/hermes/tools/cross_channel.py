@@ -2,7 +2,7 @@ import json
 import time
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import Tool
 from hermes.repository import conversations, messages
@@ -12,7 +12,7 @@ SIGNAL_CONVO_GAP_SECONDS = 6 * 3600
 
 
 def build_cross_channel_tools(
-    db: AsyncConnection,
+    db: AsyncEngine,
     signal_client: SignalClient | None,
     signal_self_number: str | None,
     *,
@@ -30,7 +30,7 @@ def build_cross_channel_tools(
 
 
 def _cross_channel_send(
-    db: AsyncConnection,
+    db: AsyncEngine,
     signal_client: SignalClient | None,
     self_number: str | None,
     current_channel: str | None,
