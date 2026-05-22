@@ -28,3 +28,22 @@ class Note:
     content: str
     tags: str | None
     updated_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class Reminder:
+    id: int
+    due_at: int
+    message: str
+    channel: str
+    fired_at: int | None
+    created_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class Todo:
+    id: int
+    content: str
+    tags: str | None
+    done_at: int | None
+    created_at: int
