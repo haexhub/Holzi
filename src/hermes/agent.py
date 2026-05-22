@@ -3,8 +3,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-import aiosqlite
 import httpx
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository import messages
 
@@ -24,7 +24,7 @@ class Tool:
 async def run_agent(
     *,
     upstream: httpx.AsyncClient,
-    db: aiosqlite.Connection,
+    db: AsyncEngine,
     conversation_id: int,
     system_prompt: str,
     model: str,

@@ -1,9 +1,9 @@
 import json
 from typing import Any
 
-import aiosqlite
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import Tool, run_agent
 from hermes.repository import conversations, messages
@@ -52,7 +52,7 @@ async def _noop_async(_: dict[str, Any]) -> str:
 
 
 async def test_run_agent_returns_text_and_persists_assistant_message(
-    conn: aiosqlite.Connection,
+    conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, channel="signal", ts=1000)
     await messages.append(conn, conversation_id=convo.id, role="user", content="hi", ts=1001)
@@ -74,7 +74,7 @@ async def test_run_agent_returns_text_and_persists_assistant_message(
 
 
 async def test_run_agent_injects_system_prompt_and_history(
-    conn: aiosqlite.Connection,
+    conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, channel="signal", ts=1000)
     await messages.append(conn, conversation_id=convo.id, role="user", content="first", ts=1001)
@@ -106,7 +106,7 @@ async def test_run_agent_injects_system_prompt_and_history(
 
 
 async def test_run_agent_includes_tools_definition_in_request(
-    conn: aiosqlite.Connection,
+    conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, channel="signal", ts=1000)
     await messages.append(conn, conversation_id=convo.id, role="user", content="hi", ts=1001)
@@ -143,7 +143,7 @@ async def test_run_agent_includes_tools_definition_in_request(
 
 
 async def test_run_agent_executes_tool_calls_and_loops(
-    conn: aiosqlite.Connection,
+    conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, channel="signal", ts=1000)
     await messages.append(
@@ -208,7 +208,7 @@ async def test_run_agent_executes_tool_calls_and_loops(
 
 
 async def test_run_agent_raises_when_max_iterations_exceeded(
-    conn: aiosqlite.Connection,
+    conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, channel="signal", ts=1000)
     await messages.append(
@@ -245,7 +245,7 @@ async def test_run_agent_raises_when_max_iterations_exceeded(
 
 
 async def test_run_agent_accepts_object_tool_arguments(
-    conn: aiosqlite.Connection,
+    conn: AsyncEngine,
 ) -> None:
     """Some providers send `function.arguments` as a dict instead of a JSON string."""
     convo = await conversations.create(conn, channel="signal", ts=1000)

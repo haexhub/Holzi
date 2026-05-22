@@ -1,6 +1,6 @@
 import json
 
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.tools.productivity import build_productivity_tools
 
@@ -13,7 +13,7 @@ def _by_name(tools, name):
 
 
 async def test_build_productivity_tools_catalog(
-    conn: aiosqlite.Connection,
+    conn: AsyncEngine,
 ) -> None:
     catalog = build_productivity_tools(conn)
     assert {t.name for t in catalog} == {
@@ -28,7 +28,7 @@ async def test_build_productivity_tools_catalog(
 # ---------------------------------------------------------------------------
 # reminder_set / reminder_list
 # ---------------------------------------------------------------------------
-async def test_reminder_set_creates_reminder(conn: aiosqlite.Connection) -> None:
+async def test_reminder_set_creates_reminder(conn: AsyncEngine) -> None:
     tool = _by_name(build_productivity_tools(conn), "reminder_set")
     out = await tool.handler({"due_at": 2000, "message": "standup"})
     data = json.loads(out)
@@ -38,7 +38,7 @@ async def test_reminder_set_creates_reminder(conn: aiosqlite.Connection) -> None
 
 
 async def test_reminder_set_rejects_missing_due_at(
-    conn: aiosqlite.Connection,
+    conn: AsyncEngine,
 ) -> None:
     tool = _by_name(build_productivity_tools(conn), "reminder_set")
     data = json.loads(await tool.handler({"message": "x"}))
@@ -46,7 +46,7 @@ async def test_reminder_set_rejects_missing_due_at(
 
 
 async def test_reminder_list_returns_pending_by_default(
-    conn: aiosqlite.Connection,
+    conn: AsyncEngine,
 ) -> None:
     set_tool = _by_name(build_productivity_tools(conn), "reminder_set")
     await set_tool.handler({"due_at": 1000, "message": "a"})
@@ -60,7 +60,7 @@ async def test_reminder_list_returns_pending_by_default(
 # ---------------------------------------------------------------------------
 # todo_add / todo_list / todo_done
 # ---------------------------------------------------------------------------
-async def test_todo_add_with_list_tags(conn: aiosqlite.Connection) -> None:
+async def test_todo_add_with_list_tags(conn: AsyncEngine) -> None:
     tool = _by_name(build_productivity_tools(conn), "todo_add")
     data = json.loads(
         await tool.handler({"content": "fix bug", "tags": ["work", "urgent"]})
@@ -69,14 +69,14 @@ async def test_todo_add_with_list_tags(conn: aiosqlite.Connection) -> None:
     assert data["tags"] == "work,urgent"
 
 
-async def test_todo_add_with_string_tag(conn: aiosqlite.Connection) -> None:
+async def test_todo_add_with_string_tag(conn: AsyncEngine) -> None:
     tool = _by_name(build_productivity_tools(conn), "todo_add")
     data = json.loads(await tool.handler({"content": "x", "tags": "personal"}))
     assert data["tags"] == "personal"
 
 
 async def test_todo_list_returns_open_only_by_default(
-    conn: aiosqlite.Connection,
+    conn: AsyncEngine,
 ) -> None:
     add = _by_name(build_productivity_tools(conn), "todo_add")
     done = _by_name(build_productivity_tools(conn), "todo_done")
@@ -90,7 +90,7 @@ async def test_todo_list_returns_open_only_by_default(
     assert [t["id"] for t in out] == [b["id"]]
 
 
-async def test_todo_list_filters_by_tag(conn: aiosqlite.Connection) -> None:
+async def test_todo_list_filters_by_tag(conn: AsyncEngine) -> None:
     add = _by_name(build_productivity_tools(conn), "todo_add")
     listing = _by_name(build_productivity_tools(conn), "todo_list")
 
@@ -102,7 +102,7 @@ async def test_todo_list_filters_by_tag(conn: aiosqlite.Connection) -> None:
 
 
 async def test_todo_done_marks_and_returns_payload(
-    conn: aiosqlite.Connection,
+    conn: AsyncEngine,
 ) -> None:
     add = _by_name(build_productivity_tools(conn), "todo_add")
     done = _by_name(build_productivity_tools(conn), "todo_done")
@@ -113,7 +113,7 @@ async def test_todo_done_marks_and_returns_payload(
     assert out["done_at"] is not None
 
 
-async def test_todo_done_rejects_unknown_id(conn: aiosqlite.Connection) -> None:
+async def test_todo_done_rejects_unknown_id(conn: AsyncEngine) -> None:
     done = _by_name(build_productivity_tools(conn), "todo_done")
     data = json.loads(await done.handler({"id": 99999}))
     assert "error" in data

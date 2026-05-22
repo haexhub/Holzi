@@ -2,13 +2,13 @@ import json
 import time
 from typing import Any
 
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import Tool
 from hermes.repository import reminders, todos
 
 
-def build_productivity_tools(db: aiosqlite.Connection) -> list[Tool]:
+def build_productivity_tools(db: AsyncEngine) -> list[Tool]:
     return [
         _reminder_set(db),
         _reminder_list(db),
@@ -19,7 +19,7 @@ def build_productivity_tools(db: aiosqlite.Connection) -> list[Tool]:
 
 
 # ---------------------------------------------------------------------------
-def _reminder_set(db: aiosqlite.Connection) -> Tool:
+def _reminder_set(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         message = str(args["message"])
         channel = str(args.get("channel", "signal"))
@@ -63,10 +63,14 @@ def _reminder_set(db: aiosqlite.Connection) -> Tool:
     )
 
 
-def _reminder_list(db: aiosqlite.Connection) -> Tool:
+def _reminder_list(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
-        include_fired = bool(args.get("include_fired", False))
-        rs = await reminders.list_all(db, include_fired=include_fired)
+        # `bool("false")` is True — guard against non-bool payloads from
+        # providers that send raw JSON strings.
+        include_fired_arg = args.get("include_fired", False)
+        if not isinstance(include_fired_arg, bool):
+            return json.dumps({"error": "include_fired must be a boolean"})
+        rs = await reminders.list_all(db, include_fired=include_fired_arg)
         return json.dumps(
             [
                 {
@@ -94,7 +98,7 @@ def _reminder_list(db: aiosqlite.Connection) -> Tool:
 
 
 # ---------------------------------------------------------------------------
-def _todo_add(db: aiosqlite.Connection) -> Tool:
+def _todo_add(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         content = str(args["content"])
         tags_arg = args.get("tags")
@@ -127,14 +131,16 @@ def _todo_add(db: aiosqlite.Connection) -> Tool:
     )
 
 
-def _todo_list(db: aiosqlite.Connection) -> Tool:
+def _todo_list(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
-        only_open = bool(args.get("only_open", True))
+        only_open_arg = args.get("only_open", True)
+        if not isinstance(only_open_arg, bool):
+            return json.dumps({"error": "only_open must be a boolean"})
         tag = args.get("tag")
         if tag is not None and not isinstance(tag, str):
             return json.dumps({"error": "tag must be a string"})
 
-        items = await todos.list_all(db, only_open=only_open, tag=tag)
+        items = await todos.list_all(db, only_open=only_open_arg, tag=tag)
         return json.dumps(
             [
                 {
@@ -166,7 +172,7 @@ def _todo_list(db: aiosqlite.Connection) -> Tool:
     )
 
 
-def _todo_done(db: aiosqlite.Connection) -> Tool:
+def _todo_done(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         try:
             todo_id = int(args["id"])

@@ -1,9 +1,9 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import aiosqlite
 import httpx
 from fastapi import FastAPI, Request
+from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import Receive, Scope, Send
 
@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.signal_self_number = settings.signal_number
 
             async def signal_agent_runner(
-                db: aiosqlite.Connection, conversation_id: int
+                db: AsyncEngine, conversation_id: int
             ) -> str:
                 return await run_agent(
                     upstream=app.state.upstream,
@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if app.state.upstream is not None:
             await app.state.upstream.aclose()
         if app.state.db is not None:
-            await app.state.db.close()
+            await app.state.db.dispose()
         logger.info("hermes_stopping")
 
 
