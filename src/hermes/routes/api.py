@@ -140,12 +140,19 @@ async def api_chat(request: Request) -> Response:
             await conversations.touch(db, convo.id)
             yield _sse_event("done", {})
         except Exception as exc:  # noqa: BLE001 — surface to client, don't crash worker
-            if not task.done():
-                task.cancel()
-                with contextlib.suppress(BaseException):
-                    await task
             logger.warning("api_chat_agent_error", error=str(exc))
             yield _sse_event("error", {"message": str(exc)})
+        finally:
+            # `finally` runs both on the error path AND on client disconnect.
+            # Disconnect raises asyncio.CancelledError (BaseException, not
+            # Exception) which would otherwise leak the background task and
+            # let it keep firing tools / writing to the DB after the client
+            # is gone. Cancel + drain — suppressing CancelledError because
+            # we already know it's done.
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

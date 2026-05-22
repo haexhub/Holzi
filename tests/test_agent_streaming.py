@@ -208,6 +208,89 @@ async def test_run_agent_streaming_handles_tool_call_round(
     assert chunks_seen == ["Final ", "answer."]
 
 
+async def test_run_agent_streaming_raises_on_truncated_stream(
+    conn: aiosqlite.Connection,
+) -> None:
+    """If the upstream connection drops before [DONE], the partial text must
+    not be silently persisted as a completed assistant turn."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
+
+    # Two text deltas, then EOF without `[DONE]` and no finish_reason.
+    truncated_body = (
+        b'data: {"choices":[{"index":0,"delta":{"content":"Hel"},"finish_reason":null}]}\n\n'
+        b'data: {"choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}\n\n'
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(truncated_body),
+        )
+
+    upstream = _mock_upstream(handler)
+
+    async def on_chunk(_: str) -> None:
+        return None
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="stream ended"):
+        await run_agent(
+            upstream=upstream,
+            db=conn,
+            conversation_id=convo.id,
+            system_prompt=SYSTEM,
+            model=MODEL,
+            on_chunk=on_chunk,
+        )
+
+    # Nothing should have been persisted as a completed assistant turn.
+    msgs = await messages.list_by_conversation(conn, convo.id)
+    assert [m.role for m in msgs] == ["user"]
+
+
+async def test_run_agent_streaming_accepts_finish_reason_as_terminal(
+    conn: aiosqlite.Connection,
+) -> None:
+    """Some providers don't emit `[DONE]` but do set finish_reason on the
+    last chunk — that should also count as a clean completion."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
+
+    body = (
+        b'data: {"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}\n\n'
+        b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(body),
+        )
+
+    upstream = _mock_upstream(handler)
+
+    async def on_chunk(_: str) -> None:
+        return None
+
+    text = await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=SYSTEM,
+        model=MODEL,
+        on_chunk=on_chunk,
+    )
+    assert text == "hello"
+
+
 async def test_run_agent_without_on_chunk_stays_non_streaming(
     conn: aiosqlite.Connection,
 ) -> None:

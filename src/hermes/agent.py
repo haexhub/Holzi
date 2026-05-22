@@ -133,6 +133,11 @@ async def _request_round_stream(
     # Indexed by `delta.tool_calls[i].index` because each call's fields
     # arrive split across chunks.
     tool_calls_by_idx: dict[int, dict[str, Any]] = {}
+    # Terminal markers are either an explicit `data: [DONE]` line (OpenAI
+    # convention) or a chunk whose first choice carries a non-null
+    # `finish_reason` (which some compatible providers emit instead).
+    # Without one, refuse to persist a half-built turn.
+    saw_terminal_marker = False
 
     async with upstream.stream("POST", CHAT_PATH, json=body) as resp:
         resp.raise_for_status()
@@ -142,6 +147,7 @@ async def _request_round_stream(
                 continue
             payload = line[len("data:") :].strip()
             if payload == "[DONE]":
+                saw_terminal_marker = True
                 break
             try:
                 obj = json.loads(payload)
@@ -150,6 +156,8 @@ async def _request_round_stream(
             choices = obj.get("choices") or []
             if not choices:
                 continue
+            if choices[0].get("finish_reason") is not None:
+                saw_terminal_marker = True
             delta = choices[0].get("delta") or {}
 
             content = delta.get("content")
@@ -159,6 +167,12 @@ async def _request_round_stream(
 
             for tc in delta.get("tool_calls") or []:
                 _accumulate_tool_call(tool_calls_by_idx, tc)
+
+    if not saw_terminal_marker:
+        raise RuntimeError(
+            "upstream SSE stream ended before [DONE] / finish_reason — refusing "
+            "to persist a possibly-truncated assistant turn"
+        )
 
     text = "".join(text_parts)
     tool_calls = [tool_calls_by_idx[i] for i in sorted(tool_calls_by_idx.keys())]
