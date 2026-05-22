@@ -15,18 +15,39 @@ def build_cross_channel_tools(
     db: aiosqlite.Connection,
     signal_client: SignalClient | None,
     signal_self_number: str | None,
+    *,
+    current_channel: str | None = None,
 ) -> list[Tool]:
-    return [_cross_channel_send(db, signal_client, signal_self_number)]
+    """Build the cross-channel tool catalog.
+
+    `current_channel`, if set, identifies the channel the agent is currently
+    responding on. cross_channel_send refuses to write back to that channel
+    so a Web-UI run can't trigger another Web-UI run by sending to itself
+    (and likewise for Signal once the Signal worker starts using the
+    catalog).
+    """
+    return [_cross_channel_send(db, signal_client, signal_self_number, current_channel)]
 
 
 def _cross_channel_send(
     db: aiosqlite.Connection,
     signal_client: SignalClient | None,
     self_number: str | None,
+    current_channel: str | None,
 ) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         channel = str(args.get("channel", ""))
         message = str(args.get("message", ""))
+
+        if current_channel is not None and channel == current_channel:
+            return json.dumps(
+                {
+                    "error": (
+                        f"cross_channel_send cannot write back to the current "
+                        f"channel {current_channel!r}"
+                    )
+                }
+            )
 
         if channel != "signal":
             return json.dumps(

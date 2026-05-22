@@ -107,6 +107,36 @@ async def test_cross_channel_send_creates_new_conversation_when_gap_exceeds_6h(
     assert len(convos) == 2
 
 
+async def test_cross_channel_send_refuses_when_current_channel_matches(
+    conn: aiosqlite.Connection,
+) -> None:
+    """Recursion guard: agent running on channel X cannot write back to X."""
+    tools = build_cross_channel_tools(
+        conn, _make_signal_client(), SELF_NUMBER, current_channel="signal"
+    )
+    tool = _by_name(tools, "cross_channel_send")
+
+    result = await tool.handler({"channel": "signal", "message": "would loop"})
+    data = json.loads(result)
+    assert "error" in data
+    assert "signal" in data["error"].lower()
+
+    convos = await conversations.list_by_channel(conn, "signal")
+    assert convos == []
+
+
+async def test_cross_channel_send_allows_different_current_channel(
+    conn: aiosqlite.Connection,
+) -> None:
+    tools = build_cross_channel_tools(
+        conn, _make_signal_client(), SELF_NUMBER, current_channel="web"
+    )
+    tool = _by_name(tools, "cross_channel_send")
+    result = await tool.handler({"channel": "signal", "message": "from web"})
+    data = json.loads(result)
+    assert data.get("sent") is True
+
+
 async def test_cross_channel_send_does_not_persist_when_signal_send_fails(
     conn: aiosqlite.Connection,
 ) -> None:

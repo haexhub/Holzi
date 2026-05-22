@@ -88,13 +88,18 @@
 - **Reminders:** in-process asyncio loop, checks DB every minute
 - **Web UI:** static files served from disk (`/opt/hermes/frontend/dist`)
 
-### 2.4 `hermes-frontend` (Nuxt 3, new, separate repo or `frontend/` subfolder)
-- Nuxt 3 (Vue 3 + Composition API)
-- SSR turned off; built as static SPA
-- Chat view with streaming (Server-Sent Events from `/api/chat/stream`)
-- Sidebar: conversation list filtered by channel
-- Notes/Todos panel
-- Auth: Bearer-token entered once, stored in localStorage
+### 2.4 `holzi-frontend` (Nuxt 4 SPA, **separate repo**)
+Lives at https://github.com/haexhub/holzi-frontend (Phase 9, started 2026-05-22). Decision-rationale for the split: Python+uv vs. Node+pnpm tooling don't co-exist cleanly in one PR-pipeline, build artefact (`dist/`) is what crosses the boundary anyway, and FastAPI's `/openapi.json` is enough to keep API types in sync without source-coupling.
+
+- **Nuxt 4** (Vue 3 + Composition API, TypeScript)
+- SSR turned off; built as static SPA (Hermes-server serves `dist/`)
+- **Tailwind 4** + **shadcn-vue** primitives (`app/components/ui/`)
+- **Pinia** for store, **VueUse** for composables (incl. `useLocalStorage`)
+- **pnpm** package manager
+- Chat view with SSE consumption from `/api/chat` (parses `session`/`text`/`done`/`error` events)
+- Sidebar: conversation list (filtered by `channel=web`)
+- Right panel: Notes / Todos / Reminders tabs (one-call-per-endpoint CRUD)
+- Auth: Bearer-token entered once on `/login`, persisted in localStorage; 401 clears token and bounces back to login
 
 ### 2.5 `traefik` (Docker, optional)
 - External-by-default: most target machines already run a Traefik. Service containers in this Compose carry the standard `traefik.enable=true` + `traefik.http.routers.*` labels so any host-running Traefik picks them up automatically via the Docker provider.
@@ -364,14 +369,27 @@ Hermes connects as an MCP client (configured via `HERMES_EXTERNAL_MCP`). When th
 | 4 — Signal worker | #3 | ✅ on main |
 | 5 — agent loop (+ LLM provider flexibility) | #4 | ✅ on main |
 | 6 — MCP server + 7 tools | #5 | ✅ on main |
-| 7 — productivity/external tools + scheduler | #6 | ⏳ open, awaiting CodeRabbit re-review after rate-limit reset |
-| 8 — web-UI backend (`/api/chat`) | — | ⏭ next |
-| 9 — Nuxt frontend | — | ⏭ |
+| 7 — productivity/external tools + scheduler | #6 | ✅ on main |
+| 8 — web-UI backend (`/api/*`, recursion guard) | #7 | ⏳ open on `phase-8-web-ui-backend` |
+| 9 — Nuxt frontend (separate repo: holzi-frontend) | — | ⏳ initial scaffolding pushed to https://github.com/haexhub/holzi-frontend |
 | 10 — production deploy | — | ⏭ |
 
 **Important deviation from the original plan.** Phase 5 also delivered the *LLM-provider-flexibility* change: `HERMES_PROXY_URL` became `HERMES_LLM_URL` and `HERMES_LLM_API_KEY` was added so the upstream can be any OpenAI-compatible endpoint, not only `haex-claude-proxy`. The renaming is reflected in `.env.example`, `docker-compose.yml`, and the README provider table.
 
-Phase 6 added a deliberate scope decision: the Signal worker still calls `run_agent` with `tools=None`, even though the tool catalogue now exists. The Phase 8 web-UI backend will be the first internal caller that hands the catalogue to the agent loop, avoiding the obvious `cross_channel_send`-from-Signal-conversation recursion risk until we have a guard for it.
+Phase 6 added a deliberate scope decision: the Signal worker still calls `run_agent` with `tools=None`, even though the tool catalogue now exists. Phase 8 is the first internal caller that hands the catalogue to the agent loop — via the new `/api/chat` endpoint. The catalog is built per request with `current_channel="web"` (see `hermes.tool_catalog.build_tool_catalog`); `cross_channel_send` refuses to write back to the channel that produced the request (recursion guard). The Signal worker is intentionally **not** switched over in this phase and stays at `tools=None` until we revisit it.
+
+**Phase 8 surfaces shipped.**
+- `POST /api/chat` — JSON in (`message`, optional `conversation_id`), SSE out with `session` / `text` / `done` events. Runs the full agent loop with the Hermes tool catalog scoped to `current_channel="web"`.
+- `GET /api/conversations`, `GET /api/conversations/{id}` — list + detail with messages.
+- `GET/POST/PUT/DELETE /api/notes` (+ `GET /api/notes/{key}`) — REST CRUD over the notes repo.
+- `GET/POST/PATCH/DELETE /api/todos` — REST CRUD; PATCH only supports `{"done": true}` (mark as completed).
+- `GET/POST/DELETE /api/reminders` — REST CRUD.
+
+**Repo additions (minimal, idiomatic to the existing hand-SQL style):** `notes.list_all`, `notes.delete`, `todos.delete`, `reminders.delete`. A follow-up PR will migrate the entire repository layer to SQLAlchemy Core (async) — see "Repo-layer refactor (queued)" below.
+
+## 6.8 Repo-layer refactor (queued)
+
+After Phase 8 merges, the entire `hermes.repository` layer will move from hand-rolled `aiosqlite` SQL to **SQLAlchemy Core async** in a separate PR. Reason: Marko prefers a typed query builder (Drizzle-style) over plain SQL text. SQLAlchemy Core stays close to raw SQL (no ORM magic), supports SQLite + FTS5 (via `text()` / custom constructs for FTS), and is the most established async-capable option in Python. The migration is intentionally scope-isolated from Phase 8 to keep that PR a pure feature change.
 
 ## 7. Out of scope (defer until after MVP works)
 

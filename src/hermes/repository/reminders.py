@@ -74,6 +74,14 @@ async def list_due(conn: aiosqlite.Connection, *, now: int) -> list[Reminder]:
     return [_row_to_reminder(r) for r in rows]
 
 
+async def delete(conn: aiosqlite.Connection, reminder_id: int) -> bool:
+    cursor = await conn.execute(
+        "DELETE FROM reminders WHERE id = ?", (reminder_id,)
+    )
+    await conn.commit()
+    return cursor.rowcount > 0
+
+
 async def mark_fired(
     conn: aiosqlite.Connection, reminder_id: int, *, ts: int | None = None
 ) -> None:
