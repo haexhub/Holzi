@@ -242,3 +242,49 @@ async def test_run_agent_raises_when_max_iterations_exceeded(
             tools=[tool],
             max_iterations=2,
         )
+
+
+async def test_run_agent_accepts_object_tool_arguments(
+    conn: aiosqlite.Connection,
+) -> None:
+    """Some providers send `function.arguments` as a dict instead of a JSON string."""
+    convo = await conversations.create(conn, channel="signal", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="echo please", ts=1001
+    )
+
+    tool_call = {
+        "id": "call_obj",
+        "type": "function",
+        "function": {"name": "echo", "arguments": {"text": "hello"}},
+    }
+    upstream, _ = _make_upstream(
+        [
+            _assistant_response("", tool_calls=[tool_call]),
+            _assistant_response("done"),
+        ]
+    )
+
+    seen: list[dict[str, Any]] = []
+
+    async def echo_handler(args: dict[str, Any]) -> str:
+        seen.append(args)
+        return "ok"
+
+    tool = Tool(
+        name="echo",
+        description="echo",
+        parameters_schema={"type": "object", "properties": {"text": {"type": "string"}}},
+        handler=echo_handler,
+    )
+
+    text = await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=DEFAULT_SYSTEM,
+        model=MODEL,
+        tools=[tool],
+    )
+    assert text == "done"
+    assert seen == [{"text": "hello"}]

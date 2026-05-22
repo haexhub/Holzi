@@ -83,14 +83,14 @@ class SignalWorker:
         await messages.append(
             self.db, conversation_id=convo.id, role="user", content=text, ts=current
         )
-        # Agent persists the assistant turn (and any tool turns) itself.
-        reply = await self.agent_runner(self.db, convo.id)
         try:
+            # Agent persists the assistant turn (and any tool turns) itself.
+            reply = await self.agent_runner(self.db, convo.id)
             await self.client.send(recipient=self.self_number, message=reply)
         finally:
-            # Touch even if send fails, otherwise the 6h gap heuristic in
-            # _resolve_conversation can pick a stale conversation on the next
-            # inbound message.
+            # Touch even if agent_runner or send fails, otherwise the 6h gap
+            # heuristic in _resolve_conversation can pick a stale conversation
+            # on the next inbound message.
             await conversations.touch(self.db, convo.id, ts=current)
 
     async def _resolve_conversation(self, now: int) -> Conversation:

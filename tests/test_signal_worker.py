@@ -4,6 +4,7 @@ from typing import Any
 
 import aiosqlite
 import httpx
+import pytest
 
 from hermes.repository import conversations, messages
 from hermes.signal.client import SignalClient
@@ -173,3 +174,42 @@ async def test_process_envelope_creates_new_conversation_when_gap_exceeds_6h(
     assert newest.id != existing.id
     msgs = await messages.list_by_conversation(conn, newest.id)
     assert [m.content for m in msgs] == ["new thread", "agent says: new thread"]
+
+
+def _failing_agent_runner():
+    async def runner(db: aiosqlite.Connection, conversation_id: int) -> str:
+        raise RuntimeError("simulated agent failure")
+
+    return runner
+
+
+async def test_process_envelope_touches_conversation_even_when_agent_fails(
+    conn: aiosqlite.Connection,
+) -> None:
+    one_hour_ago = int(time.time()) - 3600
+    existing = await conversations.create(conn, channel="signal", ts=one_hour_ago)
+    initial_updated_at = existing.updated_at
+
+    sends: list[dict[str, Any]] = []
+    worker = SignalWorker(
+        _make_signal_client(sends),
+        conn,
+        SELF_NUMBER,
+        agent_runner=_failing_agent_runner(),
+    )
+
+    current_ts = int(time.time())
+    with pytest.raises(RuntimeError, match="simulated agent failure"):
+        await worker.process_envelope(_envelope(SELF_NUMBER, "boom"), now=current_ts)
+
+    # User message persisted, no assistant reply, no send attempt.
+    msgs = await messages.list_by_conversation(conn, existing.id)
+    assert [(m.role, m.content) for m in msgs] == [("user", "boom")]
+    assert sends == []
+
+    # Conversation was touched even though agent_runner raised — required for
+    # the 6h gap heuristic to keep working on the next inbound message.
+    refreshed = await conversations.get(conn, existing.id)
+    assert refreshed is not None
+    assert refreshed.updated_at == current_ts
+    assert refreshed.updated_at > initial_updated_at

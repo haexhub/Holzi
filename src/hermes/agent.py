@@ -105,14 +105,20 @@ async def run_agent(
 
 def _history_row_to_request_message(m: Any) -> dict[str, Any]:
     if m.role == "tool" and m.meta_json:
-        meta = json.loads(m.meta_json)
+        try:
+            meta = json.loads(m.meta_json)
+        except json.JSONDecodeError:
+            return {"role": m.role, "content": m.content}
         return {
             "role": "tool",
             "tool_call_id": meta.get("tool_call_id", ""),
             "content": m.content,
         }
     if m.role == "assistant" and m.meta_json:
-        meta = json.loads(m.meta_json)
+        try:
+            meta = json.loads(m.meta_json)
+        except json.JSONDecodeError:
+            return {"role": m.role, "content": m.content}
         tool_calls = meta.get("tool_calls")
         if tool_calls:
             return {
@@ -142,10 +148,22 @@ async def _execute_tool_call(call: dict[str, Any], lookup: dict[str, Tool]) -> s
     tool = lookup.get(name)
     if tool is None:
         return f"error: unknown tool {name!r}"
-    try:
-        args = json.loads(call["function"]["arguments"] or "{}")
-    except json.JSONDecodeError as exc:
-        return f"error: invalid arguments json ({exc})"
+
+    raw = call["function"].get("arguments")
+    if raw is None or raw == "":
+        args: dict[str, Any] = {}
+    elif isinstance(raw, dict):
+        # Some providers send arguments as a JSON object directly instead of
+        # the OpenAI default of a JSON-encoded string.
+        args = raw
+    elif isinstance(raw, str):
+        try:
+            args = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return f"error: invalid arguments json ({exc})"
+    else:
+        return f"error: invalid arguments shape ({type(raw).__name__})"
+
     try:
         return await tool.handler(args)
     except Exception as exc:  # noqa: BLE001 — surface to LLM, don't crash the loop
