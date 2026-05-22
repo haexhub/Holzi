@@ -1,6 +1,8 @@
 import asyncio
+import ipaddress
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import trafilatura
@@ -8,6 +10,33 @@ import trafilatura
 from hermes.agent import Tool
 
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
+
+_DENIED_HOSTNAMES = {"localhost", "ip6-localhost", "ip6-loopback"}
+
+
+def _validate_safe_url(url: str) -> str | None:
+    # Defense against the LLM being told to fetch internal services by IP.
+    # No DNS resolution — DNS rebinding is out of scope for this threat model.
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return f"scheme not allowed: {parsed.scheme or '(none)'}"
+    host = (parsed.hostname or "").lower()
+    if not host or host in _DENIED_HOSTNAMES:
+        return f"host not allowed: {host or '(none)'}"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
+        return f"address not allowed: {host}"
+    return None
 
 
 def build_external_tools(
@@ -82,6 +111,9 @@ def _url_fetch(http: httpx.AsyncClient | None) -> Tool:
         url = str(args.get("url", "")).strip()
         if not url:
             return json.dumps({"error": "url must be a non-empty string"})
+        err = _validate_safe_url(url)
+        if err is not None:
+            return json.dumps({"error": err})
         try:
             resp = await http.get(url, follow_redirects=True, timeout=20.0)
             resp.raise_for_status()

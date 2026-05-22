@@ -123,3 +123,24 @@ async def test_url_fetch_rejects_empty_url() -> None:
     tool = _by_name(tools, "url_fetch")
     data = json.loads(await tool.handler({"url": ""}))
     assert "error" in data
+
+
+async def test_url_fetch_rejects_unsafe_targets() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError(f"network call must not happen: {request.url}")
+
+    tools = build_external_tools(_make_http(handler), None)
+    tool = _by_name(tools, "url_fetch")
+
+    for bad in [
+        "file:///etc/passwd",
+        "ftp://example.com/x",
+        "http://localhost/",
+        "http://127.0.0.1/admin",
+        "http://10.0.0.1/internal",
+        "http://192.168.1.1/router",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://[::1]/x",
+    ]:
+        data = json.loads(await tool.handler({"url": bad}))
+        assert "error" in data, f"expected reject for {bad}"

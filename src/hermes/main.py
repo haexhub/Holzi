@@ -47,74 +47,81 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         signal_enabled=bool(settings.signal_number),
         model=settings.model,
     )
-    app.state.db = await init_db(settings.db_path)
-    app.state.upstream = build_upstream_client(settings.llm_url, settings.llm_api_key)
+    app.state.db = None
+    app.state.upstream = None
     app.state.signal_http = None
     app.state.signal_worker = None
+    app.state.external_http = None
+    app.state.scheduler = None
+    app.state.tool_catalog = []
     signal_client_for_tools: SignalClient | None = None
 
-    if settings.signal_number:
-        app.state.signal_http = httpx.AsyncClient(base_url=settings.signal_url, timeout=60.0)
-        signal_client_for_tools = SignalClient(app.state.signal_http, settings.signal_number)
+    try:
+        app.state.db = await init_db(settings.db_path)
+        app.state.upstream = build_upstream_client(settings.llm_url, settings.llm_api_key)
 
-        async def signal_agent_runner(
-            db: aiosqlite.Connection, conversation_id: int
-        ) -> str:
-            return await run_agent(
-                upstream=app.state.upstream,
-                db=db,
-                conversation_id=conversation_id,
-                system_prompt=SIGNAL_SYSTEM_PROMPT,
-                model=settings.model,
+        if settings.signal_number:
+            app.state.signal_http = httpx.AsyncClient(base_url=settings.signal_url, timeout=60.0)
+            signal_client_for_tools = SignalClient(app.state.signal_http, settings.signal_number)
+
+            async def signal_agent_runner(
+                db: aiosqlite.Connection, conversation_id: int
+            ) -> str:
+                return await run_agent(
+                    upstream=app.state.upstream,
+                    db=db,
+                    conversation_id=conversation_id,
+                    system_prompt=SIGNAL_SYSTEM_PROMPT,
+                    model=settings.model,
+                )
+
+            app.state.signal_worker = SignalWorker(
+                signal_client_for_tools,
+                app.state.db,
+                settings.signal_number,
+                agent_runner=signal_agent_runner,
             )
+            await app.state.signal_worker.start()
 
-        app.state.signal_worker = SignalWorker(
-            signal_client_for_tools,
-            app.state.db,
-            settings.signal_number,
-            agent_runner=signal_agent_runner,
+        app.state.external_http = httpx.AsyncClient(timeout=20.0)
+
+        app.state.tool_catalog = (
+            build_memory_tools(app.state.db)
+            + build_cross_channel_tools(
+                app.state.db,
+                signal_client_for_tools,
+                settings.signal_number or None,
+            )
+            + build_productivity_tools(app.state.db)
+            + build_external_tools(
+                app.state.external_http,
+                settings.brave_api_key or None,
+            )
         )
-        await app.state.signal_worker.start()
 
-    # External-HTTP client used by web_search / url_fetch tools.
-    app.state.external_http = httpx.AsyncClient(timeout=20.0)
-
-    # Tool catalog: shared between MCP exposure and (later) the internal agent.
-    app.state.tool_catalog = (
-        build_memory_tools(app.state.db)
-        + build_cross_channel_tools(
+        app.state.scheduler = ReminderScheduler(
             app.state.db,
             signal_client_for_tools,
             settings.signal_number or None,
         )
-        + build_productivity_tools(app.state.db)
-        + build_external_tools(
-            app.state.external_http,
-            settings.brave_api_key or None,
-        )
-    )
+        await app.state.scheduler.start()
 
-    # Reminder scheduler — fires due reminders through the Signal send path.
-    app.state.scheduler = ReminderScheduler(
-        app.state.db,
-        signal_client_for_tools,
-        settings.signal_number or None,
-    )
-    await app.state.scheduler.start()
-
-    try:
         async with mcp_session_manager(app.state.tool_catalog) as mcp_mgr:
             app.state.mcp_manager = mcp_mgr
             yield
     finally:
-        await app.state.scheduler.stop()
+        if app.state.scheduler is not None:
+            await app.state.scheduler.stop()
         if app.state.signal_worker is not None:
             await app.state.signal_worker.stop()
         if app.state.signal_http is not None:
             await app.state.signal_http.aclose()
-        await app.state.external_http.aclose()
-        await app.state.upstream.aclose()
-        await app.state.db.close()
+        if app.state.external_http is not None:
+            await app.state.external_http.aclose()
+        if app.state.upstream is not None:
+            await app.state.upstream.aclose()
+        if app.state.db is not None:
+            await app.state.db.close()
         logger.info("hermes_stopping")
 
 

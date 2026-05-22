@@ -79,7 +79,7 @@ async def mark_fired(
 ) -> None:
     now = ts if ts is not None else int(time.time())
     await conn.execute(
-        "UPDATE reminders SET fired_at = ? WHERE id = ?",
+        "UPDATE reminders SET fired_at = ? WHERE id = ? AND fired_at IS NULL",
         (now, reminder_id),
     )
     await conn.commit()

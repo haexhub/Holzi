@@ -178,7 +178,8 @@ def _todo_done(db: aiosqlite.Connection) -> Tool:
             return json.dumps({"error": f"todo {todo_id} not found or already done"})
 
         t = await todos.get(db, todo_id)
-        assert t is not None
+        if t is None:
+            return json.dumps({"error": f"todo {todo_id} disappeared after mark_done"})
         return json.dumps(
             {"id": t.id, "content": t.content, "done_at": t.done_at}
         )

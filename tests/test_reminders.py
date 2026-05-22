@@ -46,3 +46,14 @@ async def test_mark_fired_sets_fired_at(conn: aiosqlite.Connection) -> None:
 
     pending = await reminders.list_all(conn, include_fired=True)
     assert pending[0].fired_at == 2500
+
+
+async def test_mark_fired_preserves_existing_fired_at(
+    conn: aiosqlite.Connection,
+) -> None:
+    r = await reminders.create(conn, due_at=2000, message="x", ts=1000)
+    await reminders.mark_fired(conn, r.id, ts=2500)
+    await reminders.mark_fired(conn, r.id, ts=9999)
+
+    everything = await reminders.list_all(conn, include_fired=True)
+    assert everything[0].fired_at == 2500
