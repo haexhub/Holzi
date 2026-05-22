@@ -1,65 +1,73 @@
-# Session handoff — 2026-05-22
+# Session handoff — 2026-05-22 (late)
 
-Read this when picking up the Hermes ([[project-hermes-agent]]) work in a new conversation. Memory under `/home/haex/.claude/projects/-home-haex-Projekte-Holzi/memory/` already mirrors most of this, but this document is the single-page snapshot.
+Read this when picking up the Hermes ([[project-hermes-agent]]) work in a new conversation. Memory under `/home/haex/.claude/projects/-home-haex-Projekte-Holzi/memory/` mirrors most of this; the deep what's-next breakdown lives in [`2026-05-22-roadmap.md`](./2026-05-22-roadmap.md).
 
-## Where things stand right now
+## tldr
 
-Branch state (verify with `git fetch --prune && git log --oneline origin/main -n 10` before acting):
+Phase 0–8 plus a stack of follow-ups are on `main`. The Nuxt frontend is in its own repo ([holzi-frontend](https://github.com/haexhub/holzi-frontend)) and is functionally complete for the MVP loop. The SQLAlchemy Core refactor that was queued in the memory is also done. Both repos have CI (pytest+ruff+mypy / nuxt-typecheck+vitest). No open PRs.
+
+**Next item per the roadmap doc**: token-by-token streaming animation on the frontend (B.1), or A.1 frontend-handoff Dockerfile to unblock Phase 10 deploy. See the roadmap for the full ordered list.
+
+## Branch state
+
+Verify with `git fetch --prune && git log --oneline origin/main -n 10` before acting.
 
 ```
-origin/main (latest):
+origin/main (Holzi, as of session end):
+  686a571 ci: pytest + ruff + mypy on PRs and main (#12)
+  507126a Repo layer on SQLAlchemy Core (async) (#11)
+  3aed12b Tighten MessageResponse.role to Literal[user|assistant|tool] (#10)
+  0e6f599 Backend: response_model= on /api endpoints (#9)
+  85b0d8d Token-level SSE streaming on /api/chat (#8)
+  f002ad5 Phase 8: web-UI backend (/api/*) with recursion-guarded tool catalog (#7)
+  b8cfb4a docs: refresh handoff after Phase 7 merge
   433b8ce Phase 7: productivity + external tools, reminder scheduler (#6)
-  9ff3343 Phase 6: MCP server with memory + cross-channel tools (#5)
-  106f157 Phase 5: Agent loop with tool-use (#4)
-  26917ce Phase 4: Signal worker (#3)
-  8bb544e Phase 3: OpenAI-compatible LLM proxy (#2)
-  69e77e0 Merge pull request #1 from haexhub/phase-2-memory-layer
-  7285e3b Address code review on PR #1
-  a11cfa5 Phase 2: SQLite memory layer
-  a4849fa Phase 1: hermes-server skeleton
-  39ad140 Phase 0: project skeleton
+
+origin/main (holzi-frontend, separate repo):
+  53af4b1 ci: nuxt typecheck + vitest on PRs and main (#4)
+  7ddf713 Regen types after backend role-Literal tightening (#3)
+  08bff4a Alias all API response types from the generated openapi schema (#2)
+  d11d4ea openapi-typescript + Vitest (#1)
+  e01fad2 Initial commit: Nuxt 4 + shadcn-vue SPA frontend for Hermes
+```
 
 No open PRs.
-```
 
-**Phase 0–7 are on `main`.** PR #6 was squash-merged at 2026-05-22T11:05:49Z after one CodeRabbit round (4 findings fixed, 4 skipped with reasoning, 3 new tests; 118/118 green).
+## What landed this session
 
-## What landed in Phase 7 (catalogue size now **14**)
+See [`2026-05-22-roadmap.md`](./2026-05-22-roadmap.md) for the full per-PR breakdown. High-level:
 
-- 7 new tools: `reminder_set`, `reminder_list`, `todo_add`, `todo_list`, `todo_done`, `web_search` (Brave), `url_fetch` (trafilatura).
-- New tables: `reminders`, `todos` (partial indexes on open/pending rows).
-- New repos: `hermes.repository.reminders`, `hermes.repository.todos`.
-- New module `hermes.scheduler` — `ReminderScheduler` asyncio loop, polls every 60 s, fires via the existing `SignalClient`.
-- Separate `app.state.external_http` so a broken Brave key can't poison the LLM client.
-- New setting `HERMES_BRAVE_API_KEY` (optional). `.env.example` documents it.
-- New dependency: `trafilatura>=1.12` (sync, called via `asyncio.to_thread`).
-- Review-fix commit hardened the lifespan teardown (None-init + guarded cleanup), added SSRF guard on `url_fetch` (scheme + IP-literal block-list, no DNS resolve), replaced an `assert` in `todo_done` with an explicit error, and added the `AND fired_at IS NULL` guard to `reminders.mark_fired`.
+- Phase 8 web-UI backend: `/api/chat` (SSE), `/api/conversations`, `/api/notes`, `/api/todos`, `/api/reminders`.
+- Token-level SSE streaming on `/api/chat`, terminal-marker check on the upstream stream, cancellation cleanup on client disconnect.
+- `response_model=` on every endpoint → named OpenAPI shapes the frontend's `openapi-typescript` codegen consumes.
+- `MessageResponse.role` tightened to a `Literal` union → flows through to the frontend type.
+- **SQLAlchemy Core refactor**: `app.state.db` is now an `AsyncEngine`. Each repo opens its own short-lived transaction via `engine.begin()`. `schema.py` owns the regular tables; `schema.sql` is FTS5-only. Connect-event listener applies `PRAGMA foreign_keys=ON` per pool checkout. Tests run on tmp_path file DBs (StaticPool would race the scheduler on `:memory:`).
+- holzi-frontend: openapi-typescript pipeline, Vitest with 19 tests, all response/request types aliased from the generated schema.
+- GitHub Actions CI on both repos.
 
-## Next up → Phase 8
+## What still to do
 
-`docs/plans/2026-05-21-hermes-mvp-design.md` §5 Phase 8:
+The structured list is in [`2026-05-22-roadmap.md`](./2026-05-22-roadmap.md). Top picks for the next session:
 
-- `/api/chat` (REST + SSE) — streaming agent responses for the web UI.
-- `/api/conversations`, `/api/notes`, `/api/todos`, `/api/reminders` (REST CRUD, thin wrappers over the existing repos).
-- **First internal caller that hands `app.state.tool_catalog` to `run_agent`.** Recursion guard needed: prevent `cross_channel_send` to a Signal channel when the agent itself was triggered from a Signal envelope (Signal-worker keeps `tools=None` for now; web-UI gets full tool access). Encode the guard either by filtering the catalogue per request or by adding a "current channel" context to `cross_channel_send` so it refuses to send to the same channel.
+1. **Frontend token-by-token streaming animation** (visual polish; backend already emits incremental events).
+2. **`/api/chat` error semantics** (today every agent exception is a 200 + SSE `error` event).
+3. **Frontend → backend hand-off** in the deploy Dockerfile so `docker compose up` ships a working stack.
+4. **External MCP client manager** for haex-vault integration.
 
-Workflow:
-1. `cd /home/haex/Projekte/Holzi && git checkout main && git pull`.
-2. `gh auth status` — confirm active account is `haexhub` (see [[feedback-pr-workflow-hermes]]).
-3. `git switch -c phase-8-web-ui-backend`.
-4. Same TDD + per-endpoint test pattern as Phases 5–7.
-5. PR base = `main`, no stacking.
-6. CodeRabbit findings → triage against [[feedback-coderabbit-skip-patterns]].
+## Workflow reminders
+
+- Active gh account: `haexhub`. Push fails to `haex-space` periodically → `gh auth switch --user haexhub` and retry. See [[feedback-pr-workflow-hermes]].
+- CodeRabbit findings triage: [[feedback-coderabbit-skip-patterns]].
+- No "Generated with Claude Code" / "Co-Authored-By: Claude" trailers in commits.
+- Conversation: German. Code/commits/PR bodies: English.
 
 ## Tools / accounts / paths
 
-- Repo: https://github.com/haexhub/Holzi (active gh account: `haexhub`).
-- Working dir: `/home/haex/Projekte/Holzi`.
-- Python: `uv` is the package manager. `uv sync --extra dev` to install. `uv run pytest -q`, `uv run ruff check src tests`.
-- Container: `docker compose -p hermes build hermes-server`.
-- Design doc: `docs/plans/2026-05-21-hermes-mvp-design.md` (§6.7 has the phase-status table).
+- **Repo**: https://github.com/haexhub/Holzi
+- **Frontend repo**: https://github.com/haexhub/holzi-frontend (private, haexhub)
+- **Working dir**: `/home/haex/Projekte/Holzi` and `/home/haex/Projekte/holzi-frontend`
+- **Backend**: `uv` for installs, `uv run pytest -q`, `uv run ruff check src tests`, `uv run mypy src`.
+- **Frontend**: `pnpm`, Node 22. `pnpm test`, `pnpm typecheck`, `pnpm run gen:api` (regen types from running hermes).
+- **Design doc**: `docs/plans/2026-05-21-hermes-mvp-design.md`.
+- **Roadmap**: `docs/plans/2026-05-22-roadmap.md` (this session's output).
 - All conventions: global `~/.claude/CLAUDE.md` plus [[feedback-no-vpn]], [[feedback-coderabbit-skip-patterns]], [[feedback-pr-workflow-hermes]].
-
-## One-line summary for the next session
-
-> Phase 0–7 merged. Start Phase 8 (web-UI backend): `/api/chat` with SSE streaming + REST CRUD for conversations/notes/todos/reminders, first internal handover of `app.state.tool_catalog` to `run_agent` with a `cross_channel_send` recursion guard. Branch `phase-8-web-ui-backend` off `main`.
