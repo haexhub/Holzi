@@ -162,7 +162,31 @@ async def api_chat(request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/conversations")
+class ConversationResponse(BaseModel):
+    id: int
+    channel: str
+    title: str | None
+    started_at: int
+    updated_at: int
+
+
+class ConversationSummaryResponse(ConversationResponse):
+    message_count: int
+
+
+class MessageResponse(BaseModel):
+    id: int
+    role: str
+    content: str
+    ts: int
+
+
+class ConversationDetailResponse(BaseModel):
+    conversation: ConversationResponse
+    messages: list[MessageResponse]
+
+
+@router.get("/conversations", response_model=list[ConversationSummaryResponse])
 async def api_list_conversations(
     request: Request, channel: str | None = None, limit: int = 50
 ) -> list[dict[str, Any]]:
@@ -185,7 +209,7 @@ async def api_list_conversations(
     return out
 
 
-@router.get("/conversations/{conv_id}")
+@router.get("/conversations/{conv_id}", response_model=ConversationDetailResponse)
 async def api_get_conversation(
     request: Request, conv_id: int, limit: int = 200
 ) -> dict[str, Any]:
@@ -226,6 +250,14 @@ class NoteUpdate(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class NoteResponse(BaseModel):
+    id: int
+    key: str
+    content: str
+    tags: str | None
+    updated_at: int
+
+
 def _note_to_dict(n: Any) -> dict[str, Any]:
     return {
         "id": n.id,
@@ -236,7 +268,7 @@ def _note_to_dict(n: Any) -> dict[str, Any]:
     }
 
 
-@router.get("/notes")
+@router.get("/notes", response_model=list[NoteResponse])
 async def api_list_notes(request: Request, limit: int = 100) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
     db: aiosqlite.Connection = request.app.state.db
@@ -244,7 +276,7 @@ async def api_list_notes(request: Request, limit: int = 100) -> list[dict[str, A
     return [_note_to_dict(n) for n in items]
 
 
-@router.get("/notes/{key}")
+@router.get("/notes/{key}", response_model=NoteResponse)
 async def api_get_note(request: Request, key: str) -> dict[str, Any]:
     db: aiosqlite.Connection = request.app.state.db
     n = await notes.get(db, key)
@@ -253,7 +285,7 @@ async def api_get_note(request: Request, key: str) -> dict[str, Any]:
     return _note_to_dict(n)
 
 
-@router.post("/notes")
+@router.post("/notes", response_model=NoteResponse)
 async def api_create_note(request: Request, body: NoteCreate) -> dict[str, Any]:
     db: aiosqlite.Connection = request.app.state.db
     tags = ",".join(body.tags) if body.tags else None
@@ -261,7 +293,7 @@ async def api_create_note(request: Request, body: NoteCreate) -> dict[str, Any]:
     return _note_to_dict(n)
 
 
-@router.put("/notes/{key}")
+@router.put("/notes/{key}", response_model=NoteResponse)
 async def api_update_note(
     request: Request, key: str, body: NoteUpdate
 ) -> dict[str, Any]:
@@ -293,6 +325,14 @@ class TodoUpdate(BaseModel):
     done: bool
 
 
+class TodoResponse(BaseModel):
+    id: int
+    content: str
+    tags: str | None
+    done_at: int | None
+    created_at: int
+
+
 def _todo_to_dict(t: Any) -> dict[str, Any]:
     return {
         "id": t.id,
@@ -303,7 +343,7 @@ def _todo_to_dict(t: Any) -> dict[str, Any]:
     }
 
 
-@router.get("/todos")
+@router.get("/todos", response_model=list[TodoResponse])
 async def api_list_todos(
     request: Request,
     only_open: bool = True,
@@ -316,7 +356,7 @@ async def api_list_todos(
     return [_todo_to_dict(t) for t in items]
 
 
-@router.post("/todos")
+@router.post("/todos", response_model=TodoResponse)
 async def api_create_todo(request: Request, body: TodoCreate) -> dict[str, Any]:
     db: aiosqlite.Connection = request.app.state.db
     tags = ",".join(body.tags) if body.tags else None
@@ -324,7 +364,7 @@ async def api_create_todo(request: Request, body: TodoCreate) -> dict[str, Any]:
     return _todo_to_dict(t)
 
 
-@router.patch("/todos/{todo_id}")
+@router.patch("/todos/{todo_id}", response_model=TodoResponse)
 async def api_patch_todo(
     request: Request, todo_id: int, body: TodoUpdate
 ) -> dict[str, Any]:
@@ -365,6 +405,15 @@ class ReminderCreate(BaseModel):
     channel: str = "signal"
 
 
+class ReminderResponse(BaseModel):
+    id: int
+    due_at: int
+    message: str
+    channel: str
+    fired_at: int | None
+    created_at: int
+
+
 def _reminder_to_dict(r: Any) -> dict[str, Any]:
     return {
         "id": r.id,
@@ -376,7 +425,7 @@ def _reminder_to_dict(r: Any) -> dict[str, Any]:
     }
 
 
-@router.get("/reminders")
+@router.get("/reminders", response_model=list[ReminderResponse])
 async def api_list_reminders(
     request: Request, include_fired: bool = False, limit: int = 100
 ) -> list[dict[str, Any]]:
@@ -386,7 +435,7 @@ async def api_list_reminders(
     return [_reminder_to_dict(r) for r in items]
 
 
-@router.post("/reminders")
+@router.post("/reminders", response_model=ReminderResponse)
 async def api_create_reminder(
     request: Request, body: ReminderCreate
 ) -> dict[str, Any]:
