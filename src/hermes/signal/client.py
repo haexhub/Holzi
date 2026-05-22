@@ -15,7 +15,12 @@ class SignalClient:
             timeout=timeout + 5,
         )
         response.raise_for_status()
-        return list(response.json())
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise ValueError(
+                f"signal-cli /v1/receive returned non-list payload: {type(payload).__name__}"
+            )
+        return payload
 
     async def send(self, *, recipient: str, message: str) -> None:
         response = await self.http.post(

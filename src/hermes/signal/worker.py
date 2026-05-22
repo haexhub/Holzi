@@ -78,15 +78,20 @@ class SignalWorker:
         await messages.append(
             self.db, conversation_id=convo.id, role="user", content=text, ts=current
         )
-        await self.client.send(recipient=self.self_number, message=CANNED_REPLY)
-        await messages.append(
-            self.db,
-            conversation_id=convo.id,
-            role="assistant",
-            content=CANNED_REPLY,
-            ts=current,
-        )
-        await conversations.touch(self.db, convo.id, ts=current)
+        try:
+            await self.client.send(recipient=self.self_number, message=CANNED_REPLY)
+            await messages.append(
+                self.db,
+                conversation_id=convo.id,
+                role="assistant",
+                content=CANNED_REPLY,
+                ts=current,
+            )
+        finally:
+            # Touch even if send fails, otherwise the 6h gap heuristic in
+            # _resolve_conversation can pick a stale conversation on the next
+            # inbound message.
+            await conversations.touch(self.db, convo.id, ts=current)
 
     async def _resolve_conversation(self, now: int) -> Any:
         latest = await conversations.list_by_channel(self.db, "signal", limit=1)

@@ -45,9 +45,14 @@ docker compose -p hermes exec signal-cli-rest-api \
     signal-cli link -n hermes
 # The command prints a tsdevice:/... URI.
 
-# 2. Open Signal on your phone → Settings → Linked devices → Add device,
-#    then scan the QR code generated from that URI (e.g. paste it into
-#    https://qrcode.show or a local qrencode).
+# 2. Render that URI as a QR code LOCALLY and scan it from your phone
+#    (Signal → Settings → Linked devices → Add device).
+#
+#    DO NOT paste the tsdevice:/... URI into a public/online QR-code
+#    generator — it carries the one-time pairing token and anyone who
+#    sees it can hijack the link. Use a local tool:
+#        qrencode -t ANSIUTF8 'tsdevice:/?uuid=...&pub_key=...'
+#    or any offline QR utility on your machine.
 
 # 3. Set HERMES_SIGNAL_NUMBER to YOUR Signal number in .env (E.164, e.g.
 #    +491701234567) and restart:
