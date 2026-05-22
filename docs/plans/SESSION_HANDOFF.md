@@ -8,6 +8,7 @@ Branch state (verify with `git fetch --prune && git log --oneline origin/main -n
 
 ```
 origin/main (latest):
+  433b8ce Phase 7: productivity + external tools, reminder scheduler (#6)
   9ff3343 Phase 6: MCP server with memory + cross-channel tools (#5)
   106f157 Phase 5: Agent loop with tool-use (#4)
   26917ce Phase 4: Signal worker (#3)
@@ -18,55 +19,37 @@ origin/main (latest):
   a4849fa Phase 1: hermes-server skeleton
   39ad140 Phase 0: project skeleton
 
-Open branch:
-  phase-7-productivity-external   PR #6 → main
+No open PRs.
 ```
 
-**Phase 0–6 are on `main`.** **PR #6 (Phase 7)** is open and stuck waiting on CodeRabbit. The rate-limit window resets around **2026-05-22T10:43:00Z**. Last successful operation: phase-7 branch pushed, PR opened, CodeRabbit response was a rate-limit warning (41 minutes wait).
+**Phase 0–7 are on `main`.** PR #6 was squash-merged at 2026-05-22T11:05:49Z after one CodeRabbit round (4 findings fixed, 4 skipped with reasoning, 3 new tests; 118/118 green).
 
-There is **no active background watcher** anymore (stopped before handoff).
+## What landed in Phase 7 (catalogue size now **14**)
 
-## Pick up the PR #6 review
-
-1. `cd /home/haex/Projekte/Holzi`
-2. `gh auth status` — verify active account is `haexhub`, not `haex-space`. If wrong, `gh auth switch --user haexhub`. (Pattern documented in [[feedback-pr-workflow-hermes]].)
-3. Check whether the rate-limit window has passed. If not, wait it out — re-triggering before the reset extends the clock.
-4. `gh pr comment 6 --body "@coderabbitai review"` to trigger.
-5. Poll for the review:
-   ```bash
-   until [[ "$(gh api repos/haexhub/Holzi/pulls/6/reviews | jq '. | length')" -gt 0 ]]; do
-     sleep 30
-   done
-   ```
-   Don't be fooled by the `"Review triggered"` issue-comment — that's the acknowledgement, not the review. The real review shows up as an entry in `pulls/6/reviews`.
-6. Walk through the actionable + nitpick findings against [[feedback-coderabbit-skip-patterns]]. Apply valid ones. Skip the rest with a one-line reason in the commit body.
-7. `git push origin phase-7-productivity-external`. CodeRabbit re-reviews automatically; wait for `statusCheckRollup[0].state == "SUCCESS"`.
-8. `gh pr merge 6 --squash --delete-branch=false` and `git pull origin main` locally.
-
-## What PR #6 contains (summary)
-
-- 7 new tools added to the catalogue: `reminder_set`, `reminder_list`, `todo_add`, `todo_list`, `todo_done`, `web_search` (Brave), `url_fetch` (trafilatura). Total catalogue size is now **14**.
-- New tables in `schema.sql`: `reminders`, `todos` (both with partial indexes on open/pending rows).
+- 7 new tools: `reminder_set`, `reminder_list`, `todo_add`, `todo_list`, `todo_done`, `web_search` (Brave), `url_fetch` (trafilatura).
+- New tables: `reminders`, `todos` (partial indexes on open/pending rows).
 - New repos: `hermes.repository.reminders`, `hermes.repository.todos`.
 - New module `hermes.scheduler` — `ReminderScheduler` asyncio loop, polls every 60 s, fires via the existing `SignalClient`.
-- New `app.state.external_http` (separate `httpx.AsyncClient`) so a broken Brave key can't poison the LLM client.
+- Separate `app.state.external_http` so a broken Brave key can't poison the LLM client.
 - New setting `HERMES_BRAVE_API_KEY` (optional). `.env.example` documents it.
 - New dependency: `trafilatura>=1.12` (sync, called via `asyncio.to_thread`).
-- 115/115 tests green, ruff clean, container builds.
+- Review-fix commit hardened the lifespan teardown (None-init + guarded cleanup), added SSRF guard on `url_fetch` (scheme + IP-literal block-list, no DNS resolve), replaced an `assert` in `todo_done` with an explicit error, and added the `AND fired_at IS NULL` guard to `reminders.mark_fired`.
 
-## After PR #6 is merged → Phase 8
+## Next up → Phase 8
 
 `docs/plans/2026-05-21-hermes-mvp-design.md` §5 Phase 8:
 
-- `/api/chat` (REST + SSE) — streaming agent responses for the web UI
-- `/api/conversations`, `/api/notes`, `/api/todos`, `/api/reminders` (REST CRUD)
+- `/api/chat` (REST + SSE) — streaming agent responses for the web UI.
+- `/api/conversations`, `/api/notes`, `/api/todos`, `/api/reminders` (REST CRUD, thin wrappers over the existing repos).
 - **First internal caller that hands `app.state.tool_catalog` to `run_agent`.** Recursion guard needed: prevent `cross_channel_send` to a Signal channel when the agent itself was triggered from a Signal envelope (Signal-worker keeps `tools=None` for now; web-UI gets full tool access). Encode the guard either by filtering the catalogue per request or by adding a "current channel" context to `cross_channel_send` so it refuses to send to the same channel.
 
-Workflow for Phase 8:
-1. `git checkout main && git pull` (after #6 merges).
-2. `git switch -c phase-8-web-ui-backend`.
-3. Branch off; same TDD + per-tool test pattern as Phases 5–7.
-4. PR base = `main`, no stacking needed since #6 will be merged by then.
+Workflow:
+1. `cd /home/haex/Projekte/Holzi && git checkout main && git pull`.
+2. `gh auth status` — confirm active account is `haexhub` (see [[feedback-pr-workflow-hermes]]).
+3. `git switch -c phase-8-web-ui-backend`.
+4. Same TDD + per-endpoint test pattern as Phases 5–7.
+5. PR base = `main`, no stacking.
+6. CodeRabbit findings → triage against [[feedback-coderabbit-skip-patterns]].
 
 ## Tools / accounts / paths
 
@@ -79,4 +62,4 @@ Workflow for Phase 8:
 
 ## One-line summary for the next session
 
-> Phase 0–6 merged. PR #6 (Phase 7) open, awaiting CodeRabbit (rate-limit reset ~10:43 UTC). Retrigger review, apply valid findings per [[feedback-coderabbit-skip-patterns]], merge, then start Phase 8 (web-UI backend, `/api/chat` with streaming + tool-catalogue access for the agent).
+> Phase 0–7 merged. Start Phase 8 (web-UI backend): `/api/chat` with SSE streaming + REST CRUD for conversations/notes/todos/reminders, first internal handover of `app.state.tool_catalog` to `run_agent` with a `cross_channel_send` recursion guard. Branch `phase-8-web-ui-backend` off `main`.
