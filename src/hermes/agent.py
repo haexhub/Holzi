@@ -10,6 +10,8 @@ from hermes.repository import messages
 
 CHAT_PATH = "/v1/chat/completions"
 
+OnChunk = Callable[[str], Awaitable[None]]
+
 
 @dataclass(frozen=True, slots=True)
 class Tool:
@@ -28,6 +30,7 @@ async def run_agent(
     model: str,
     tools: list[Tool] | None = None,
     max_iterations: int = 10,
+    on_chunk: OnChunk | None = None,
 ) -> str:
     """Run a single agent turn until the assistant stops requesting tool calls.
 
@@ -35,6 +38,13 @@ async def run_agent(
     the new user message already). Each LLM call is one iteration; tool
     results are persisted and fed back as the next request. Returns the
     final assistant text.
+
+    When `on_chunk` is given, the upstream request is sent with
+    `stream=True` and every `delta.content` is forwarded to the callback
+    incrementally — useful for the web-UI's SSE stream. Tool-call rounds
+    still produce no visible text chunks (the LLM emits empty content
+    deltas alongside the tool_call deltas). When `on_chunk` is None the
+    non-streaming JSON path is used (Signal worker, MCP, tests).
     """
     history = await messages.list_by_conversation(db, conversation_id)
     request_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -49,27 +59,26 @@ async def run_agent(
         if tools_payload:
             body["tools"] = tools_payload
 
-        resp = await upstream.post(CHAT_PATH, json=body)
-        resp.raise_for_status()
-        data = resp.json()
-        choice = data["choices"][0]
-        msg = choice["message"]
-        tool_calls = msg.get("tool_calls") or []
+        if on_chunk is None:
+            assistant_text, tool_calls = await _request_round_nonstream(upstream, body)
+        else:
+            body["stream"] = True
+            assistant_text, tool_calls = await _request_round_stream(
+                upstream, body, on_chunk
+            )
 
         if not tool_calls:
-            text = str(msg.get("content") or "")
             await messages.append(
-                db, conversation_id=conversation_id, role="assistant", content=text
+                db, conversation_id=conversation_id, role="assistant", content=assistant_text
             )
-            return text
+            return assistant_text
 
-        # Assistant turn that requested tools — persist it with the tool_calls
-        # in meta_json so we can replay it later if needed.
-        assistant_content = str(msg.get("content") or "")
+        # Assistant turn that requested tools — persist with the tool_calls
+        # in meta_json so we can replay later if needed.
         request_messages.append(
             {
                 "role": "assistant",
-                "content": assistant_content,
+                "content": assistant_text,
                 "tool_calls": tool_calls,
             }
         )
@@ -77,7 +86,7 @@ async def run_agent(
             db,
             conversation_id=conversation_id,
             role="assistant",
-            content=assistant_content,
+            content=assistant_text,
             meta_json=json.dumps({"tool_calls": tool_calls}),
         )
 
@@ -101,6 +110,76 @@ async def run_agent(
             )
 
     raise RuntimeError(f"agent loop exceeded max_iterations={max_iterations}")
+
+
+async def _request_round_nonstream(
+    upstream: httpx.AsyncClient, body: dict[str, Any]
+) -> tuple[str, list[dict[str, Any]]]:
+    resp = await upstream.post(CHAT_PATH, json=body)
+    resp.raise_for_status()
+    data = resp.json()
+    msg = data["choices"][0]["message"]
+    text = str(msg.get("content") or "")
+    tool_calls = list(msg.get("tool_calls") or [])
+    return text, tool_calls
+
+
+async def _request_round_stream(
+    upstream: httpx.AsyncClient,
+    body: dict[str, Any],
+    on_chunk: OnChunk,
+) -> tuple[str, list[dict[str, Any]]]:
+    text_parts: list[str] = []
+    # Indexed by `delta.tool_calls[i].index` because each call's fields
+    # arrive split across chunks.
+    tool_calls_by_idx: dict[int, dict[str, Any]] = {}
+
+    async with upstream.stream("POST", CHAT_PATH, json=body) as resp:
+        resp.raise_for_status()
+        async for raw_line in resp.aiter_lines():
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:") :].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            choices = obj.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+
+            content = delta.get("content")
+            if content:
+                text_parts.append(content)
+                await on_chunk(content)
+
+            for tc in delta.get("tool_calls") or []:
+                _accumulate_tool_call(tool_calls_by_idx, tc)
+
+    text = "".join(text_parts)
+    tool_calls = [tool_calls_by_idx[i] for i in sorted(tool_calls_by_idx.keys())]
+    return text, tool_calls
+
+
+def _accumulate_tool_call(
+    sink: dict[int, dict[str, Any]], delta_tc: dict[str, Any]
+) -> None:
+    idx = delta_tc.get("index", 0)
+    target = sink.setdefault(idx, {"function": {}})
+    if "id" in delta_tc:
+        target["id"] = delta_tc["id"]
+    if "type" in delta_tc:
+        target["type"] = delta_tc["type"]
+    fn_delta = delta_tc.get("function") or {}
+    target_fn = target["function"]
+    if "name" in fn_delta:
+        target_fn["name"] = fn_delta["name"]
+    if "arguments" in fn_delta:
+        target_fn["arguments"] = target_fn.get("arguments", "") + fn_delta["arguments"]
 
 
 def _history_row_to_request_message(m: Any) -> dict[str, Any]:
@@ -153,8 +232,6 @@ async def _execute_tool_call(call: dict[str, Any], lookup: dict[str, Tool]) -> s
     if raw is None or raw == "":
         args: dict[str, Any] = {}
     elif isinstance(raw, dict):
-        # Some providers send arguments as a JSON object directly instead of
-        # the OpenAI default of a JSON-encoded string.
         args = raw
     elif isinstance(raw, str):
         try:
