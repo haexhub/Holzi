@@ -2,9 +2,9 @@ import json
 import time
 from typing import Any
 
-import aiosqlite
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hermes.repository import conversations, messages
 from hermes.signal.client import SignalClient
@@ -47,7 +47,7 @@ def _envelope(
 def _echoing_agent_runner():
     """Stand-in for run_agent: echoes the last user message back and persists it."""
 
-    async def runner(db: aiosqlite.Connection, conversation_id: int) -> str:
+    async def runner(db: AsyncConnection, conversation_id: int) -> str:
         msgs = await messages.list_by_conversation(db, conversation_id)
         last_user = next((m for m in reversed(msgs) if m.role == "user"), None)
         reply = f"agent says: {last_user.content if last_user else ''}"
@@ -60,14 +60,14 @@ def _echoing_agent_runner():
 
 
 def _never_called_agent_runner():
-    async def runner(db: aiosqlite.Connection, conversation_id: int) -> str:
+    async def runner(db: AsyncConnection, conversation_id: int) -> str:
         raise AssertionError("agent runner should not have been called")
 
     return runner
 
 
 async def test_process_envelope_persists_note_to_self_and_replies_via_agent(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     sends: list[dict[str, Any]] = []
     worker = SignalWorker(
@@ -96,7 +96,7 @@ async def test_process_envelope_persists_note_to_self_and_replies_via_agent(
 
 
 async def test_process_envelope_ignores_messages_from_other_numbers(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     sends: list[dict[str, Any]] = []
     worker = SignalWorker(
@@ -113,7 +113,7 @@ async def test_process_envelope_ignores_messages_from_other_numbers(
 
 
 async def test_process_envelope_ignores_envelopes_without_text(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     sends: list[dict[str, Any]] = []
     worker = SignalWorker(
@@ -130,7 +130,7 @@ async def test_process_envelope_ignores_envelopes_without_text(
 
 
 async def test_process_envelope_appends_to_existing_conversation_within_6h(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     one_hour_ago = int(time.time()) - 3600
     existing = await conversations.create(conn, channel="signal", ts=one_hour_ago)
@@ -153,7 +153,7 @@ async def test_process_envelope_appends_to_existing_conversation_within_6h(
 
 
 async def test_process_envelope_creates_new_conversation_when_gap_exceeds_6h(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     seven_hours_ago = int(time.time()) - 7 * 3600
     existing = await conversations.create(conn, channel="signal", ts=seven_hours_ago)
@@ -177,14 +177,14 @@ async def test_process_envelope_creates_new_conversation_when_gap_exceeds_6h(
 
 
 def _failing_agent_runner():
-    async def runner(db: aiosqlite.Connection, conversation_id: int) -> str:
+    async def runner(db: AsyncConnection, conversation_id: int) -> str:
         raise RuntimeError("simulated agent failure")
 
     return runner
 
 
 async def test_process_envelope_touches_conversation_even_when_agent_fails(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     one_hour_ago = int(time.time()) - 3600
     existing = await conversations.create(conn, channel="signal", ts=one_hour_ago)

@@ -2,10 +2,10 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-import aiosqlite
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hermes.repository import conversations, messages
 from hermes.repository.models import Conversation
@@ -23,7 +23,7 @@ async def chat_completions(request: Request) -> Response:
         raise HTTPException(status_code=400, detail="invalid JSON body") from exc
     is_stream = bool(body.get("stream", False))
 
-    db: aiosqlite.Connection = request.app.state.db
+    db: AsyncConnection = request.app.state.db
     upstream: httpx.AsyncClient = request.app.state.upstream
 
     convo = await _resolve_conversation(request, db)
@@ -37,7 +37,7 @@ async def chat_completions(request: Request) -> Response:
 
 
 async def _resolve_conversation(
-    request: Request, db: aiosqlite.Connection
+    request: Request, db: AsyncConnection
 ) -> Conversation:
     header = request.headers.get("x-hermes-session")
     channel = request.headers.get("x-hermes-channel", "vscode")
@@ -57,7 +57,7 @@ async def _resolve_conversation(
 
 
 async def _persist_last_user_message(
-    db: aiosqlite.Connection, msgs: list[dict[str, Any]], conv_id: int
+    db: AsyncConnection, msgs: list[dict[str, Any]], conv_id: int
 ) -> None:
     if not msgs:
         return
@@ -79,7 +79,7 @@ async def _oneshot_forward(
     upstream: httpx.AsyncClient,
     body: dict[str, Any],
     headers: dict[str, str],
-    db: aiosqlite.Connection,
+    db: AsyncConnection,
     conv_id: int,
 ) -> Response:
     try:
@@ -122,7 +122,7 @@ async def _stream_forward(
     upstream: httpx.AsyncClient,
     body: dict[str, Any],
     headers: dict[str, str],
-    db: aiosqlite.Connection,
+    db: AsyncConnection,
     conv_id: int,
 ) -> StreamingResponse:
     request = upstream.build_request("POST", CHAT_PATH, json=body)

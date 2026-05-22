@@ -389,9 +389,9 @@ Phase 6 added a deliberate scope decision: the Signal worker still calls `run_ag
 
 **Streaming follow-up (post-Phase-8).** `run_agent` gained an optional `on_chunk` callback in a follow-up branch: when set, the upstream call uses `stream=True` and every `delta.content` is forwarded incrementally. Tool-call deltas are still assembled across chunks (id/type/name first, function.arguments concatenated). `/api/chat` now bridges this via an `asyncio.Queue` and emits one SSE `text` event per upstream chunk — the frontend's `useChatStream` already concatenates multiple `text` events, so no client change was needed. The Signal worker / MCP keep using the non-streaming JSON path (`on_chunk=None`, full backward compat).
 
-## 6.8 Repo-layer refactor (queued)
+## 6.8 Repo-layer refactor (done)
 
-After Phase 8 merges, the entire `hermes.repository` layer will move from hand-rolled `aiosqlite` SQL to **SQLAlchemy Core async** in a separate PR. Reason: Marko prefers a typed query builder (Drizzle-style) over plain SQL text. SQLAlchemy Core stays close to raw SQL (no ORM magic), supports SQLite + FTS5 (via `text()` / custom constructs for FTS), and is the most established async-capable option in Python. The migration is intentionally scope-isolated from Phase 8 to keep that PR a pure feature change.
+Done in a separate PR after Phase 8 merged. Drizzle-style typed query builder via **SQLAlchemy Core async**, no ORM. New `src/hermes/schema.py` owns the regular table definitions; `schema.sql` is reduced to FTS5 virtual tables + sync triggers + the partial index on pending reminders (SQLite-specific bits SQLAlchemy doesn't model). All repo modules now use `select() / insert() / update() / delete()` expressions and bind FTS5 queries through `text()`. App lifespan + test fixtures dispose the engine explicitly so the aiosqlite worker thread shuts down cleanly.
 
 ## 7. Out of scope (defer until after MVP works)
 

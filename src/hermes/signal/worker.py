@@ -4,7 +4,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hermes.logging import logger
 from hermes.repository import conversations, messages
@@ -14,14 +14,14 @@ from hermes.signal.client import SignalClient
 DEFAULT_CONVO_GAP_SECONDS = 6 * 3600
 DEFAULT_POLL_TIMEOUT = 30
 
-AgentRunner = Callable[[aiosqlite.Connection, int], Awaitable[str]]
+AgentRunner = Callable[[AsyncConnection, int], Awaitable[str]]
 
 
 class SignalWorker:
     def __init__(
         self,
         client: SignalClient,
-        db: aiosqlite.Connection,
+        db: AsyncConnection,
         self_number: str,
         *,
         agent_runner: AgentRunner,

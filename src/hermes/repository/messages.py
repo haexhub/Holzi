@@ -1,23 +1,25 @@
 import time
 
-import aiosqlite
+from sqlalchemy import asc, select, text
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hermes.repository.models import Message
+from hermes.schema import messages as t_messages
 
 
-def _row_to_message(row: aiosqlite.Row) -> Message:
+def _row_to_message(row) -> Message:
     return Message(
-        id=row["id"],
-        conversation_id=row["conversation_id"],
-        role=row["role"],
-        content=row["content"],
-        ts=row["ts"],
-        meta_json=row["meta_json"],
+        id=row.id,
+        conversation_id=row.conversation_id,
+        role=row.role,
+        content=row.content,
+        ts=row.ts,
+        meta_json=row.meta_json,
     )
 
 
 async def append(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
     *,
     conversation_id: int,
     role: str,
@@ -26,16 +28,23 @@ async def append(
     meta_json: str | None = None,
 ) -> Message:
     now = ts if ts is not None else int(time.time())
-    cursor = await conn.execute(
-        "INSERT INTO messages (conversation_id, role, content, ts, meta_json) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (conversation_id, role, content, now, meta_json),
+    result = await conn.execute(
+        t_messages.insert()
+        .values(
+            conversation_id=conversation_id,
+            role=role,
+            content=content,
+            ts=now,
+            meta_json=meta_json,
+        )
+        .returning(t_messages.c.id)
     )
     await conn.commit()
-    if cursor.lastrowid is None:
+    row = result.first()
+    if row is None:
         raise RuntimeError("INSERT into messages did not yield a rowid")
     return Message(
-        id=cursor.lastrowid,
+        id=row.id,
         conversation_id=conversation_id,
         role=role,
         content=content,
@@ -45,45 +54,45 @@ async def append(
 
 
 async def list_by_conversation(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
     conversation_id: int,
     *,
     limit: int = 50,
 ) -> list[Message]:
-    async with conn.execute(
-        "SELECT id, conversation_id, role, content, ts, meta_json "
-        "FROM messages WHERE conversation_id = ? "
-        "ORDER BY ts ASC, id ASC LIMIT ?",
-        (conversation_id, limit),
-    ) as cursor:
-        rows = await cursor.fetchall()
-    return [_row_to_message(r) for r in rows]
+    result = await conn.execute(
+        select(t_messages)
+        .where(t_messages.c.conversation_id == conversation_id)
+        .order_by(asc(t_messages.c.ts), asc(t_messages.c.id))
+        .limit(limit)
+    )
+    return [_row_to_message(r) for r in result]
 
 
 async def fts_search(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
     *,
     query: str,
     conversation_id: int | None = None,
     limit: int = 10,
 ) -> list[Message]:
+    # FTS5 isn't modelled by SQLAlchemy Core — fall back to raw SQL via
+    # `text()`. Parameters are bound, so no SQL injection.
     if conversation_id is None:
-        sql = (
+        sql = text(
             "SELECT m.id, m.conversation_id, m.role, m.content, m.ts, m.meta_json "
             "FROM messages m JOIN messages_fts f ON f.rowid = m.id "
-            "WHERE messages_fts MATCH ? "
-            "ORDER BY rank LIMIT ?"
+            "WHERE messages_fts MATCH :q "
+            "ORDER BY rank LIMIT :limit"
         )
-        params: tuple = (query, limit)
+        params = {"q": query, "limit": limit}
     else:
-        sql = (
+        sql = text(
             "SELECT m.id, m.conversation_id, m.role, m.content, m.ts, m.meta_json "
             "FROM messages m JOIN messages_fts f ON f.rowid = m.id "
-            "WHERE messages_fts MATCH ? AND m.conversation_id = ? "
-            "ORDER BY rank LIMIT ?"
+            "WHERE messages_fts MATCH :q AND m.conversation_id = :cid "
+            "ORDER BY rank LIMIT :limit"
         )
-        params = (query, conversation_id, limit)
+        params = {"q": query, "cid": conversation_id, "limit": limit}
 
-    async with conn.execute(sql, params) as cursor:
-        rows = await cursor.fetchall()
-    return [_row_to_message(r) for r in rows]
+    result = await conn.execute(sql, params)
+    return [_row_to_message(r) for r in result]

@@ -1,9 +1,9 @@
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hermes.repository import reminders
 
 
-async def test_create_reminder_returns_dataclass(conn: aiosqlite.Connection) -> None:
+async def test_create_reminder_returns_dataclass(conn: AsyncConnection) -> None:
     r = await reminders.create(conn, due_at=2000, message="standup", ts=1000)
     assert r.id > 0
     assert r.due_at == 2000
@@ -14,7 +14,7 @@ async def test_create_reminder_returns_dataclass(conn: aiosqlite.Connection) -> 
 
 
 async def test_list_all_returns_pending_only_by_default(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     a = await reminders.create(conn, due_at=2000, message="a", ts=1000)
     b = await reminders.create(conn, due_at=3000, message="b", ts=1000)
@@ -28,7 +28,7 @@ async def test_list_all_returns_pending_only_by_default(
 
 
 async def test_list_due_returns_only_pending_and_due(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     past = await reminders.create(conn, due_at=1000, message="past", ts=500)
     future = await reminders.create(conn, due_at=9000, message="future", ts=500)
@@ -40,7 +40,7 @@ async def test_list_due_returns_only_pending_and_due(
     _ = future  # silence
 
 
-async def test_mark_fired_sets_fired_at(conn: aiosqlite.Connection) -> None:
+async def test_mark_fired_sets_fired_at(conn: AsyncConnection) -> None:
     r = await reminders.create(conn, due_at=2000, message="x", ts=1000)
     await reminders.mark_fired(conn, r.id, ts=2500)
 
@@ -49,7 +49,7 @@ async def test_mark_fired_sets_fired_at(conn: aiosqlite.Connection) -> None:
 
 
 async def test_mark_fired_preserves_existing_fired_at(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     r = await reminders.create(conn, due_at=2000, message="x", ts=1000)
     await reminders.mark_fired(conn, r.id, ts=2500)

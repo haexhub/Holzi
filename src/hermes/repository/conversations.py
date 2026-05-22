@@ -1,23 +1,26 @@
 import time
 
-import aiosqlite
+from sqlalchemy import desc, func, select
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hermes.repository.models import Conversation
+from hermes.schema import conversations as t_conversations
+from hermes.schema import messages as t_messages
 
 
-def _row_to_conversation(row: aiosqlite.Row) -> Conversation:
+def _row_to_conversation(row) -> Conversation:
     return Conversation(
-        id=row["id"],
-        channel=row["channel"],
-        external_id=row["external_id"],
-        title=row["title"],
-        started_at=row["started_at"],
-        updated_at=row["updated_at"],
+        id=row.id,
+        channel=row.channel,
+        external_id=row.external_id,
+        title=row.title,
+        started_at=row.started_at,
+        updated_at=row.updated_at,
     )
 
 
 async def create(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
     *,
     channel: str,
     external_id: str | None = None,
@@ -25,16 +28,23 @@ async def create(
     ts: int | None = None,
 ) -> Conversation:
     now = ts if ts is not None else int(time.time())
-    cursor = await conn.execute(
-        "INSERT INTO conversations (channel, external_id, title, started_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (channel, external_id, title, now, now),
+    result = await conn.execute(
+        t_conversations.insert()
+        .values(
+            channel=channel,
+            external_id=external_id,
+            title=title,
+            started_at=now,
+            updated_at=now,
+        )
+        .returning(t_conversations.c.id)
     )
     await conn.commit()
-    if cursor.lastrowid is None:
+    row = result.first()
+    if row is None:
         raise RuntimeError("INSERT into conversations did not yield a rowid")
     return Conversation(
-        id=cursor.lastrowid,
+        id=row.id,
         channel=channel,
         external_id=external_id,
         title=title,
@@ -43,79 +53,68 @@ async def create(
     )
 
 
-async def get(conn: aiosqlite.Connection, conversation_id: int) -> Conversation | None:
-    async with conn.execute(
-        "SELECT id, channel, external_id, title, started_at, updated_at "
-        "FROM conversations WHERE id = ?",
-        (conversation_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
+async def get(conn: AsyncConnection, conversation_id: int) -> Conversation | None:
+    result = await conn.execute(
+        select(t_conversations).where(t_conversations.c.id == conversation_id)
+    )
+    row = result.first()
     return _row_to_conversation(row) if row is not None else None
 
 
 async def list_by_channel(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
     channel: str,
     *,
     limit: int = 20,
 ) -> list[Conversation]:
-    async with conn.execute(
-        "SELECT id, channel, external_id, title, started_at, updated_at "
-        "FROM conversations WHERE channel = ? "
-        "ORDER BY updated_at DESC LIMIT ?",
-        (channel, limit),
-    ) as cursor:
-        rows = await cursor.fetchall()
-    return [_row_to_conversation(r) for r in rows]
+    result = await conn.execute(
+        select(t_conversations)
+        .where(t_conversations.c.channel == channel)
+        .order_by(desc(t_conversations.c.updated_at))
+        .limit(limit)
+    )
+    return [_row_to_conversation(r) for r in result]
 
 
 async def list_all(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
     *,
     channel: str | None = None,
     since_unix: int | None = None,
     limit: int = 20,
 ) -> list[Conversation]:
     """List conversations across all channels, optionally filtered."""
-    sql = (
-        "SELECT id, channel, external_id, title, started_at, updated_at FROM conversations"
-    )
-    clauses: list[str] = []
-    params: list[object] = []
+    stmt = select(t_conversations)
     if channel is not None:
-        clauses.append("channel = ?")
-        params.append(channel)
+        stmt = stmt.where(t_conversations.c.channel == channel)
     if since_unix is not None:
-        clauses.append("updated_at >= ?")
-        params.append(since_unix)
-    if clauses:
-        sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY updated_at DESC LIMIT ?"
-    params.append(limit)
+        stmt = stmt.where(t_conversations.c.updated_at >= since_unix)
+    stmt = stmt.order_by(desc(t_conversations.c.updated_at)).limit(limit)
 
-    async with conn.execute(sql, tuple(params)) as cursor:
-        rows = await cursor.fetchall()
-    return [_row_to_conversation(r) for r in rows]
+    result = await conn.execute(stmt)
+    return [_row_to_conversation(r) for r in result]
 
 
-async def message_count(conn: aiosqlite.Connection, conversation_id: int) -> int:
-    async with conn.execute(
-        "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
-        (conversation_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
+async def message_count(conn: AsyncConnection, conversation_id: int) -> int:
+    result = await conn.execute(
+        select(func.count())
+        .select_from(t_messages)
+        .where(t_messages.c.conversation_id == conversation_id)
+    )
+    row = result.first()
     return int(row[0]) if row else 0
 
 
 async def touch(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
     conversation_id: int,
     *,
     ts: int | None = None,
 ) -> None:
     now = ts if ts is not None else int(time.time())
     await conn.execute(
-        "UPDATE conversations SET updated_at = ? WHERE id = ?",
-        (now, conversation_id),
+        t_conversations.update()
+        .where(t_conversations.c.id == conversation_id)
+        .values(updated_at=now)
     )
     await conn.commit()

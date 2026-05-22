@@ -1,10 +1,10 @@
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hermes.repository import conversations
 
 
 async def test_create_returns_conversation_with_id_and_timestamps(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     convo = await conversations.create(conn, channel="signal", ts=1700000000)
     assert convo.id > 0
@@ -15,7 +15,7 @@ async def test_create_returns_conversation_with_id_and_timestamps(
     assert convo.external_id is None
 
 
-async def test_create_persists_optional_fields(conn: aiosqlite.Connection) -> None:
+async def test_create_persists_optional_fields(conn: AsyncConnection) -> None:
     convo = await conversations.create(
         conn,
         channel="vscode",
@@ -30,12 +30,12 @@ async def test_create_persists_optional_fields(conn: aiosqlite.Connection) -> No
     assert fetched.channel == "vscode"
 
 
-async def test_get_returns_none_for_missing_id(conn: aiosqlite.Connection) -> None:
+async def test_get_returns_none_for_missing_id(conn: AsyncConnection) -> None:
     assert await conversations.get(conn, 99999) is None
 
 
 async def test_list_by_channel_filters_and_orders_by_updated_desc(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     a = await conversations.create(conn, channel="signal", ts=1000)
     b = await conversations.create(conn, channel="web", ts=2000)
@@ -48,7 +48,7 @@ async def test_list_by_channel_filters_and_orders_by_updated_desc(
     assert [x.id for x in web_convos] == [b.id]
 
 
-async def test_touch_updates_updated_at_only(conn: aiosqlite.Connection) -> None:
+async def test_touch_updates_updated_at_only(conn: AsyncConnection) -> None:
     convo = await conversations.create(conn, channel="signal", ts=1000)
     await conversations.touch(conn, convo.id, ts=2500)
     fetched = await conversations.get(conn, convo.id)
@@ -58,7 +58,7 @@ async def test_touch_updates_updated_at_only(conn: aiosqlite.Connection) -> None
 
 
 async def test_list_all_returns_every_channel_in_updated_desc(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     a = await conversations.create(conn, channel="signal", ts=1000)
     b = await conversations.create(conn, channel="web", ts=3000)
@@ -69,7 +69,7 @@ async def test_list_all_returns_every_channel_in_updated_desc(
 
 
 async def test_list_all_can_filter_by_channel_and_since(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     a = await conversations.create(conn, channel="signal", ts=1000)
     b = await conversations.create(conn, channel="signal", ts=3000)
@@ -83,14 +83,14 @@ async def test_list_all_can_filter_by_channel_and_since(
 
 
 async def test_message_count_returns_zero_for_empty_conversation(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     convo = await conversations.create(conn, channel="signal", ts=1000)
     assert await conversations.message_count(conn, convo.id) == 0
 
 
 async def test_message_count_counts_only_target_conversation(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     from hermes.repository import messages
 

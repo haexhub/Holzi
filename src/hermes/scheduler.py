@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import time
 
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hermes.logging import logger
 from hermes.repository import reminders
@@ -20,7 +20,7 @@ class ReminderScheduler:
 
     def __init__(
         self,
-        db: aiosqlite.Connection,
+        db: AsyncConnection,
         signal_client: SignalClient | None,
         signal_self_number: str | None,
         *,

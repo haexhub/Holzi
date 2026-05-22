@@ -1,13 +1,13 @@
 import json
 from typing import Any
 
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hermes.agent import Tool
 from hermes.repository import conversations, messages, notes
 
 
-def build_memory_tools(db: aiosqlite.Connection) -> list[Tool]:
+def build_memory_tools(db: AsyncConnection) -> list[Tool]:
     return [
         _recall_memory(db),
         _list_conversations(db),
@@ -19,7 +19,7 @@ def build_memory_tools(db: aiosqlite.Connection) -> list[Tool]:
 
 
 # ----------------------------------------------------------------------------
-def _recall_memory(db: aiosqlite.Connection) -> Tool:
+def _recall_memory(db: AsyncConnection) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         query = str(args.get("query", ""))
         limit = int(args.get("limit", 10))
@@ -65,7 +65,7 @@ def _recall_memory(db: aiosqlite.Connection) -> Tool:
 
 
 # ----------------------------------------------------------------------------
-def _list_conversations(db: aiosqlite.Connection) -> Tool:
+def _list_conversations(db: AsyncConnection) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         channel = args.get("channel")
         since_unix = args.get("since_unix")
@@ -118,7 +118,7 @@ def _list_conversations(db: aiosqlite.Connection) -> Tool:
 
 
 # ----------------------------------------------------------------------------
-def _get_conversation(db: aiosqlite.Connection) -> Tool:
+def _get_conversation(db: AsyncConnection) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         conv_id = int(args.get("id", 0))
         limit = int(args.get("limit", 50))
@@ -160,7 +160,7 @@ def _get_conversation(db: aiosqlite.Connection) -> Tool:
 
 
 # ----------------------------------------------------------------------------
-def _save_note(db: aiosqlite.Connection) -> Tool:
+def _save_note(db: AsyncConnection) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         key = str(args["key"])
         content = str(args["content"])
@@ -194,7 +194,7 @@ def _save_note(db: aiosqlite.Connection) -> Tool:
 
 
 # ----------------------------------------------------------------------------
-def _get_note(db: aiosqlite.Connection) -> Tool:
+def _get_note(db: AsyncConnection) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         key = str(args["key"])
         note = await notes.get(db, key)
@@ -223,7 +223,7 @@ def _get_note(db: aiosqlite.Connection) -> Tool:
 
 
 # ----------------------------------------------------------------------------
-def _find_notes(db: aiosqlite.Connection) -> Tool:
+def _find_notes(db: AsyncConnection) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         query = str(args.get("query", ""))
         tags_arg = args.get("tags")

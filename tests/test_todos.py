@@ -1,9 +1,9 @@
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hermes.repository import todos
 
 
-async def test_add_todo_returns_dataclass(conn: aiosqlite.Connection) -> None:
+async def test_add_todo_returns_dataclass(conn: AsyncConnection) -> None:
     t = await todos.add(conn, content="buy milk", tags="grocery,urgent", ts=1000)
     assert t.id > 0
     assert t.content == "buy milk"
@@ -13,7 +13,7 @@ async def test_add_todo_returns_dataclass(conn: aiosqlite.Connection) -> None:
 
 
 async def test_list_all_returns_only_open_by_default(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     a = await todos.add(conn, content="a", ts=1000)
     b = await todos.add(conn, content="b", ts=1001)
@@ -24,7 +24,7 @@ async def test_list_all_returns_only_open_by_default(
 
 
 async def test_list_all_with_only_open_false_returns_done_too(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     a = await todos.add(conn, content="a", ts=1000)
     b = await todos.add(conn, content="b", ts=1001)
@@ -34,7 +34,7 @@ async def test_list_all_with_only_open_false_returns_done_too(
     assert {t.id for t in all_todos} == {a.id, b.id}
 
 
-async def test_list_all_filters_by_tag(conn: aiosqlite.Connection) -> None:
+async def test_list_all_filters_by_tag(conn: AsyncConnection) -> None:
     a = await todos.add(conn, content="a", tags="work,urgent", ts=1)
     b = await todos.add(conn, content="b", tags="home", ts=2)
     c = await todos.add(conn, content="c", tags="work", ts=3)
@@ -47,7 +47,7 @@ async def test_list_all_filters_by_tag(conn: aiosqlite.Connection) -> None:
 
 
 async def test_mark_done_returns_true_first_time_false_second(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     t = await todos.add(conn, content="x", ts=1000)
     assert await todos.mark_done(conn, t.id, ts=2000) is True
@@ -59,6 +59,6 @@ async def test_mark_done_returns_true_first_time_false_second(
 
 
 async def test_mark_done_returns_false_for_unknown_id(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     assert await todos.mark_done(conn, 99999, ts=1000) is False

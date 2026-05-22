@@ -2,13 +2,13 @@ import json
 import time
 from typing import Any
 
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hermes.agent import Tool
 from hermes.repository import reminders, todos
 
 
-def build_productivity_tools(db: aiosqlite.Connection) -> list[Tool]:
+def build_productivity_tools(db: AsyncConnection) -> list[Tool]:
     return [
         _reminder_set(db),
         _reminder_list(db),
@@ -19,7 +19,7 @@ def build_productivity_tools(db: aiosqlite.Connection) -> list[Tool]:
 
 
 # ---------------------------------------------------------------------------
-def _reminder_set(db: aiosqlite.Connection) -> Tool:
+def _reminder_set(db: AsyncConnection) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         message = str(args["message"])
         channel = str(args.get("channel", "signal"))
@@ -63,7 +63,7 @@ def _reminder_set(db: aiosqlite.Connection) -> Tool:
     )
 
 
-def _reminder_list(db: aiosqlite.Connection) -> Tool:
+def _reminder_list(db: AsyncConnection) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         include_fired = bool(args.get("include_fired", False))
         rs = await reminders.list_all(db, include_fired=include_fired)
@@ -94,7 +94,7 @@ def _reminder_list(db: aiosqlite.Connection) -> Tool:
 
 
 # ---------------------------------------------------------------------------
-def _todo_add(db: aiosqlite.Connection) -> Tool:
+def _todo_add(db: AsyncConnection) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         content = str(args["content"])
         tags_arg = args.get("tags")
@@ -127,7 +127,7 @@ def _todo_add(db: aiosqlite.Connection) -> Tool:
     )
 
 
-def _todo_list(db: aiosqlite.Connection) -> Tool:
+def _todo_list(db: AsyncConnection) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         only_open = bool(args.get("only_open", True))
         tag = args.get("tag")
@@ -166,7 +166,7 @@ def _todo_list(db: aiosqlite.Connection) -> Tool:
     )
 
 
-def _todo_done(db: aiosqlite.Connection) -> Tool:
+def _todo_done(db: AsyncConnection) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         try:
             todo_id = int(args["id"])

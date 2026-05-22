@@ -2,8 +2,8 @@ import json
 import time
 from typing import Any
 
-import aiosqlite
 import httpx
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hermes.repository import conversations, messages
 from hermes.signal.client import SignalClient
@@ -33,7 +33,7 @@ def _by_name(tools, name):
 
 
 async def test_cross_channel_send_unsupported_channel_returns_error(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     tools = build_cross_channel_tools(conn, _make_signal_client(), SELF_NUMBER)
     tool = _by_name(tools, "cross_channel_send")
@@ -42,7 +42,7 @@ async def test_cross_channel_send_unsupported_channel_returns_error(
 
 
 async def test_cross_channel_send_signal_not_configured_returns_error(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     tools = build_cross_channel_tools(conn, None, None)
     tool = _by_name(tools, "cross_channel_send")
@@ -52,7 +52,7 @@ async def test_cross_channel_send_signal_not_configured_returns_error(
 
 
 async def test_cross_channel_send_signal_persists_and_sends(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     sends: list[dict[str, Any]] = []
     tools = build_cross_channel_tools(conn, _make_signal_client(sends), SELF_NUMBER)
@@ -76,7 +76,7 @@ async def test_cross_channel_send_signal_persists_and_sends(
 
 
 async def test_cross_channel_send_reuses_recent_conversation(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     one_hour_ago = int(time.time()) - 3600
     existing = await conversations.create(conn, channel="signal", ts=one_hour_ago)
@@ -92,7 +92,7 @@ async def test_cross_channel_send_reuses_recent_conversation(
 
 
 async def test_cross_channel_send_creates_new_conversation_when_gap_exceeds_6h(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     seven_hours_ago = int(time.time()) - 7 * 3600
     existing = await conversations.create(conn, channel="signal", ts=seven_hours_ago)
@@ -108,7 +108,7 @@ async def test_cross_channel_send_creates_new_conversation_when_gap_exceeds_6h(
 
 
 async def test_cross_channel_send_refuses_when_current_channel_matches(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     """Recursion guard: agent running on channel X cannot write back to X."""
     tools = build_cross_channel_tools(
@@ -126,7 +126,7 @@ async def test_cross_channel_send_refuses_when_current_channel_matches(
 
 
 async def test_cross_channel_send_allows_different_current_channel(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     tools = build_cross_channel_tools(
         conn, _make_signal_client(), SELF_NUMBER, current_channel="web"
@@ -138,7 +138,7 @@ async def test_cross_channel_send_allows_different_current_channel(
 
 
 async def test_cross_channel_send_does_not_persist_when_signal_send_fails(
-    conn: aiosqlite.Connection,
+    conn: AsyncConnection,
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v2/send":
