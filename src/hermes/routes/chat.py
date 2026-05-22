@@ -97,7 +97,12 @@ async def _oneshot_forward(
             headers=headers,
         )
 
-    data = upstream_resp.json()
+    try:
+        data = upstream_resp.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=502, detail="upstream returned non-JSON body"
+        ) from exc
     assistant_content = _extract_assistant_from_oneshot(data)
     if assistant_content:
         await messages.append(

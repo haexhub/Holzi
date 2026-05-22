@@ -231,6 +231,26 @@ async def test_chat_completions_upstream_timeout_returns_504(
     assert response.status_code == 504
 
 
+async def test_chat_completions_upstream_returns_non_json_2xx_returns_502(
+    client: httpx.AsyncClient,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, text="<html>cloudflare maintenance</html>", headers={"content-type": "text/html"}
+        )
+
+    _install_upstream(handler)
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=AUTH,
+        json={
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 502
+
+
 async def test_chat_completions_streaming_with_upstream_5xx_returns_error_not_stream(
     client: httpx.AsyncClient,
 ) -> None:
