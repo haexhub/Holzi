@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 import aiosqlite
 import httpx
@@ -176,7 +176,7 @@ class ConversationSummaryResponse(ConversationResponse):
 
 class MessageResponse(BaseModel):
     id: int
-    role: str
+    role: Literal["user", "assistant", "tool"]
     content: str
     ts: int
 
