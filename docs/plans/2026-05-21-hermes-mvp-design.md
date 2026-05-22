@@ -353,6 +353,26 @@ Hermes connects as an MCP client (configured via `HERMES_EXTERNAL_MCP`). When th
 
 ---
 
+## 6.7 Implementation status (snapshot 2026-05-22)
+
+| Phase | PR | Status |
+|---|---|---|
+| 0 — project skeleton | — (root commits) | ✅ on main |
+| 1 — hermes-server skeleton | — (root commits) | ✅ on main |
+| 2 — SQLite memory layer | #1 | ✅ on main |
+| 3 — `/v1/chat/completions` proxy | #2 | ✅ on main |
+| 4 — Signal worker | #3 | ✅ on main |
+| 5 — agent loop (+ LLM provider flexibility) | #4 | ✅ on main |
+| 6 — MCP server + 7 tools | #5 | ✅ on main |
+| 7 — productivity/external tools + scheduler | #6 | ⏳ open, awaiting CodeRabbit re-review after rate-limit reset |
+| 8 — web-UI backend (`/api/chat`) | — | ⏭ next |
+| 9 — Nuxt frontend | — | ⏭ |
+| 10 — production deploy | — | ⏭ |
+
+**Important deviation from the original plan.** Phase 5 also delivered the *LLM-provider-flexibility* change: `HERMES_PROXY_URL` became `HERMES_LLM_URL` and `HERMES_LLM_API_KEY` was added so the upstream can be any OpenAI-compatible endpoint, not only `haex-claude-proxy`. The renaming is reflected in `.env.example`, `docker-compose.yml`, and the README provider table.
+
+Phase 6 added a deliberate scope decision: the Signal worker still calls `run_agent` with `tools=None`, even though the tool catalogue now exists. The Phase 8 web-UI backend will be the first internal caller that hands the catalogue to the agent loop, avoiding the obvious `cross_channel_send`-from-Signal-conversation recursion risk until we have a guard for it.
+
 ## 7. Out of scope (defer until after MVP works)
 
 - Multi-user support (just you for now)
