@@ -181,3 +181,72 @@ async def test_chat_completions_streaming_passes_sse_and_persists(
     msgs = await messages.list_by_conversation(app.state.db, session_id)
     assert [m.role for m in msgs] == ["user", "assistant"]
     assert msgs[1].content == "Hello world"
+
+
+async def test_chat_completions_malformed_json_returns_400(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream(_non_stream_handler())
+    response = await client.post(
+        "/v1/chat/completions",
+        headers={**AUTH, "Content-Type": "application/json"},
+        content=b"not-json-at-all",
+    )
+    assert response.status_code == 400
+
+
+async def test_chat_completions_upstream_connect_error_returns_502(
+    client: httpx.AsyncClient,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("simulated connection refused")
+
+    _install_upstream(handler)
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=AUTH,
+        json={
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 502
+
+
+async def test_chat_completions_upstream_timeout_returns_504(
+    client: httpx.AsyncClient,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("simulated timeout")
+
+    _install_upstream(handler)
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=AUTH,
+        json={
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 504
+
+
+async def test_chat_completions_streaming_with_upstream_5xx_returns_error_not_stream(
+    client: httpx.AsyncClient,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": "upstream down"})
+
+    _install_upstream(handler)
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=AUTH,
+        json={
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    )
+    # Caller should NOT see a 200 + SSE-wrapped error; they see the actual status.
+    assert response.status_code == 503
+    assert not response.headers.get("content-type", "").startswith("text/event-stream")

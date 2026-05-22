@@ -17,7 +17,10 @@ CHAT_PATH = "/v1/chat/completions"
 
 @router.post(CHAT_PATH)
 async def chat_completions(request: Request) -> Response:
-    body = await request.json()
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
     is_stream = bool(body.get("stream", False))
 
     db: aiosqlite.Connection = request.app.state.db
@@ -29,7 +32,7 @@ async def chat_completions(request: Request) -> Response:
     response_headers = {"X-Hermes-Session": str(convo.id)}
 
     if is_stream:
-        return _stream_forward(upstream, body, response_headers, db, convo.id)
+        return await _stream_forward(upstream, body, response_headers, db, convo.id)
     return await _oneshot_forward(upstream, body, response_headers, db, convo.id)
 
 
@@ -79,7 +82,12 @@ async def _oneshot_forward(
     db: aiosqlite.Connection,
     conv_id: int,
 ) -> Response:
-    upstream_resp = await upstream.post(CHAT_PATH, json=body)
+    try:
+        upstream_resp = await upstream.post(CHAT_PATH, json=body)
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="upstream timeout") from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail="upstream unreachable") from exc
 
     if upstream_resp.status_code >= 400:
         return Response(
@@ -105,26 +113,43 @@ async def _oneshot_forward(
     )
 
 
-def _stream_forward(
+async def _stream_forward(
     upstream: httpx.AsyncClient,
     body: dict[str, Any],
     headers: dict[str, str],
     db: aiosqlite.Connection,
     conv_id: int,
 ) -> StreamingResponse:
+    request = upstream.build_request("POST", CHAT_PATH, json=body)
+    try:
+        upstream_resp = await upstream.send(request, stream=True)
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="upstream timeout") from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail="upstream unreachable") from exc
+
+    if upstream_resp.status_code >= 400:
+        error_body = await upstream_resp.aread()
+        await upstream_resp.aclose()
+        raise HTTPException(
+            status_code=upstream_resp.status_code,
+            detail=error_body.decode("utf-8", errors="replace"),
+        )
+
     async def gen() -> AsyncIterator[bytes]:
         chunks: list[bytes] = []
-        async with upstream.stream("POST", CHAT_PATH, json=body) as resp:
-            async for raw in resp.aiter_raw():
+        try:
+            async for raw in upstream_resp.aiter_raw():
                 chunks.append(raw)
                 yield raw
-
-        content = _extract_assistant_from_sse(b"".join(chunks))
-        if content:
-            await messages.append(
-                db, conversation_id=conv_id, role="assistant", content=content
-            )
-        await conversations.touch(db, conv_id)
+        finally:
+            await upstream_resp.aclose()
+            content = _extract_assistant_from_sse(b"".join(chunks))
+            if content:
+                await messages.append(
+                    db, conversation_id=conv_id, role="assistant", content=content
+                )
+            await conversations.touch(db, conv_id)
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
