@@ -7,7 +7,8 @@
 #
 # Voraussetzungen:
 #   - `.env` ausgefüllt (mindestens HERMES_AUTH_TOKEN — `make token` generiert)
-#   - `haex-claude-proxy:latest` lokal gebaut (separates Repo unter ~/Projekte/haex-claude-proxy)
+#   - `haex-claude-proxy:dev` lokal gebaut (separates Repo unter ~/Projekte/haex-claude-proxy)
+#     — oder HAEX_CLAUDE_PROXY_TAG in der .env auf einen anderen vorhandenen Tag
 #   - Fürs `frontend`-Profil: holzi-frontend als Schwester-Verzeichnis unter
 #     ../holzi-frontend ausgecheckt
 #
@@ -161,9 +162,12 @@ services:
       - --api.insecure=true
       - --log.level=INFO
     ports:
-      - "${HERMES_LOCAL_WEB_PORT:-80}:80"
-      # Dashboard (zum Debuggen der Router/Middlewares).
-      - "${HERMES_LOCAL_DASHBOARD_PORT:-11000}:8080"
+      # Loopback-only — der Dev-Stack ist nicht für andere Hosts gedacht.
+      # Wer's auf einer LAN-IP exposen will, kann das Prefix lokal entfernen.
+      - "127.0.0.1:${HERMES_LOCAL_WEB_PORT:-80}:80"
+      # Dashboard (zum Debuggen der Router/Middlewares) — `api.insecure=true`,
+      # daher bewusst nicht auf 0.0.0.0 binden.
+      - "127.0.0.1:${HERMES_LOCAL_DASHBOARD_PORT:-11000}:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
