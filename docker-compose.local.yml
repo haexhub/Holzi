@@ -6,9 +6,14 @@
 # über das `frontend`-Profil dazu.
 #
 # Voraussetzungen:
-#   - `.env` ausgefüllt (mindestens HERMES_AUTH_TOKEN — `make token` generiert)
+#   - `.env` ausgefüllt (mindestens HERMES_AUTH_TOKEN — `make token` generiert,
+#     und HERMES_SECRET_KEY = 64-hex-AES-Key, identisch in Hermes und Proxy)
 #   - `haex-claude-proxy:dev` lokal gebaut (separates Repo unter ~/Projekte/haex-claude-proxy)
 #     — oder HAEX_CLAUDE_PROXY_TAG in der .env auf einen anderen vorhandenen Tag
+#   - haex-claude-proxy-resolver-sqlite als Schwester-Verzeichnis unter
+#     ../haex-claude-proxy-resolver-sqlite (mit installierten node_modules) —
+#     wird ins Proxy-image bind-gemounted, damit PROXY_RESOLVER es findet.
+#     Setup: `cd ../haex-claude-proxy-resolver-sqlite && npm install`
 #   - Fürs `frontend`-Profil: holzi-frontend als Schwester-Verzeichnis unter
 #     ../holzi-frontend ausgecheckt
 #
@@ -51,6 +56,10 @@ services:
       HERMES_DB_PATH: /data/hermes.db
       HERMES_LLM_URL: ${HERMES_LLM_URL:-http://haex-claude-proxy:8080}
       HERMES_SIGNAL_URL: ${HERMES_SIGNAL_URL:-http://signal-cli-rest-api:8080}
+      # AES-Master-Key für llm_credentials-Ciphertext. MUSS identisch zu
+      # dem sein, was die haex-claude-proxy SQLite-Resolver-Instanz liest
+      # — sonst schlägt die Decryption beim Forwarding fehl.
+      HERMES_SECRET_KEY: ${HERMES_SECRET_KEY}
     volumes:
       - hermes-data:/data
     networks:
@@ -94,14 +103,29 @@ services:
     container_name: haex-claude-proxy
     restart: unless-stopped
     environment:
-      PROXY_RESOLVER: file
-      # File-Resolver liest aus $PROXY_CREDENTIALS_HOME/.claude/.credentials.json.
-      # Mit /data/claude als HOME und ${HOME}/.claude read-only gemountet als
-      # /data/claude/.claude ergibt das exakt deine Host-Credentials aus
-      # `claude login`. Kein Re-Login im Container nötig.
-      PROXY_CREDENTIALS_HOME: /data/claude
+      # SQLite-Resolver liest die aktive llm_credentials-Zeile aus Hermes's
+      # DB (geteiltes hermes-data-Volume) und entschlüsselt mit dem geteilten
+      # HERMES_SECRET_KEY. Kein Host-`~/.claude` mehr nötig.
+      PROXY_RESOLVER: haex-claude-proxy-resolver-sqlite
+      HERMES_DB_PATH: /data/hermes.db
+      HERMES_SECRET_KEY: ${HERMES_SECRET_KEY}
+      CREDENTIALS_ROOT: /run/credentials
     volumes:
-      - ${HOME}/.claude:/data/claude/.claude:ro
+      # Shared DB volume — Hermes schreibt CRUD + OAuth-Authorize, Proxy
+      # liest beim Resolve und schreibt nur den seltenen OAuth-Refresh
+      # zurück (Stunden-Cadenz). SQLite WAL + 5s busy_timeout im Plugin
+      # halten beide Writer kollisionsfrei.
+      - hermes-data:/data
+      # Plugin bind-mount: das Proxy-Image bringt nur die Builtin-Resolver
+      # mit; PROXY_RESOLVER=haex-claude-proxy-resolver-sqlite triggert ein
+      # dynamic import(), das wir hier in node_modules verfügbar machen.
+      # Voraussetzung: `npm install` im resolver-sqlite-Checkout.
+      - ../haex-claude-proxy-resolver-sqlite:/app/node_modules/haex-claude-proxy-resolver-sqlite:ro
+    tmpfs:
+      # Per-Spawn-HOMEs für die `claude` CLI landen hier — tmpfs verhindert
+      # plaintext-Credentials auf disk, auch wenn das Plugin nach Spawn-Exit
+      # selbst aufräumt.
+      - /run/credentials:mode=700,uid=1000
     networks:
       - hermes-local
 
