@@ -23,14 +23,19 @@ from hermes.crypto import EncryptedBlob, Encryptor
 from hermes.repository import llm_credentials as repo
 from hermes.repository.models import LlmCredential
 
-# OpenAI-compatible base URLs per provider. These are the "happy path"
-# fallbacks when the user doesn't set `base_url` on the credential row.
+# OpenAI-compatible base URLs per provider. Origin-only — `httpx`'s
+# base_url join APPENDS paths rather than replacing them, and the agent
+# already prepends `/v1/chat/completions` to every request. A trailing
+# `/v1` here would have produced `…/v1/v1/chat/completions` and 404'd.
 # A self-hosted mirror (LiteLLM, custom proxy) always overrides via
-# `base_url`.
+# `base_url` on the credential row.
 PROVIDER_DEFAULTS: dict[str, str] = {
-    "anthropic": "https://api.anthropic.com/v1",
-    "openai": "https://api.openai.com/v1",
-    "openrouter": "https://openrouter.ai/api/v1",
+    "anthropic": "https://api.anthropic.com",
+    "openai": "https://api.openai.com",
+    "openrouter": "https://openrouter.ai/api",
+    # Google's OpenAI-compatible surface lives off /v1beta/openai, so the
+    # full path the agent hits ends up `/v1beta/openai/v1/chat/completions`
+    # — that's how Google ships it.
     "google": "https://generativelanguage.googleapis.com/v1beta/openai",
 }
 
@@ -46,6 +51,17 @@ def build_client_for_credential(
     encryptor: Encryptor,
     fallback_proxy_url: str,
 ) -> httpx.AsyncClient:
+    # Anthropic ALWAYS goes through the haex-claude-proxy — both for legacy
+    # oauth_claude credentials (credentials.json + claude-CLI spawn) and for
+    # the new setup-token api_keys (sk-ant-oat01-…). api.anthropic.com's
+    # native shape is /v1/messages, the agent speaks OpenAI-compatible
+    # /v1/chat/completions, and oat01 tokens are rate-limit-blocked when
+    # used as Bearer directly against api.anthropic.com — the proxy handles
+    # all three translations and reads its own credential out of the same
+    # DB row.
+    if cred.provider == "anthropic":
+        return httpx.AsyncClient(base_url=fallback_proxy_url, timeout=60.0)
+
     if cred.mode == "api_key":
         if not (cred.api_key_iv and cred.api_key_tag and cred.api_key_data):
             raise UpstreamConfigError(
@@ -70,8 +86,9 @@ def build_client_for_credential(
             timeout=60.0,
         )
     if cred.mode == "oauth_claude":
-        # Hermes never decrypts OAuth tokens — they're handed to the
-        # proxy's sqlite resolver. We just route to the proxy URL.
+        # Legacy path (pre-setup-token migration). OAuth credentials are
+        # never decrypted here — they're handed to the proxy's sqlite
+        # resolver.
         return httpx.AsyncClient(base_url=fallback_proxy_url, timeout=60.0)
     raise UpstreamConfigError(f"unknown credential mode: {cred.mode}")
 

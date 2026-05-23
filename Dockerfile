@@ -11,13 +11,16 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Node + claude-code are required at runtime: the OAuth subprocess driver
 # spawns `claude auth login --claudeai` to obtain the Anthropic refresh
-# token before AES-encrypting it into llm_credentials. Pinned to 2.1.121
-# — newer minors have shipped breakage in --print --output-format json.
+# token before AES-encrypting it into llm_credentials. Pinned to 2.1.126
+# to match the haex-claude-proxy image — 2.1.121 silently dropped the
+# `Paste code here if prompted >` stdin prompt, making the OAuth driver
+# hang on a TTY paste it can't produce. 2.1.126 still has the simple
+# pipe-friendly flow Specifyr's driver was written against.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
- && npm install -g @anthropic-ai/claude-code@2.1.121 \
+ && npm install -g @anthropic-ai/claude-code@2.1.126 \
  && apt-get purge -y curl gnupg \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*

@@ -267,11 +267,9 @@ async def test_oauth_code_persists_authorized_credential(
     )
     assert json.loads(plaintext)["claudeAiOauth"]["accessToken"] == "fake-token-xyz"
 
-    # stdin received the code wrapped in xterm bracketed-paste markers
-    # — claude-code 2.1's input handler only commits a paste when it
-    # arrives between ESC[200~ … ESC[201~ \r.
+    # stdin received the code, newline-terminated.
     assert session.proc is not None
-    assert session.proc.stdin.chunks == [b"\x1b[200~abc-123\x1b[201~\r"]
+    assert session.proc.stdin.chunks == [b"abc-123\n"]
 
     # The temp HOME should have been wiped.
     home_dir = Path("/tmp") / "hermes-oauth" / str(flow_id)
