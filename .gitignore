@@ -68,3 +68,4 @@ frontend/.output/
 
 # Claude / agent caches
 .claude/
+.playwright-mcp/

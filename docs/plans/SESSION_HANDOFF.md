@@ -1,66 +1,67 @@
-# Session handoff — 2026-05-23 evening
+# Session handoff — 2026-05-24 evening
 
-Read this when picking up Hermes ([[project-hermes-agent]]) work in a new conversation. Memory under `/home/haex/.claude/projects/-home-haex-Projekte-Holzi/memory/` mirrors most of this; the per-task breakdown lives in [`2026-05-24-next-session.md`](./2026-05-24-next-session.md).
+Read this when picking up Hermes ([[project-hermes-agent]]) work in a new conversation. Per-task plan lives in [`2026-05-25-next-session.md`](./2026-05-25-next-session.md); session-start prompt in [`2026-05-25-prompt.md`](./2026-05-25-prompt.md).
 
 ## tldr
 
-Die LLM-Credentials-Feature ist Phase 1–7 auf `main`, plus der Dockerfile-Fix (#18). Zwei PRs warten auf den nächsten Tag:
+Chat funktioniert end-to-end via Claude Max OAuth. Eine Fix-PR ist offen — die muss zuerst rein, dann ist `main` wieder sauber.
 
-| PR | Was | Blockiert von |
-|---|---|---|
-| [Holzi #19](https://github.com/haexhub/Holzi/pull/19) | Per-Credential `model`-Spalte + `GET /credentials/{id}/models` + `PATCH /credentials/{id}/model`; Agent-Loop nutzt `cred.model` mit `settings.model`-Fallback | — |
-| [holzi-frontend #8](https://github.com/haexhub/holzi-frontend/pull/8) | `ModelSelect.vue` Combobox (reka-ui) per Credential-Row | Holzi #19 |
+| PR | Repo | Was | State |
+|---|---|---|---|
+| [Holzi #23](https://github.com/haexhub/Holzi/pull/23) | Holzi | claude-code pin 2.1.126 + revert kaputter setup-token detour aus #22 | **OFFEN — zuerst mergen** |
 
-**Start here:** #19 mergen (CodeRabbit triagen via [[feedback-coderabbit-skip-patterns]]), dann #8, dann Smoke-Test der UI mit echtem OAuth.
+Pre-flight: PR #23 mergen, lokal pullen, `make up-local-full`, dann Pick aus [`2026-05-25-next-session.md`](./2026-05-25-next-session.md).
 
 ## Branch state
 
-Verify with `git fetch --prune && git log --oneline origin/main -n 8` before acting.
+Verify mit `git fetch --prune && git log --oneline origin/main -n 8` vor allem.
 
 ```
-origin/main (Holzi, last merged at end-of-session):
+origin/main (Holzi):
+  5c3214c fix(oauth): drive claude setup-token under a PTY with bracketed paste (#22)  ← BROKEN, fix in #23
+  ac7b57b fix(llm): block activation of pending/expired OAuth credentials (#21)
+  df8c59a feat(api/chat): classify upstream errors with status codes in SSE payload (#20)
+  1cabf88 feat: per-credential model + GET /credentials/{id}/models (#19)
+  1a136e4 docs: SESSION_HANDOFF refresh + next-session plan for 2026-05-24
   d28a5a1 fix(docker): install Node + claude CLI in hermes-server image (#18)
   b81ad40 feat: local dev-stack uses the sqlite credential resolver (#17)
   04f0606 feat: agent loop reads the active DB credential (#16)
-  bb28af0 feat: claude OAuth subprocess flow (4 endpoints) (#15)
-  606cd2b feat: llm_credentials backend (schema + crypto + CRUD API) (#14)
 
 origin/main (holzi-frontend):
-  fa072a9 feat: /settings/llm page (#7)
-  + earlier streaming/pnpm-workspace/CI PRs
+  0627dee fix(settings): hide Aktivieren on pending/expired OAuth + show hint (#9)
+  d9ce5dd feat: per-credential model picker (searchable combobox) (#8)
+  b2174ef feat: /settings/llm page (credential list + api-key + claude OAuth) (#7)
 
-Open PRs (alle haexhub-account):
-  Holzi#19           feat: per-credential model + GET /credentials/{id}/models
-  holzi-frontend#8   feat: per-credential model picker (searchable combobox)
+Open PRs:
+  Holzi#23   fix(oauth): pin claude 2.1.126 + drop the setup-token detour from #22
+
+Closed branches (alle merged oder verworfen):
+  Holzi: #19, #20, #21, #22
+  holzi-frontend: #8, #9
+  haex-claude-proxy: fix/oauth-token-env-extra (verworfen, branch deleted)
+  haex-claude-proxy-resolver-sqlite: feat/oauth-token-env-extra (verworfen, branch deleted)
 ```
 
-## What landed this session
+## What landed this session (2026-05-24)
 
-1. **PR #14–#17 gemerged** — LLM-credentials feature komplett (Phasen 1–7).
-2. **Phase 5 — resolver-sqlite plugin** im neuen Repo `haex-claude-proxy-resolver-sqlite` (PR #1 gemerged, kein CI dort).
-3. **Phase 6 — Frontend `/settings/llm`** Page mit API-Key-Form + OAuth-State-Machine + Settings-Link im Chat-Header.
-4. **Smoke-Test gestartet** mit `make up-local-full`. OAuth scheiterte mit 500 → Root-Cause: `claude` CLI fehlte im `hermes-server`-Image. Fix in PR #18.
-5. **Per-Credential `model`-Feature** spec'd vom User (analog Specifyrs `ModelSelect.vue`). Backend in #19, Frontend in #8.
-6. **Naming-Fix** — überall "Marko" → "Martin" (User-Memory, System-Prompts, Test-Fixtures, UI-Placeholder, Git-Configs).
+1. **#19, #20, #21 gemerged** — per-credential model + chat error semantics + activate-guard für pending OAuth.
+2. **#22 gemerged ABER kaputt** — setup-token-PTY-detour. claude-code 2.1.121 hatte den `Paste code here` Prompt entfernt; ich hab statt einfach claude-code zu bumpen versucht `setup-token` + Token-extraction zu nutzen. Die resultierenden `sk-ant-oat01-…` Tokens werden aber von api.anthropic.com mit 429 blockt.
+3. **#23 offen** — rebuilds main from #21's tip + revert von #22 + claude 2.1.126 pin (matches Specifyr) + behaltene small fixes (`upstream.py` routet Anthropic IMMER durch Proxy, fixt `/v1/v1/` httpx-collision).
+4. **Frontend #8 + #9 gemerged**.
+5. **Memory** `[[project-hermes-oauth-claude-2-1]]` aktualisiert: claude-code muss >= 2.1.126 sein, `setup-token` ist NICHT der Weg.
+6. **End-to-end manuell verifiziert**: OAuth-Flow + Chat-Antwort von Claude Max läuft lokal.
 
 ## What still to do (Reihenfolge)
 
-Siehe [`2026-05-24-next-session.md`](./2026-05-24-next-session.md) für den per-task-Plan. Highlights:
+Per-task in [`2026-05-25-next-session.md`](./2026-05-25-next-session.md). Highlights:
 
-1. **#18 mergen** (Dockerfile fix — risikoarm)
-2. **#19 mergen** nach CodeRabbit-Triage
-3. **#8 mergen** nach #19 + CodeRabbit
-4. **Manueller End-to-End-Smoke** der vollen UI — OAuth + API-Key + Model-Dropdown auf http://app.localhost:11080/settings/llm
-5. Optional: **PR #19's 10-min Model-Cache** überdenken — Specifyr hat denselben Cache, könnte für single-user zu lang sein (Cache-Invalidate auf `PATCH /model`?)
-
-**Danach Roadmap-Items aus `docs/plans/2026-05-22-roadmap.md` Section B/C/D:**
-- `/api/chat` Error-Semantik (502/504 vs 500)
-- Conversation auto-title aus erster Message
-- Dark-mode Toggle
-- Mobile Layout
-- SSE Reconnect on drop
-- E2E `/api/chat` → agent → tool Test
-- Coverage in CI
+1. **#23 mergen** (Pre-flight)
+2. **Frontend Quick-Wins**: Dark-mode toggle, Empty-state, bessere Error-Toasts (alle ~30min)
+3. **Conversation auto-title** (Server-side, sichtbar, klein blast-radius)
+4. **Mobile Layout** (heute fixed grid → responsive collapse)
+5. **E2E `/api/chat` → agent → tool roundtrip test**
+6. **Coverage in CI**
+7. **External MCP client manager** (der nächste post-MVP Brocken)
 
 ## Workflow reminders
 
@@ -77,9 +78,10 @@ Siehe [`2026-05-24-next-session.md`](./2026-05-24-next-session.md) für den per-
 - **Frontend repo**: https://github.com/haexhub/holzi-frontend (private)
 - **Plugin repo**: https://github.com/haexhub/haex-claude-proxy-resolver-sqlite (private)
 - **Working dirs**: `/home/haex/Projekte/Holzi`, `/home/haex/Projekte/holzi-frontend`, `/home/haex/Projekte/haex-claude-proxy-resolver-sqlite`
-- **Backend**: `uv run pytest`, `uv run ruff check src tests`, `uv run mypy src`. 248 tests grün auf `feat/credential-model-column` (PR #19).
-- **Frontend**: `pnpm test` (30 tests), `pnpm typecheck`, `pnpm run gen:api` (regen nach Backend-Änderung). PR #8 30/30 grün.
+- **Backend**: `uv run pytest`, `uv run ruff check src tests`, `uv run mypy src`. 258 tests grün auf `fix/pin-claude-2-1-126-and-revert-setup-token` (PR #23).
+- **Frontend**: `pnpm test` (30 tests), `pnpm typecheck`, `pnpm run gen:api` (regen nach Backend-Änderung).
 - **Local dev-stack**: `make up-local-full` → backend + frontend + proxy + traefik auf `*.localhost:11080`. `.env` muss `HERMES_AUTH_TOKEN` + `HERMES_SECRET_KEY` (64-hex) gesetzt haben.
-- **Design docs**: `docs/plans/2026-05-21-hermes-mvp-design.md`, `docs/plans/2026-05-23-llm-credentials-design.md`.
-- **Next-session plan**: [`2026-05-24-next-session.md`](./2026-05-24-next-session.md).
-- Conventions: `~/.claude/CLAUDE.md` plus [[feedback-no-vpn]], [[feedback-coderabbit-skip-patterns]], [[feedback-pr-workflow-hermes]].
+- **Design docs**: `docs/plans/2026-05-21-hermes-mvp-design.md`, `docs/plans/2026-05-22-roadmap.md`, `docs/plans/2026-05-23-llm-credentials-design.md`.
+- **Next-session plan**: [`2026-05-25-next-session.md`](./2026-05-25-next-session.md).
+- **Session-start prompt**: [`2026-05-25-prompt.md`](./2026-05-25-prompt.md).
+- Conventions: `~/.claude/CLAUDE.md` plus [[feedback-no-vpn]], [[feedback-coderabbit-skip-patterns]], [[feedback-pr-workflow-hermes]], [[project-hermes-oauth-claude-2-1]].
