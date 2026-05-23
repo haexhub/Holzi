@@ -23,6 +23,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.config import settings
 from hermes.crypto import Encryptor
 from hermes.logging import logger
 from hermes.oauth import (
@@ -34,6 +35,7 @@ from hermes.oauth import (
 )
 from hermes.repository import llm_credentials as repo
 from hermes.repository.models import LlmCredential
+from hermes.upstream import rebuild_upstream_from_db
 
 router = APIRouter(prefix="/api/llm")
 
@@ -114,6 +116,7 @@ async def delete_credential(request: Request, cred_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
     if not await repo.delete(db, cred_id):
         raise HTTPException(status_code=404, detail="credential not found")
+    await _refresh_upstream(request)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -129,7 +132,20 @@ async def activate_credential(request: Request, cred_id: int) -> dict[str, Any]:
         # Race with a concurrent delete — vanishingly unlikely on a
         # single-user instance, but explicit > KeyError.
         raise HTTPException(status_code=404, detail="credential vanished")
+    await _refresh_upstream(request)
     return _to_response(cred)
+
+
+async def _refresh_upstream(request: Request) -> None:
+    """Rebuild `app.state.upstream` so the next chat request picks up
+    whatever credential is now active."""
+    await rebuild_upstream_from_db(
+        request.app,
+        db=request.app.state.db,
+        encryptor=request.app.state.encryptor,
+        fallback_llm_url=settings.llm_url,
+        fallback_llm_api_key=settings.llm_api_key,
+    )
 
 
 # ─── OAuth subprocess flow ────────────────────────────────────────────
