@@ -18,6 +18,7 @@ import contextlib
 import time
 from typing import Any, Literal
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -32,6 +33,11 @@ from hermes.oauth import (
     oauth_temp_home,
     read_credentials_raw_and_expiry,
     remove_oauth_temp_home,
+)
+from hermes.provider_models import (
+    ModelChoice,
+    ProviderModelsError,
+    list_provider_models,
 )
 from hermes.repository import llm_credentials as repo
 from hermes.repository.models import LlmCredential
@@ -59,6 +65,7 @@ class LlmCredentialResponse(BaseModel):
     mode: str
     display_name: str
     base_url: str | None
+    model: str | None
     is_active: bool
     oauth_status: str | None
     oauth_authorized_at: int | None
@@ -73,6 +80,7 @@ def _to_response(cred: LlmCredential) -> dict[str, Any]:
         "mode": cred.mode,
         "display_name": cred.display_name,
         "base_url": cred.base_url,
+        "model": cred.model,
         "is_active": cred.is_active,
         "oauth_status": cred.oauth_status,
         "oauth_authorized_at": cred.oauth_authorized_at,
@@ -118,6 +126,67 @@ async def delete_credential(request: Request, cred_id: int) -> Response:
         raise HTTPException(status_code=404, detail="credential not found")
     await _refresh_upstream(request)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class ModelUpdateRequest(BaseModel):
+    """Body for `PATCH /credentials/{id}/model`. Pass `null` to clear."""
+
+    model: str | None = Field(default=None, max_length=200)
+
+
+class ModelChoiceResponse(BaseModel):
+    id: str
+    label: str
+
+
+class ModelListResponse(BaseModel):
+    models: list[ModelChoiceResponse]
+
+
+@router.patch(
+    "/credentials/{cred_id}/model", response_model=LlmCredentialResponse
+)
+async def update_credential_model(
+    request: Request, cred_id: int, body: ModelUpdateRequest
+) -> dict[str, Any]:
+    db: AsyncEngine = request.app.state.db
+    updated = await repo.set_model(db, cred_id, body.model)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="credential not found")
+    # No upstream rebuild needed — the model is consulted per request
+    # by the agent, the httpx client isn't keyed on the model.
+    return _to_response(updated)
+
+
+@router.get("/credentials/{cred_id}/models", response_model=ModelListResponse)
+async def list_credential_models(
+    request: Request, cred_id: int
+) -> dict[str, Any]:
+    """Resolve the provider's `/v1/models` for the given credential.
+
+    Single-shot per (provider, cred_id): the result is cached in
+    `provider_models._cache` for 10 minutes. The UI calls this when the
+    user opens the model dropdown — if it 502s, the UI shows the error
+    and the user can try a different credential or refresh.
+    """
+    db: AsyncEngine = request.app.state.db
+    cred = await repo.get(db, cred_id)
+    if cred is None:
+        raise HTTPException(status_code=404, detail="credential not found")
+    http: httpx.AsyncClient = request.app.state.external_http
+    encryptor: Encryptor = request.app.state.encryptor
+    try:
+        models = await list_provider_models(cred, http=http, encryptor=encryptor)
+    except ProviderModelsError as exc:
+        # 502 mirrors the chat-route's "upstream unreachable" semantics;
+        # 401-from-provider also bubbles up as 502 so the UI can show
+        # "talk to the provider, not us".
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"models": [_choice_to_response(m) for m in models]}
+
+
+def _choice_to_response(m: ModelChoice) -> dict[str, str]:
+    return {"id": m.id, "label": m.label}
 
 
 @router.patch(

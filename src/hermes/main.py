@@ -17,6 +17,7 @@ from hermes.db import init_db
 from hermes.logging import configure_logging, logger
 from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
+from hermes.repository import llm_credentials as llm_credentials_repo
 from hermes.routes.api import router as api_router
 from hermes.routes.chat import router as chat_router
 from hermes.routes.llm import router as llm_router
@@ -29,9 +30,9 @@ from hermes.upstream import build_fallback_client, rebuild_upstream_from_db
 configure_logging()
 
 SIGNAL_SYSTEM_PROMPT = (
-    "You are Hermes, a personal AI assistant for Marko, reached via Signal "
+    "You are Hermes, a personal AI assistant for Martin, reached via Signal "
     "Note-to-Self. Be concise — usually one to three short sentences. Match "
-    "Marko's preference for terse, technical communication."
+    "Martin's preference for terse, technical communication."
 )
 
 
@@ -97,12 +98,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             async def signal_agent_runner(
                 db: AsyncEngine, conversation_id: int
             ) -> str:
+                model = (
+                    await llm_credentials_repo.get_active_model(db)
+                ) or settings.model
                 return await run_agent(
                     upstream=app.state.upstream,
                     db=db,
                     conversation_id=conversation_id,
                     system_prompt=SIGNAL_SYSTEM_PROMPT,
-                    model=settings.model,
+                    model=model,
                 )
 
             app.state.signal_worker = SignalWorker(

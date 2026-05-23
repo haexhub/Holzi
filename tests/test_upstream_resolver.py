@@ -49,6 +49,7 @@ def test_build_client_for_api_key_uses_provider_default() -> None:
         mode="api_key",
         display_name="test",
         base_url=None,
+        model=None,
         is_active=True,
         api_key_iv=ct.iv,
         api_key_tag=ct.tag,
@@ -73,7 +74,7 @@ def test_build_client_for_api_key_respects_explicit_base_url() -> None:
     ct = enc.encrypt("key-xyz")
     cred = LlmCredential(
         id=1, provider="custom", mode="api_key", display_name="t",
-        base_url="https://my-mirror.example.com/v1", is_active=True,
+        base_url="https://my-mirror.example.com/v1", model=None, is_active=True,
         api_key_iv=ct.iv, api_key_tag=ct.tag, api_key_data=ct.data,
         oauth_status=None, oauth_authorized_at=None,
         oauth_iv=None, oauth_tag=None, oauth_data=None,
@@ -91,7 +92,7 @@ def test_build_client_for_custom_provider_without_base_url_raises() -> None:
     ct = enc.encrypt("k")
     cred = LlmCredential(
         id=1, provider="custom", mode="api_key", display_name="t",
-        base_url=None, is_active=True,
+        base_url=None, model=None, is_active=True,
         api_key_iv=ct.iv, api_key_tag=ct.tag, api_key_data=ct.data,
         oauth_status=None, oauth_authorized_at=None,
         oauth_iv=None, oauth_tag=None, oauth_data=None,
@@ -107,7 +108,7 @@ def test_build_client_for_oauth_claude_routes_to_proxy() -> None:
     enc = Encryptor(secrets.token_bytes(32))
     cred = LlmCredential(
         id=1, provider="anthropic", mode="oauth_claude", display_name="t",
-        base_url=None, is_active=True,
+        base_url=None, model=None, is_active=True,
         api_key_iv=None, api_key_tag=None, api_key_data=None,
         oauth_status="authorized", oauth_authorized_at=0,
         oauth_iv="aa", oauth_tag="bb", oauth_data="cc",

@@ -60,6 +60,7 @@ class LlmCredential:
     mode: str
     display_name: str
     base_url: str | None
+    model: str | None
     is_active: bool
     api_key_iv: str | None
     api_key_tag: str | None

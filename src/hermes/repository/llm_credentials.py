@@ -21,6 +21,7 @@ def _row_to_credential(row) -> LlmCredential:
         mode=row.mode,
         display_name=row.display_name,
         base_url=row.base_url,
+        model=row.model,
         is_active=bool(row.is_active),
         api_key_iv=row.api_key_iv,
         api_key_tag=row.api_key_tag,
@@ -146,6 +147,15 @@ async def get_active(engine: AsyncEngine) -> LlmCredential | None:
     return _row_to_credential(row) if row is not None else None
 
 
+async def get_active_model(engine: AsyncEngine) -> str | None:
+    """Return the active credential's `model` (or None when no credential
+    is active / the active one inherits from `settings.model`). Used by
+    the chat routes to pick the per-request `model` before calling the
+    agent loop."""
+    active = await get_active(engine)
+    return active.model if active is not None else None
+
+
 async def list_all(engine: AsyncEngine) -> list[LlmCredential]:
     async with engine.connect() as conn:
         result = await conn.execute(
@@ -159,6 +169,24 @@ async def delete(engine: AsyncEngine, cred_id: int) -> bool:
     async with engine.begin() as conn:
         result = await conn.execute(t.delete().where(t.c.id == cred_id))
     return (result.rowcount or 0) > 0
+
+
+async def set_model(
+    engine: AsyncEngine, cred_id: int, model: str | None
+) -> LlmCredential | None:
+    """Update the preferred model on a credential. `None` clears it back
+    to the env-var fallback (`settings.model`)."""
+    now = int(time.time())
+    stmt = (
+        t.update()
+        .where(t.c.id == cred_id)
+        .values(model=model, updated_at=now)
+        .returning(*t.c)
+    )
+    async with engine.begin() as conn:
+        result = await conn.execute(stmt)
+        row = result.first()
+    return _row_to_credential(row) if row is not None else None
 
 
 async def activate(engine: AsyncEngine, cred_id: int) -> bool:

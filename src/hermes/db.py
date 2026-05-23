@@ -78,12 +78,27 @@ async def init_db(path: str) -> AsyncEngine:
                 # by the global connect listener above.
                 await conn.execute(text("PRAGMA journal_mode = WAL"))
             await conn.run_sync(metadata.create_all)
+            await _apply_lightweight_migrations(conn)
             for stmt in _split_statements(_FTS_SCHEMA_SQL):
                 await conn.execute(text(stmt))
     except BaseException:
         await engine.dispose()
         raise
     return engine
+
+
+async def _apply_lightweight_migrations(conn) -> None:
+    """Apply additive column adds that `metadata.create_all` won't touch
+    on an existing table. SQLite has no `ADD COLUMN IF NOT EXISTS`, so
+    we check `PRAGMA table_info` first.
+
+    Keep this list short — anything non-trivial deserves a proper
+    migration tool (Alembic) instead of growing this function.
+    """
+    cols = await conn.execute(text("PRAGMA table_info(llm_credentials)"))
+    existing = {row[1] for row in cols.all()}
+    if "model" not in existing:
+        await conn.execute(text("ALTER TABLE llm_credentials ADD COLUMN model TEXT"))
 
 
 def _split_statements(sql: str) -> list[str]:

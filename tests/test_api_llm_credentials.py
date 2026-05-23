@@ -38,7 +38,7 @@ async def test_create_api_key_returns_id_without_ciphertext(client: httpx.AsyncC
         "/api/llm/credentials",
         json={
             "provider": "openai",
-            "display_name": "Marko OpenAI",
+            "display_name": "Martin OpenAI",
             "api_key": "sk-test-1234",
         },
         headers=AUTH,
@@ -48,7 +48,7 @@ async def test_create_api_key_returns_id_without_ciphertext(client: httpx.AsyncC
     assert body["id"] > 0
     assert body["provider"] == "openai"
     assert body["mode"] == "api_key"
-    assert body["display_name"] == "Marko OpenAI"
+    assert body["display_name"] == "Martin OpenAI"
     assert body["is_active"] is False
     # Ciphertext columns must not leak into the API.
     assert "api_key_data" not in body
@@ -148,4 +148,70 @@ async def test_activate_flips_is_active_and_clears_others(client: httpx.AsyncCli
 
 async def test_activate_missing_row_returns_404(client: httpx.AsyncClient) -> None:
     response = await client.patch("/api/llm/credentials/9999/activate", headers=AUTH)
+    assert response.status_code == 404
+
+
+# ─── PATCH /credentials/{id}/model ────────────────────────────────────
+
+
+async def test_response_includes_model_field_defaulting_to_null(
+    client: httpx.AsyncClient,
+) -> None:
+    created = (
+        await client.post(
+            "/api/llm/credentials",
+            json={"provider": "openai", "display_name": "x", "api_key": "k"},
+            headers=AUTH,
+        )
+    ).json()
+    assert created["model"] is None
+
+
+async def test_patch_model_sets_value(client: httpx.AsyncClient) -> None:
+    created = (
+        await client.post(
+            "/api/llm/credentials",
+            json={"provider": "openai", "display_name": "x", "api_key": "k"},
+            headers=AUTH,
+        )
+    ).json()
+    r = await client.patch(
+        f"/api/llm/credentials/{created['id']}/model",
+        json={"model": "gpt-5"},
+        headers=AUTH,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == "gpt-5"
+    listed = (await client.get("/api/llm/credentials", headers=AUTH)).json()
+    assert listed[0]["model"] == "gpt-5"
+
+
+async def test_patch_model_null_clears(client: httpx.AsyncClient) -> None:
+    created = (
+        await client.post(
+            "/api/llm/credentials",
+            json={"provider": "openai", "display_name": "x", "api_key": "k"},
+            headers=AUTH,
+        )
+    ).json()
+    await client.patch(
+        f"/api/llm/credentials/{created['id']}/model",
+        json={"model": "gpt-5"},
+        headers=AUTH,
+    )
+    cleared = await client.patch(
+        f"/api/llm/credentials/{created['id']}/model",
+        json={"model": None},
+        headers=AUTH,
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["model"] is None
+
+
+async def test_patch_model_unknown_id_returns_404(client: httpx.AsyncClient) -> None:
+    response = await client.patch(
+        "/api/llm/credentials/9999/model",
+        json={"model": "gpt-5"},
+        headers=AUTH,
+    )
     assert response.status_code == 404
