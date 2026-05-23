@@ -115,6 +115,10 @@ llm_credentials = Table(
     # Optional override for OpenAI-compatible endpoints (e.g. self-hosted
     # OpenRouter mirror). NULL = use the provider's well-known base URL.
     Column("base_url", Text),
+    # Preferred model for this credential — NULL = agent loop falls back
+    # to settings.model. Surfaced through GET /api/llm/credentials/{id}/models
+    # (provider-side model listing) and persisted via PATCH .../model.
+    Column("model", Text),
     # 0 | 1 — at most one row may have is_active=1 (partial unique idx).
     Column("is_active", Integer, nullable=False, server_default="0"),
     # api_key mode ciphertext. Hex strings to keep the schema text-only.

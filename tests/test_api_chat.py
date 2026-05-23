@@ -359,6 +359,50 @@ async def test_api_chat_passes_tool_catalog_to_agent(
     assert "todo_add" in names
 
 
+async def test_api_chat_uses_active_credential_model(
+    client: httpx.AsyncClient,
+) -> None:
+    """The per-credential model wins over settings.model when active."""
+    from hermes.repository import llm_credentials as repo
+
+    seen = _install_upstream_responses([_assistant_oneshot("ok")])
+    # Insert + activate a credential with a distinctive model id.
+    ct = app.state.encryptor.encrypt("sk-x")
+    row = await repo.create_api_key(
+        app.state.db,
+        provider="openai",
+        display_name="t",
+        base_url=None,
+        ciphertext=ct,
+    )
+    await repo.set_model(app.state.db, row.id, "gpt-99-custom")
+    await repo.activate(app.state.db, row.id)
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+    ) as response:
+        async for _ in response.aiter_bytes():
+            pass
+        assert response.status_code == 200
+
+    assert seen[0]["model"] == "gpt-99-custom"
+
+
+async def test_api_chat_falls_back_to_settings_model_when_no_active(
+    client: httpx.AsyncClient,
+) -> None:
+    seen = _install_upstream_responses([_assistant_oneshot("ok")])
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+    ) as response:
+        async for _ in response.aiter_bytes():
+            pass
+        assert response.status_code == 200
+    # No active credential → settings.model (the test config defaults).
+    from hermes.config import settings
+    assert seen[0]["model"] == settings.model
+
+
 async def test_api_chat_cross_channel_send_filters_web_target(
     client: httpx.AsyncClient,
 ) -> None:

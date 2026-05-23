@@ -20,12 +20,15 @@ from hermes.repository import (
     reminders,
     todos,
 )
+from hermes.repository import (
+    llm_credentials as llm_credentials_repo,
+)
 from hermes.tool_catalog import build_tool_catalog
 
 router = APIRouter(prefix="/api")
 
 WEB_SYSTEM_PROMPT = (
-    "You are Hermes, a personal AI assistant for Marko, talking through the "
+    "You are Hermes, a personal AI assistant for Martin, talking through the "
     "web UI. Be concise and direct."
 )
 
@@ -116,12 +119,18 @@ async def api_chat(request: Request) -> Response:
 
         async def run_task() -> None:
             try:
+                # Active credential overrides settings.model; per-request
+                # resolution costs one cheap SELECT and lets the UI swap
+                # models without restarting the server.
+                model = (
+                    await llm_credentials_repo.get_active_model(db)
+                ) or settings.model
                 await run_agent(
                     upstream=upstream,
                     db=db,
                     conversation_id=convo.id,
                     system_prompt=WEB_SYSTEM_PROMPT,
-                    model=settings.model,
+                    model=model,
                     tools=tools,
                     on_chunk=on_chunk,
                 )

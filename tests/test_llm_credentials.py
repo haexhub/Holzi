@@ -11,7 +11,7 @@ async def test_create_api_key_persists_ciphertext(conn) -> None:
     cred = await repo.create_api_key(
         conn,
         provider="openai",
-        display_name="Marko OpenAI",
+        display_name="Martin OpenAI",
         base_url=None,
         ciphertext=blob,
     )
@@ -98,7 +98,7 @@ async def test_get_active_returns_none_when_no_active(conn) -> None:
 async def test_create_oauth_pending_row(conn) -> None:
     cred = await repo.create_oauth_pending(
         conn,
-        display_name="Marko Claude Max",
+        display_name="Martin Claude Max",
     )
     assert cred.mode == "oauth_claude"
     assert cred.provider == "anthropic"
