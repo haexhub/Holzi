@@ -137,21 +137,22 @@ async def test_lifespan_uses_env_fallback_when_no_active_credential(
 async def test_activate_credential_rebuilds_upstream(
     client: httpx.AsyncClient,
 ) -> None:
-    created = (
-        await client.post(
-            "/api/llm/credentials",
-            json={
-                "provider": "openai",
-                "display_name": "u-openai",
-                "api_key": "sk-fresh-key",
-            },
-            headers=AUTH,
-        )
-    ).json()
+    create_resp = await client.post(
+        "/api/llm/credentials",
+        json={
+            "provider": "openai",
+            "display_name": "u-openai",
+            "api_key": "sk-fresh-key",
+        },
+        headers=AUTH,
+    )
+    assert create_resp.status_code == 201
+    created = create_resp.json()
     before = app.state.upstream
-    await client.patch(
+    activate_resp = await client.patch(
         f"/api/llm/credentials/{created['id']}/activate", headers=AUTH
     )
+    assert activate_resp.status_code == 200
     after = app.state.upstream
     # New client instance.
     assert after is not before
@@ -165,23 +166,25 @@ async def test_activate_credential_rebuilds_upstream(
 async def test_delete_active_credential_falls_back_to_env(
     client: httpx.AsyncClient,
 ) -> None:
-    created = (
-        await client.post(
-            "/api/llm/credentials",
-            json={
-                "provider": "openai",
-                "display_name": "u",
-                "api_key": "sk-tmp",
-            },
-            headers=AUTH,
-        )
-    ).json()
-    await client.patch(
+    create_resp = await client.post(
+        "/api/llm/credentials",
+        json={
+            "provider": "openai",
+            "display_name": "u",
+            "api_key": "sk-tmp",
+        },
+        headers=AUTH,
+    )
+    assert create_resp.status_code == 201
+    created = create_resp.json()
+    activate_resp = await client.patch(
         f"/api/llm/credentials/{created['id']}/activate", headers=AUTH
     )
-    await client.delete(
+    assert activate_resp.status_code == 200
+    delete_resp = await client.delete(
         f"/api/llm/credentials/{created['id']}", headers=AUTH
     )
+    assert delete_resp.status_code == 204
     base = str(app.state.upstream.base_url).rstrip("/")
     # No active credential — back to the env-var proxy URL.
     assert base == "http://haex-claude-proxy:8080"
@@ -194,7 +197,7 @@ async def test_creating_an_api_key_credential_does_not_activate_it(
     # Creating a row leaves is_active=0 by default; the upstream should
     # NOT switch until the user explicitly activates.
     before = app.state.upstream
-    await client.post(
+    create_resp = await client.post(
         "/api/llm/credentials",
         json={
             "provider": "openai",
@@ -203,6 +206,7 @@ async def test_creating_an_api_key_credential_does_not_activate_it(
         },
         headers=AUTH,
     )
+    assert create_resp.status_code == 201
     assert app.state.upstream is before
 
 
@@ -225,9 +229,10 @@ async def test_oauth_authorize_rebuilds_when_active(
         ciphertext=EncryptedBlob(iv=ct.iv, tag=ct.tag, data=ct.data),
         authorized_at=1,
     )
-    await client.patch(
+    activate_resp = await client.patch(
         f"/api/llm/credentials/{row.id}/activate", headers=AUTH
     )
+    assert activate_resp.status_code == 200
     base = str(app.state.upstream.base_url).rstrip("/")
     assert base == "http://haex-claude-proxy:8080"
     assert "authorization" not in {k.lower() for k in app.state.upstream.headers}

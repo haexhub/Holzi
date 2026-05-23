@@ -184,12 +184,19 @@ async def oauth_start(request: Request) -> dict[str, Any]:
     # and authorised-but-re-auth-requested rows all get the same
     # treatment — single Anthropic identity per Hermes instance.
     rows = await repo.list_all(db)
+    swept = False
     for row in rows:
         if row.mode == "oauth_claude":
             with contextlib.suppress(OAuthDriverError):
                 await driver.cancel(row.id)
             remove_oauth_temp_home(row.id)
             await repo.delete(db, row.id)
+            swept = True
+    if swept:
+        # If the swept row was the active one, the agent loop would
+        # keep using a stale client until the next mutation. Force a
+        # rebuild now so subsequent requests fall back correctly.
+        await _refresh_upstream(request)
 
     cred = await repo.create_oauth_pending(db, display_name="Claude (OAuth)")
     home = oauth_temp_home(cred.id)
@@ -284,4 +291,5 @@ async def oauth_cancel(request: Request, cred_id: int) -> Response:
         await driver.cancel(cred_id)
     remove_oauth_temp_home(cred_id)
     await repo.delete(db, cred_id)
+    await _refresh_upstream(request)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
