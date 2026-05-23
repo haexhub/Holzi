@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
@@ -11,11 +12,13 @@ from hermes import __version__
 from hermes.agent import run_agent
 from hermes.auth import bearer_auth_middleware
 from hermes.config import settings
+from hermes.crypto import Encryptor, resolve_master_key
 from hermes.db import init_db
 from hermes.logging import configure_logging, logger
 from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.routes.api import router as api_router
 from hermes.routes.chat import router as chat_router
+from hermes.routes.llm import router as llm_router
 from hermes.scheduler import ReminderScheduler
 from hermes.signal.client import SignalClient
 from hermes.signal.worker import SignalWorker
@@ -46,6 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model=settings.model,
     )
     app.state.db = None
+    app.state.encryptor = None
     app.state.upstream = None
     app.state.signal_http = None
     app.state.signal_client = None
@@ -58,6 +62,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     try:
         app.state.db = await init_db(settings.db_path)
+        # Master key lives next to the DB so backups capture both. Pure
+        # in-memory DBs (test path) fall back to a temp file under cwd.
+        key_file = (
+            Path(settings.db_path).resolve().parent
+            if settings.db_path != ":memory:"
+            else Path.cwd()
+        ) / "master.key"
+        master = resolve_master_key(
+            secret_key_env=settings.secret_key, key_file_path=key_file
+        )
+        app.state.encryptor = Encryptor(master)
         app.state.upstream = build_upstream_client(settings.llm_url, settings.llm_api_key)
 
         if settings.signal_number:
@@ -131,6 +146,7 @@ app = FastAPI(title="Hermes", version=__version__, lifespan=lifespan)
 app.add_middleware(BaseHTTPMiddleware, dispatch=bearer_auth_middleware)
 app.include_router(chat_router)
 app.include_router(api_router)
+app.include_router(llm_router)
 
 
 @app.get("/healthz")

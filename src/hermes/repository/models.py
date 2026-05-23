@@ -47,3 +47,27 @@ class Todo:
     tags: str | None
     done_at: int | None
     created_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class LlmCredential:
+    """A row from `llm_credentials`. Ciphertext columns stay raw — callers
+    decide whether and when to decrypt (route handlers never decrypt; the
+    agent loop and the proxy resolver do)."""
+
+    id: int
+    provider: str
+    mode: str
+    display_name: str
+    base_url: str | None
+    is_active: bool
+    api_key_iv: str | None
+    api_key_tag: str | None
+    api_key_data: str | None
+    oauth_status: str | None
+    oauth_authorized_at: int | None
+    oauth_iv: str | None
+    oauth_tag: str | None
+    oauth_data: str | None
+    created_at: int
+    updated_at: int

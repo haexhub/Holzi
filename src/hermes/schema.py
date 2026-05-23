@@ -96,3 +96,37 @@ todos = Table(
     Column("done_at", Integer),
     Column("created_at", Integer, nullable=False),
 )
+
+
+# AES-GCM-encrypted credentials for outgoing LLM calls. `provider` chooses
+# the API flavour, `mode` whether we forward a static API key or run the
+# Claude OAuth subprocess. At most one row is active at a time (enforced
+# by the partial unique index in schema.sql) — that's the credential the
+# agent loop picks up and the haex-claude-proxy sqlite-resolver reads.
+llm_credentials = Table(
+    "llm_credentials",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    # 'anthropic' | 'openai' | 'openrouter' | 'google' | 'custom'
+    Column("provider", Text, nullable=False),
+    # 'api_key' | 'oauth_claude'
+    Column("mode", Text, nullable=False),
+    Column("display_name", Text, nullable=False),
+    # Optional override for OpenAI-compatible endpoints (e.g. self-hosted
+    # OpenRouter mirror). NULL = use the provider's well-known base URL.
+    Column("base_url", Text),
+    # 0 | 1 — at most one row may have is_active=1 (partial unique idx).
+    Column("is_active", Integer, nullable=False, server_default="0"),
+    # api_key mode ciphertext. Hex strings to keep the schema text-only.
+    Column("api_key_iv", Text),
+    Column("api_key_tag", Text),
+    Column("api_key_data", Text),
+    # oauth_claude mode: 'pending' | 'authorized' | 'expired'
+    Column("oauth_status", Text),
+    Column("oauth_authorized_at", Integer),
+    Column("oauth_iv", Text),
+    Column("oauth_tag", Text),
+    Column("oauth_data", Text),
+    Column("created_at", Integer, nullable=False),
+    Column("updated_at", Integer, nullable=False),
+)
