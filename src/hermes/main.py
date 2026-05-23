@@ -24,6 +24,7 @@ from hermes.scheduler import ReminderScheduler
 from hermes.signal.client import SignalClient
 from hermes.signal.worker import SignalWorker
 from hermes.tool_catalog import build_tool_catalog
+from hermes.upstream import build_fallback_client, rebuild_upstream_from_db
 
 configure_logging()
 
@@ -35,8 +36,9 @@ SIGNAL_SYSTEM_PROMPT = (
 
 
 def build_upstream_client(llm_url: str, llm_api_key: str) -> httpx.AsyncClient:
-    headers = {"Authorization": f"Bearer {llm_api_key}"} if llm_api_key else None
-    return httpx.AsyncClient(base_url=llm_url, headers=headers, timeout=60.0)
+    """Back-compat shim around `upstream.build_fallback_client` —
+    test modules import this name."""
+    return build_fallback_client(llm_url=llm_url, llm_api_key=llm_api_key)
 
 
 @asynccontextmanager
@@ -76,7 +78,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.encryptor = Encryptor(master)
         app.state.oauth_driver = ClaudeOAuthDriver()
+        # Initial upstream from env vars; rebuild_upstream_from_db then
+        # promotes to the active DB credential if one exists.
         app.state.upstream = build_upstream_client(settings.llm_url, settings.llm_api_key)
+        await rebuild_upstream_from_db(
+            app,
+            db=app.state.db,
+            encryptor=app.state.encryptor,
+            fallback_llm_url=settings.llm_url,
+            fallback_llm_api_key=settings.llm_api_key,
+        )
 
         if settings.signal_number:
             app.state.signal_http = httpx.AsyncClient(base_url=settings.signal_url, timeout=60.0)
