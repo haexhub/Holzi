@@ -1,0 +1,178 @@
+# Hermes — lokaler Dev-Stack
+#
+# Eigenständiges Compose-File (NICHT als Override auf docker-compose.yml gedacht).
+# Bringt Backend + LLM-Proxy + Signal hinter einem lokalen Traefik hoch und
+# routet alle Services über `*.localhost`. Frontend (Nuxt dev mit HMR) kommt
+# über das `frontend`-Profil dazu.
+#
+# Voraussetzungen:
+#   - `.env` ausgefüllt (mindestens HERMES_AUTH_TOKEN — `make token` generiert)
+#   - `haex-claude-proxy:dev` lokal gebaut (separates Repo unter ~/Projekte/haex-claude-proxy)
+#     — oder HAEX_CLAUDE_PROXY_TAG in der .env auf einen anderen vorhandenen Tag
+#   - Fürs `frontend`-Profil: holzi-frontend als Schwester-Verzeichnis unter
+#     ../holzi-frontend ausgecheckt
+#
+# Routing (alle HTTP, kein TLS):
+#   http://hermes.localhost          → hermes-server:8082    (REST API direkt)
+#   http://app.localhost             → holzi-frontend:3001   (UI, nur mit --profile frontend)
+#   http://app.localhost/api/*       → hermes-server:8082    (gleicher Origin wie UI, kein CORS, kein devProxy)
+#   http://localhost:11000           → Traefik-Dashboard
+#
+# `*.localhost` löst in modernen Browsern automatisch auf 127.0.0.1 (RFC 6761) —
+# kein /etc/hosts-Eintrag nötig.
+#
+# Port-Konflikte: Wenn auf dem Host bereits etwas auf :80 lauscht (system-Traefik,
+# nginx, …), setze HERMES_LOCAL_WEB_PORT=11080 in der .env — dann sind die URLs
+# z.B. http://hermes.localhost:11080 statt http://hermes.localhost. Genauso für
+# das Dashboard via HERMES_LOCAL_DASHBOARD_PORT (default 11000).
+#
+# Start:
+#   make up-local                              # backend-stack only
+#   make up-local-full                         # +frontend
+#   docker compose -f docker-compose.local.yml up
+#   docker compose -f docker-compose.local.yml --profile frontend up
+
+networks:
+  hermes-local:
+    name: hermes-local
+    driver: bridge
+
+services:
+  hermes-server:
+    image: hermes-server:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hermes-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HERMES_DB_PATH: /data/hermes.db
+      HERMES_LLM_URL: ${HERMES_LLM_URL:-http://haex-claude-proxy:8080}
+      HERMES_SIGNAL_URL: ${HERMES_SIGNAL_URL:-http://signal-cli-rest-api:8080}
+    volumes:
+      - hermes-data:/data
+    networks:
+      - hermes-local
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=hermes-local"
+      # Direkter API-Zugriff für CLI/curl/Postman.
+      - "traefik.http.routers.hermes.entrypoints=web"
+      - "traefik.http.routers.hermes.rule=Host(`hermes.localhost`)"
+      - "traefik.http.services.hermes.loadbalancer.server.port=8082"
+      # Zweiter Router auf demselben Service: leitet /api/* vom Frontend-Host
+      # ans Backend — gleicher Origin, kein CORS, kein Nuxt-devProxy nötig.
+      - "traefik.http.routers.hermes-api.entrypoints=web"
+      - "traefik.http.routers.hermes-api.rule=Host(`app.localhost`) && PathPrefix(`/api`)"
+      # Höhere Priority als der Frontend-Catch-All auf app.localhost
+      # (default auto-priority = rule length, ~21). Sonst schluckt das
+      # Frontend die /api/*-Requests und der Nuxt-devProxy hängt sich.
+      - "traefik.http.routers.hermes-api.priority=100"
+      - "traefik.http.routers.hermes-api.service=hermes"
+    depends_on:
+      - haex-claude-proxy
+      - signal-cli-rest-api
+
+  signal-cli-rest-api:
+    image: bbernhard/signal-cli-rest-api:latest
+    container_name: signal-cli-rest-api
+    restart: unless-stopped
+    environment:
+      MODE: json-rpc
+    volumes:
+      - signal-data:/home/.local/share/signal-cli
+    networks:
+      - hermes-local
+
+  haex-claude-proxy:
+    # Image-Tag konfigurierbar — Default `dev` matched das, was im
+    # haex-claude-proxy-Repo via `make build` rauskommt. Prod-Deployments
+    # setzen HAEX_CLAUDE_PROXY_TAG auf einen gepinnten SHA.
+    image: haex-claude-proxy:${HAEX_CLAUDE_PROXY_TAG:-dev}
+    container_name: haex-claude-proxy
+    restart: unless-stopped
+    environment:
+      PROXY_RESOLVER: file
+      # File-Resolver liest aus $PROXY_CREDENTIALS_HOME/.claude/.credentials.json.
+      # Mit /data/claude als HOME und ${HOME}/.claude read-only gemountet als
+      # /data/claude/.claude ergibt das exakt deine Host-Credentials aus
+      # `claude login`. Kein Re-Login im Container nötig.
+      PROXY_CREDENTIALS_HOME: /data/claude
+    volumes:
+      - ${HOME}/.claude:/data/claude/.claude:ro
+    networks:
+      - hermes-local
+
+  holzi-frontend:
+    profiles: ["frontend"]
+    image: node:22-alpine
+    container_name: holzi-frontend
+    restart: unless-stopped
+    working_dir: /app
+    # pnpm via corepack — kein eigenes Dockerfile nötig, der Source liegt eh
+    # als Bind-Mount unter /app. `pnpm dev --host 0.0.0.0` macht den Nuxt-Dev-
+    # Server auch von außerhalb des Containers erreichbar (Traefik).
+    # 1. pnpm-Version auf Host-Stand pinnen — corepack-Default ist sonst
+    #    pnpm 11 mit strengerer Supply-Chain-Policy als das vom Host
+    #    generierte Lockfile (pnpm 10).
+    # 2. `--config.minimumReleaseAge=0` bypassed die "Package zu jung"-
+    #    Policy für frische Lockfile-Einträge (kein Host-Cache im Container).
+    command: ["sh", "-c", "corepack enable && corepack prepare pnpm@10.28.2 --activate && pnpm install --frozen-lockfile --config.minimumReleaseAge=0 && pnpm dev --host 0.0.0.0"]
+    environment:
+      HOST: 0.0.0.0
+      # Pnpm 11 prompted bei deps-Drift interaktiv "modules purgen?" — ohne TTY
+      # → exit 1. CI=true ist der dokumentierte Fallback.
+      CI: "true"
+    volumes:
+      - ../holzi-frontend:/app
+      # Anonymous volumes: verhindern, dass Host-node_modules / Nuxt-Caches die
+      # Container-Versionen überschreiben (Alpine-Binaries vs. glibc-Host).
+      - /app/node_modules
+      - /app/.nuxt
+      - /app/.output
+    networks:
+      - hermes-local
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=hermes-local"
+      - "traefik.http.routers.frontend.entrypoints=web"
+      - "traefik.http.routers.frontend.rule=Host(`app.localhost`)"
+      - "traefik.http.services.frontend.loadbalancer.server.port=3001"
+    depends_on:
+      - hermes-server
+
+  traefik:
+    # `:v3` rolling-tag — `:v3.2` requested Docker-API 1.24, was bei modernen
+    # Daemons (>= API 1.40) im "client version too old"-Error endet.
+    image: traefik:v3
+    container_name: hermes-traefik
+    restart: unless-stopped
+    environment:
+      # Belt-and-suspenders: zwingt Traefik's docker client auf eine kompatible
+      # API-Version, falls die Image-Default doch wieder zu alt sein sollte.
+      DOCKER_API_VERSION: "1.43"
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=hermes-local
+      - --entrypoints.web.address=:80
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --log.level=INFO
+    ports:
+      # Loopback-only — der Dev-Stack ist nicht für andere Hosts gedacht.
+      # Wer's auf einer LAN-IP exposen will, kann das Prefix lokal entfernen.
+      - "127.0.0.1:${HERMES_LOCAL_WEB_PORT:-80}:80"
+      # Dashboard (zum Debuggen der Router/Middlewares) — `api.insecure=true`,
+      # daher bewusst nicht auf 0.0.0.0 binden.
+      - "127.0.0.1:${HERMES_LOCAL_DASHBOARD_PORT:-11000}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - hermes-local
+
+volumes:
+  hermes-data:
+  signal-data:
