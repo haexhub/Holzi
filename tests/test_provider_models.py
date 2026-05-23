@@ -219,3 +219,32 @@ async def test_provider_non_200_raises_with_body() -> None:
             await list_provider_models(cred, http=client, encryptor=enc)
 
 
+async def test_provider_returns_non_json_body_raises() -> None:
+    """200 with HTML/garbage body must surface as ProviderModelsError so the
+    route maps it to 502, not 500."""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"<html>oops</html>",
+            headers={"content-type": "text/html"},
+        )
+
+    cred, enc = _make_credential(provider="openai", api_key="sk-x")
+    async with _stub_client(handler) as client:
+        with pytest.raises(ProviderModelsError, match="non-JSON"):
+            await list_provider_models(cred, http=client, encryptor=enc)
+
+
+async def test_undecryptable_api_key_raises_provider_error() -> None:
+    """If the stored ciphertext can't be decrypted (e.g. master key rotated),
+    the error must be normalized to ProviderModelsError rather than bubbling
+    up as a raw InvalidTag/ValueError that maps to 500."""
+    enc1 = Encryptor(secrets.token_bytes(32))
+    cred, _ = _make_credential(provider="openai", api_key="sk-x", encryptor=enc1)
+    # Different encryptor → decrypt will fail.
+    enc2 = Encryptor(secrets.token_bytes(32))
+    async with _stub_client(lambda r: httpx.Response(200, json={"data": []})) as client:
+        with pytest.raises(ProviderModelsError, match="decrypt"):
+            await list_provider_models(cred, http=client, encryptor=enc2)
+
+

@@ -91,11 +91,16 @@ def _decrypt_api_key(cred: LlmCredential, encryptor: Encryptor) -> str:
         raise ProviderModelsError(
             f"credential {cred.id} is api_key but has no ciphertext"
         )
-    return encryptor.decrypt(
-        EncryptedBlob(
-            iv=cred.api_key_iv, tag=cred.api_key_tag, data=cred.api_key_data
+    try:
+        return encryptor.decrypt(
+            EncryptedBlob(
+                iv=cred.api_key_iv, tag=cred.api_key_tag, data=cred.api_key_data
+            )
         )
-    )
+    except Exception as exc:
+        raise ProviderModelsError(
+            f"could not decrypt api key for credential {cred.id}"
+        ) from exc
 
 
 async def _fetch_json(
@@ -112,7 +117,12 @@ async def _fetch_json(
         raise ProviderModelsError(
             f"provider returned {response.status_code}{f': {body}' if body else ''}"
         )
-    return response.json()
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise ProviderModelsError(
+            f"provider returned non-JSON body: {response.text[:300]}"
+        ) from exc
 
 
 # ─── per-provider listers ─────────────────────────────────────────────

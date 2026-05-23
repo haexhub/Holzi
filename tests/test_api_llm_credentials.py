@@ -215,3 +215,38 @@ async def test_patch_model_unknown_id_returns_404(client: httpx.AsyncClient) -> 
         headers=AUTH,
     )
     assert response.status_code == 404
+
+
+async def test_patch_model_rejects_blank(client: httpx.AsyncClient) -> None:
+    """Blank/whitespace strings violate the 'pass null to clear' contract."""
+    created = (
+        await client.post(
+            "/api/llm/credentials",
+            json={"provider": "openai", "display_name": "x", "api_key": "k"},
+            headers=AUTH,
+        )
+    ).json()
+    for bad in ("", "   "):
+        r = await client.patch(
+            f"/api/llm/credentials/{created['id']}/model",
+            json={"model": bad},
+            headers=AUTH,
+        )
+        assert r.status_code == 422, r.text
+
+
+async def test_patch_model_strips_whitespace(client: httpx.AsyncClient) -> None:
+    created = (
+        await client.post(
+            "/api/llm/credentials",
+            json={"provider": "openai", "display_name": "x", "api_key": "k"},
+            headers=AUTH,
+        )
+    ).json()
+    r = await client.patch(
+        f"/api/llm/credentials/{created['id']}/model",
+        json={"model": "  gpt-5  "},
+        headers=AUTH,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == "gpt-5"

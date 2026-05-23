@@ -21,7 +21,7 @@ from typing import Any, Literal
 import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.config import settings
@@ -37,6 +37,7 @@ from hermes.oauth import (
 from hermes.provider_models import (
     ModelChoice,
     ProviderModelsError,
+    clear_cache,
     list_provider_models,
 )
 from hermes.repository import llm_credentials as repo
@@ -133,6 +134,16 @@ class ModelUpdateRequest(BaseModel):
 
     model: str | None = Field(default=None, max_length=200)
 
+    @field_validator("model")
+    @classmethod
+    def _reject_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("model must not be empty; pass null to clear")
+        return stripped
+
 
 class ModelChoiceResponse(BaseModel):
     id: str
@@ -154,7 +165,10 @@ async def update_credential_model(
     if updated is None:
         raise HTTPException(status_code=404, detail="credential not found")
     # No upstream rebuild needed — the model is consulted per request
-    # by the agent, the httpx client isn't keyed on the model.
+    # by the agent, the httpx client isn't keyed on the model. Drop the
+    # cached provider model list so a refresh after a UI add picks up
+    # newly-available models within the 10-min TTL window.
+    clear_cache(cred_id)
     return _to_response(updated)
 
 
