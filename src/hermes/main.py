@@ -16,6 +16,7 @@ from hermes.crypto import Encryptor, resolve_master_key
 from hermes.db import init_db
 from hermes.logging import configure_logging, logger
 from hermes.mcp_server import mcp_session_manager, tool_manifest
+from hermes.oauth import ClaudeOAuthDriver
 from hermes.routes.api import router as api_router
 from hermes.routes.chat import router as chat_router
 from hermes.routes.llm import router as llm_router
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.db = None
     app.state.encryptor = None
+    app.state.oauth_driver = None
     app.state.upstream = None
     app.state.signal_http = None
     app.state.signal_client = None
@@ -73,6 +75,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             secret_key_env=settings.secret_key, key_file_path=key_file
         )
         app.state.encryptor = Encryptor(master)
+        app.state.oauth_driver = ClaudeOAuthDriver()
         app.state.upstream = build_upstream_client(settings.llm_url, settings.llm_api_key)
 
         if settings.signal_number:
