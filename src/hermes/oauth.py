@@ -1,16 +1,26 @@
-"""Drives the `claude auth login --claudeai` subprocess for a single
-OAuth flow.
+"""Drives the `claude setup-token` subprocess for a single OAuth flow.
 
 Real flow (claude-code 2.1.x):
-  1. spawn("claude", ["auth", "login", "--claudeai"], env={HOME})
-  2. CLI prints:
-        Opening browser to sign in…
-        If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?…
-        Paste code here if prompted >  ← reads from stdin
-  3. user authorizes via the URL; claude.com shows a verification code
-  4. user submits the code through our UI; we forward `<code>\n` to the
-     held-open subprocess's stdin
-  5. CLI verifies via PKCE, writes $HOME/.claude/.credentials.json, exits 0
+  1. spawn("claude", ["setup-token"], env={HOME}) under a pseudo-TTY.
+     claude-code 2.1+ enters a TUI splash, prints:
+        Browser didn't open? Use the url below to sign in (c to copy)
+        https://claude.com/cai/oauth/authorize?…
+        Paste code here if prompted >
+     and reads the verification code via bracketed-paste input — which
+     requires a real terminal on stdin, not a pipe.
+  2. user authorizes via the URL; platform.claude.com shows a code.
+  3. user submits the code through our UI; we wrap it in the bracketed-
+     paste escape sequence (ESC[200~ … ESC[201~ \r) and write that to
+     the PTY master so the CLI's paste-handler picks it up.
+  4. CLI verifies via PKCE, writes $HOME/.claude/.credentials.json,
+     exits 0.
+
+The previous implementation used `claude auth login --claudeai` over
+plain pipes. Both pieces have to be wrong: `auth login --claudeai` in
+2.1+ doesn't show a paste prompt at all (it expects a browser callback
+that never reaches us), and plain pipes don't satisfy claude's
+bracketed-paste detection — the subprocess just sat in ep_poll forever,
+which surfaced in the UI as the "Verifiziere Code…" spinner hanging.
 
 Each driver instance keeps an in-memory map keyed on the `llm_credentials`
 row id so the status / submit-code / cancel endpoints can find their
@@ -22,11 +32,15 @@ The subprocess factory is injectable for tests so we never spawn a real
 """
 import asyncio
 import contextlib
+import fcntl
 import json
 import os
+import pty
 import re
 import shutil
+import struct
 import tempfile
+import termios
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,6 +54,27 @@ DEFAULT_URL_RE = re.compile(
 )
 _URL_WAIT_TIMEOUT_S = 30.0
 _URL_POLL_INTERVAL_S = 0.025
+
+# Strip CSI / OSC ANSI escape sequences before regex-matching the URL.
+# The claude-code 2.1 TUI surrounds the URL in `\x1b[38;5;246m … \x1b[39m`
+# (256-color foreground/reset) and can interleave OSC ("\x1b]…\x07") for
+# title updates; both confuse the URL regex if left in.
+_ANSI_RE = re.compile(rb"\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07]*\x07)")
+
+# A wide virtual terminal keeps claude's URL from wrapping across multiple
+# lines (the TUI re-flows to terminal width). Easier to regex off a single
+# line than to stitch ANSI-coloured wraps back together. 800 is plenty —
+# the longest URLs we've seen are ~400 chars; bumping to 800 leaves a wide
+# margin for new query params claude may add in future releases.
+_PTY_COLS = 800
+_PTY_ROWS = 60
+
+# Bracketed-paste delimiters. xterm-style terminals send these around
+# pasted content; claude-code's input handler latches onto them to know
+# "this came from a paste, treat it as one chunk". A trailing \r commits
+# the paste.
+_PASTE_START = b"\x1b[200~"
+_PASTE_END = b"\x1b[201~"
 
 
 class OAuthDriverError(RuntimeError):
@@ -73,17 +108,121 @@ class _ProcessLike(Protocol):
 SpawnFn = Callable[[list[str], dict[str, str]], Awaitable[_ProcessLike]]
 
 
+class _PtyStdin:
+    """Minimal `_StdinLike` writer that pushes directly to the PTY master fd.
+
+    No drain/backpressure plumbing — the OAuth code is <100 bytes, well
+    inside the kernel pipe buffer, so a blocking `os.write` is fine. The
+    fd is left open for the lifetime of the flow; `_PtyProcess.wait()`
+    closes it once the subprocess has reaped.
+    """
+
+    def __init__(self, master_fd: int) -> None:
+        self._fd = master_fd
+        self._closed = False
+
+    def write(self, data: bytes) -> None:
+        if self._closed:
+            raise BrokenPipeError("PTY master already closed")
+        os.write(self._fd, data)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        # `_PtyProcess` owns the master fd lifecycle; flag closed so we
+        # don't accept further writes, but don't actually close here —
+        # the subprocess might still be reading.
+        self._closed = True
+
+
+class _PtyProcess:
+    """asyncio.subprocess.Process-shaped wrapper around a PTY-attached child.
+
+    The PTY's slave side is the child's stdin/stdout/stderr; the master
+    side is exposed as `.stdin` (writer) and `.stdout` (asyncio
+    StreamReader). `.stderr` is None because the slave is shared — the
+    `_drain` task only watches stdout, the existing stderr-buf flow
+    gracefully degrades to "no stderr" when stderr is None.
+    """
+
+    def __init__(
+        self,
+        proc: "asyncio.subprocess.Process",
+        master_fd: int,
+        stdout_reader: asyncio.StreamReader,
+    ) -> None:
+        self._proc = proc
+        self._master_fd = master_fd
+        self.stdin = _PtyStdin(master_fd)
+        self.stdout = stdout_reader
+        self.stderr: asyncio.StreamReader | None = None
+
+    @property
+    def returncode(self) -> int | None:
+        return self._proc.returncode
+
+    async def wait(self) -> int:
+        rc = await self._proc.wait()
+        with contextlib.suppress(OSError):
+            os.close(self._master_fd)
+        return rc
+
+    def kill(self) -> None:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            self._proc.kill()
+
+
 async def _default_spawn(
     cmd: list[str], env: dict[str, str]
 ) -> _ProcessLike:
+    """Spawn `claude setup-token` under a pseudo-TTY.
+
+    claude-code 2.1+ only enables its bracketed-paste code prompt when
+    stdin is a real terminal; a plain pipe leaves the subprocess hanging
+    in ep_poll waiting for paste-start escape sequences that never
+    arrive. We wire all three std fds to the PTY slave so the CLI sees a
+    coherent terminal (it also queries window-size for its TUI splash);
+    the master fd is exposed to the parent as the read/write channel.
+    """
+    master_fd, slave_fd = pty.openpty()
+    try:
+        # 200-col TTY keeps the URL on one line — see _ANSI_RE comment.
+        fcntl.ioctl(
+            slave_fd,
+            termios.TIOCSWINSZ,
+            struct.pack("HHHH", _PTY_ROWS, _PTY_COLS, 0, 0),
+        )
+        # Echo off: pasted code shouldn't bounce back into the URL buffer.
+        attrs = termios.tcgetattr(slave_fd)
+        attrs[3] &= ~termios.ECHO  # lflag
+        termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+    except (OSError, termios.error):
+        # Best-effort — if the TTY can't be sized, we still try the spawn.
+        pass
+
+    # `pass_fds` is implied for fds that are explicitly assigned as the
+    # child's std descriptors. close_fds defaults to True so the parent's
+    # master_fd doesn't leak into the child.
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
         env=env,
     )
-    return proc  # type: ignore[return-value]
+    os.close(slave_fd)
+
+    loop = asyncio.get_running_loop()
+    os.set_blocking(master_fd, False)
+    reader = asyncio.StreamReader(loop=loop)
+    protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
+    # closefd=False — _PtyProcess.wait() handles the final close so the
+    # asyncio transport teardown doesn't race the OS-level reap.
+    master_file = os.fdopen(master_fd, "rb", buffering=0, closefd=False)
+    await loop.connect_read_pipe(lambda: protocol, master_file)
+
+    return _PtyProcess(proc, master_fd, reader)
 
 
 @dataclass
@@ -134,7 +273,7 @@ class ClaudeOAuthDriver:
         env.pop("CLAUDE_CODE_ENTRYPOINT", None)
 
         proc = await self.spawn_fn(
-            [self.claude_bin, "auth", "login", "--claudeai"], env
+            [self.claude_bin, "setup-token"], env
         )
 
         loop = asyncio.get_running_loop()
@@ -180,10 +319,17 @@ class ClaudeOAuthDriver:
         if flow.proc.stdin is None or flow.done is None:
             raise OAuthDriverError("subprocess stdin is not available")
         flow.code_submitted = True
+        # Bracketed paste: the claude TUI only commits the code if it
+        # arrives between the paste-start / paste-end markers — plain
+        # "<code>\n" gets dropped on the floor and the subprocess hangs.
+        # Keep stdin open afterwards: the CLI exits on its own once it's
+        # done with the PKCE exchange, and closing the master fd here
+        # would tear down the PTY mid-handshake on some kernels.
         try:
-            flow.proc.stdin.write(f"{code.strip()}\n".encode())
+            flow.proc.stdin.write(
+                _PASTE_START + code.strip().encode() + _PASTE_END + b"\r"
+            )
             await flow.proc.stdin.drain()
-            flow.proc.stdin.close()
         except (BrokenPipeError, ConnectionResetError):
             # CLI may have already exited (bad code path). The error will
             # surface via flow.done below.
@@ -267,9 +413,15 @@ class ClaudeOAuthDriver:
         loop = asyncio.get_running_loop()
         start = loop.time()
         while loop.time() - start < timeout_s:
-            m = self.url_regex.search(
-                bytes(flow.stdout_buf).decode("utf-8", errors="replace")
+            # The claude-code 2.1 TUI splash wraps the URL in 256-color
+            # escapes (`\x1b[38;5;246m … \x1b[39m`); strip those before
+            # regex-matching so the URL parser doesn't have to know about
+            # ANSI. Plain pipes (the test fakes use them) just pass
+            # through unchanged.
+            decoded = _ANSI_RE.sub(b"", bytes(flow.stdout_buf)).decode(
+                "utf-8", errors="replace"
             )
+            m = self.url_regex.search(decoded)
             if m:
                 return m.group(0)
             if flow.flow_id not in self._flows:
