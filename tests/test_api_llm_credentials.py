@@ -151,6 +151,26 @@ async def test_activate_missing_row_returns_404(client: httpx.AsyncClient) -> No
     assert response.status_code == 404
 
 
+async def test_activate_rejects_pending_oauth_credential(
+    client: httpx.AsyncClient,
+) -> None:
+    """A `pending` oauth_claude row has no usable ciphertext yet; the proxy
+    would 503 at chat time. Refuse at the activation boundary instead."""
+    from hermes.main import app
+    from hermes.repository import llm_credentials as repo
+
+    cred = await repo.create_oauth_pending(app.state.db, display_name="Pending")
+
+    r = await client.patch(
+        f"/api/llm/credentials/{cred.id}/activate", headers=AUTH
+    )
+    assert r.status_code == 409, r.text
+    assert "pending" in r.text
+
+    listed = (await client.get("/api/llm/credentials", headers=AUTH)).json()
+    assert all(row["is_active"] is False for row in listed)
+
+
 # ─── PATCH /credentials/{id}/model ────────────────────────────────────
 
 

@@ -208,6 +208,21 @@ def _choice_to_response(m: ModelChoice) -> dict[str, str]:
 )
 async def activate_credential(request: Request, cred_id: int) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
+    cred = await repo.get(db, cred_id)
+    if cred is None:
+        raise HTTPException(status_code=404, detail="credential not found")
+    # OAuth credentials only make sense once the code-submit step actually
+    # produced a ciphertext. Activating a 'pending' / 'expired' row used to
+    # leave the proxy without a usable token, surfacing as a confusing 503
+    # at chat time — fail loud at the activation boundary instead.
+    if cred.mode == "oauth_claude" and cred.oauth_status != "authorized":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"oauth credential is in state '{cred.oauth_status}', "
+                "complete the OAuth flow before activating"
+            ),
+        )
     if not await repo.activate(db, cred_id):
         raise HTTPException(status_code=404, detail="credential not found")
     cred = await repo.get(db, cred_id)
