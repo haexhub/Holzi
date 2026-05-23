@@ -93,6 +93,31 @@ async def _emit_after(delay: float, fn) -> None:
     fn()
 
 
+async def test_start_login_parses_url_through_ansi_escapes(
+    tmp_path: Path,
+) -> None:
+    """claude-code 2.1's TUI wraps the URL in 256-color escapes — the URL
+    parser must strip those before regex-matching, otherwise the captured
+    string runs straight into `\\x1b[39m` and the verification call
+    later hits a malformed redirect URI."""
+    child = _FakeProcess()
+    driver = ClaudeOAuthDriver(spawn_fn=_fake_spawn_factory(child))
+
+    async def emit_tui_url() -> None:
+        await asyncio.sleep(0.01)
+        # Realistic TUI fragment: 256-color foreground + the URL + reset.
+        child.emit_stdout(
+            "\x1b[38;5;246mBrowser didn't open? Use the url below"
+            "\x1b[39m\n"
+            f"\x1b[38;5;246m{FAKE_URL}\x1b[39m\n"
+        )
+
+    asyncio.create_task(emit_tui_url())
+    url = await driver.start_login(flow_id=99, home=str(tmp_path / "tui"))
+    assert url == FAKE_URL
+    await driver.cancel(99)
+
+
 async def test_start_login_parses_url_from_stdout(tmp_path: Path) -> None:
     child = _FakeProcess()
     driver = ClaudeOAuthDriver(spawn_fn=_fake_spawn_factory(child))
@@ -165,7 +190,11 @@ async def test_submit_code_pipes_stdin_and_resolves_on_clean_exit(
 
     asyncio.create_task(succeed())
     await driver.submit_code(4, "abc-123-xyz")
-    assert child.stdin.chunks == [b"abc-123-xyz\n"]
+    # New driver wraps the code in xterm bracketed-paste markers so the
+    # claude-code 2.1 TUI commits it. Plain "<code>\n" silently dropped.
+    assert child.stdin.chunks == [
+        b"\x1b[200~abc-123-xyz\x1b[201~\r"
+    ]
     assert driver.active_ids() == []
 
 
