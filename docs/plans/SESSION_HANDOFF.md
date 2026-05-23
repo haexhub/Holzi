@@ -1,58 +1,67 @@
-# Session handoff — 2026-05-22 (late)
+# Session handoff — 2026-05-23
 
-Read this when picking up the Hermes ([[project-hermes-agent]]) work in a new conversation. Memory under `/home/haex/.claude/projects/-home-haex-Projekte-Holzi/memory/` mirrors most of this; the deep what's-next breakdown lives in [`2026-05-22-roadmap.md`](./2026-05-22-roadmap.md).
+Read this when picking up the Hermes ([[project-hermes-agent]]) work in a new conversation. Memory under `/home/haex/.claude/projects/-home-haex-Projekte-Holzi/memory/` mirrors most of this; the deep what's-next breakdown lives in [`2026-05-23-next-session.md`](./2026-05-23-next-session.md).
 
 ## tldr
 
-Phase 0–8 plus a stack of follow-ups are on `main`. The Nuxt frontend is in its own repo ([holzi-frontend](https://github.com/haexhub/holzi-frontend)) and is functionally complete for the MVP loop. The SQLAlchemy Core refactor that was queued in the memory is also done. Both repos have CI (pytest+ruff+mypy / nuxt-typecheck+vitest). No open PRs.
+LLM-credentials feature in flight. Phases 1 + 2 (schema + AES-GCM helper + CRUD API) sit on the open PR [Holzi#14](https://github.com/haexhub/Holzi/pull/14). Phases 3-7 (OAuth flow, agent integration, resolver plugin, frontend UI, compose update) are spec'd in [`2026-05-23-next-session.md`](./2026-05-23-next-session.md) and [`2026-05-23-llm-credentials-design.md`](./2026-05-23-llm-credentials-design.md).
 
-**Next item per the roadmap doc**: token-by-token streaming animation on the frontend (B.1), or A.1 frontend-handoff Dockerfile to unblock Phase 10 deploy. See the roadmap for the full ordered list.
+Local dev-stack via `docker-compose.local.yml` is on main. Browser-accessible Hermes UI under `http://app.localhost:11080/` after `make up-local-full`. Currently the proxy bind-mounts `~/.claude` — that bind-mount goes away once Phases 3-7 are done.
+
+**Start here**: confirm PR #14 is in good shape, merge it, then jump to Phase 3 (Claude OAuth flow in the backend).
 
 ## Branch state
 
-Verify with `git fetch --prune && git log --oneline origin/main -n 10` before acting.
+Verify with `git fetch --prune && git log --oneline origin/main -n 8` before acting.
 
 ```
 origin/main (Holzi, as of session end):
+  639263d docs: next-session plan for the LLM-credentials feature
+  bb1211e feat: local dev-stack via docker-compose.local.yml (#13)
+  8050660 docs: 2026-05-22 roadmap + session-handoff refresh
   686a571 ci: pytest + ruff + mypy on PRs and main (#12)
   507126a Repo layer on SQLAlchemy Core (async) (#11)
   3aed12b Tighten MessageResponse.role to Literal[user|assistant|tool] (#10)
-  0e6f599 Backend: response_model= on /api endpoints (#9)
-  85b0d8d Token-level SSE streaming on /api/chat (#8)
-  f002ad5 Phase 8: web-UI backend (/api/*) with recursion-guarded tool catalog (#7)
-  b8cfb4a docs: refresh handoff after Phase 7 merge
-  433b8ce Phase 7: productivity + external tools, reminder scheduler (#6)
 
-origin/main (holzi-frontend, separate repo):
+origin/main (holzi-frontend):
+  a9d8c68 feat: live token streaming in chat bubble (#5)
+  7fe6d37 build: add pnpm-workspace.yaml with onlyBuiltDependencies (#6)
   53af4b1 ci: nuxt typecheck + vitest on PRs and main (#4)
-  7ddf713 Regen types after backend role-Literal tightening (#3)
-  08bff4a Alias all API response types from the generated openapi schema (#2)
-  d11d4ea openapi-typescript + Vitest (#1)
-  e01fad2 Initial commit: Nuxt 4 + shadcn-vue SPA frontend for Hermes
-```
 
-No open PRs.
+Open PRs:
+  Holzi#14  feat: llm_credentials backend (schema + crypto + CRUD API)
+            branch feat/llm-credentials — phases 1+2 of the credentials feature
+```
 
 ## What landed this session
 
-See [`2026-05-22-roadmap.md`](./2026-05-22-roadmap.md) for the full per-PR breakdown. High-level:
-
-- Phase 8 web-UI backend: `/api/chat` (SSE), `/api/conversations`, `/api/notes`, `/api/todos`, `/api/reminders`.
-- Token-level SSE streaming on `/api/chat`, terminal-marker check on the upstream stream, cancellation cleanup on client disconnect.
-- `response_model=` on every endpoint → named OpenAPI shapes the frontend's `openapi-typescript` codegen consumes.
-- `MessageResponse.role` tightened to a `Literal` union → flows through to the frontend type.
-- **SQLAlchemy Core refactor**: `app.state.db` is now an `AsyncEngine`. Each repo opens its own short-lived transaction via `engine.begin()`. `schema.py` owns the regular tables; `schema.sql` is FTS5-only. Connect-event listener applies `PRAGMA foreign_keys=ON` per pool checkout. Tests run on tmp_path file DBs (StaticPool would race the scheduler on `:memory:`).
-- holzi-frontend: openapi-typescript pipeline, Vitest with 19 tests, all response/request types aliased from the generated schema.
-- GitHub Actions CI on both repos.
+- holzi-frontend#5 — live token-by-token streaming animation in the chat bubble.
+- holzi-frontend#6 — `pnpm-workspace.yaml` whitelisting esbuild / @parcel/watcher / vue-demi for postinstall builds (Docker dev container was crashlooping without it).
+- Holzi#13 — `docker-compose.local.yml` with bundled Traefik routing `*.localhost`, a `frontend` profile that brings up the holzi-frontend Nuxt-dev container, and new `make up-local{,-full}` targets. Two CodeRabbit findings addressed (image-tag doc fix, loopback bind).
+- Holzi#14 (open) — phases 1+2 of the LLM-credentials feature. AES-256-GCM helper, `llm_credentials` table + stable `proxy_credentials_v1` view, CRUD endpoints under `/api/llm/credentials/`. 15 new tests, full suite 194 green, ruff + mypy clean.
+- haex-claude-proxy — local `:dev` image rebuilt from the now-merged generic-resolver refactor (PR #5 there, merged 2026-05-21). Pre-rebuild image was emitting 503s due to the old hardcoded PG resolver.
 
 ## What still to do
 
-The structured list is in [`2026-05-22-roadmap.md`](./2026-05-22-roadmap.md). Top picks for the next session:
+Two layers:
 
-1. **Frontend token-by-token streaming animation** (visual polish; backend already emits incremental events).
-2. **`/api/chat` error semantics** (today every agent exception is a 200 + SSE `error` event).
-3. **Frontend → backend hand-off** in the deploy Dockerfile so `docker compose up` ships a working stack.
-4. **External MCP client manager** for haex-vault integration.
+**1. Finish the LLM-credentials feature** — [`2026-05-23-next-session.md`](./2026-05-23-next-session.md) has the per-phase breakdown with files-to-touch and gotchas. Phases 3-7 in strict order, realistic session budget ~3 sessions:
+
+- Phase 3: Claude OAuth flow (backend subprocess driver + 4 endpoints)
+- Phase 4: Agent loop reads the active DB credential (env vars stay as fallback)
+- Phase 5: New repo `haex-claude-proxy-resolver-sqlite` — npm plugin for the proxy
+- Phase 6: Frontend `/settings/llm` page + OAuth modal
+- Phase 7: Drop the `~/.claude` bind-mount, share `hermes-data` volume with the proxy
+
+**2. Roadmap items not yet started** — [`2026-05-22-roadmap.md`](./2026-05-22-roadmap.md) Section B/C/D:
+
+- `/api/chat` error semantics (502/504 vs 500 distinction)
+- Conversation auto-title from the first message
+- Dark-mode toggle (CSS vars are in place)
+- Mobile layout (today fixed `grid-cols-[260px_1fr_320px]`)
+- SSE reconnect on drop
+- E2E integration test for `/api/chat` → agent → tool round-trip
+- Coverage reporting in CI
 
 ## Workflow reminders
 
@@ -66,8 +75,9 @@ The structured list is in [`2026-05-22-roadmap.md`](./2026-05-22-roadmap.md). To
 - **Repo**: https://github.com/haexhub/Holzi
 - **Frontend repo**: https://github.com/haexhub/holzi-frontend (private, haexhub)
 - **Working dir**: `/home/haex/Projekte/Holzi` and `/home/haex/Projekte/holzi-frontend`
-- **Backend**: `uv` for installs, `uv run pytest -q`, `uv run ruff check src tests`, `uv run mypy src`.
+- **Backend**: `uv` for installs, `uv run pytest`, `uv run ruff check src tests`, `uv run mypy src`.
 - **Frontend**: `pnpm`, Node 22. `pnpm test`, `pnpm typecheck`, `pnpm run gen:api` (regen types from running hermes).
-- **Design doc**: `docs/plans/2026-05-21-hermes-mvp-design.md`.
-- **Roadmap**: `docs/plans/2026-05-22-roadmap.md` (this session's output).
+- **Local dev-stack**: `make up-local-full` brings up backend + frontend + proxy + traefik on `*.localhost:11080`. See [`docker-compose.local.yml`](../../docker-compose.local.yml) header for prerequisites (`.env`, `haex-claude-proxy:dev` image, sibling `holzi-frontend` checkout).
+- **Design docs**: `docs/plans/2026-05-21-hermes-mvp-design.md`, `docs/plans/2026-05-23-llm-credentials-design.md`.
+- **Next-session plan**: [`docs/plans/2026-05-23-next-session.md`](./2026-05-23-next-session.md).
 - All conventions: global `~/.claude/CLAUDE.md` plus [[feedback-no-vpn]], [[feedback-coderabbit-skip-patterns]], [[feedback-pr-workflow-hermes]].
