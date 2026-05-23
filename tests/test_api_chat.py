@@ -403,6 +403,123 @@ async def test_api_chat_falls_back_to_settings_model_when_no_active(
     assert seen[0]["model"] == settings.model
 
 
+async def test_api_chat_classifies_upstream_unreachable(
+    client: httpx.AsyncClient,
+) -> None:
+    """ConnectError from upstream → `error` event with code=upstream_unreachable
+    and status_code=502 inside the SSE payload."""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host")
+
+    app.state.upstream = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://fake-proxy",
+    )
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+    ) as response:
+        assert response.status_code == 200
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    events = dict(_parse_sse(body))
+    err = events["error"]
+    assert err["code"] == "upstream_unreachable"
+    assert err["status_code"] == 502
+    assert "no route to host" in err["message"]
+
+
+async def test_api_chat_classifies_upstream_timeout(
+    client: httpx.AsyncClient,
+) -> None:
+    """ReadTimeout from upstream → code=upstream_timeout, status_code=504."""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("upstream too slow")
+
+    app.state.upstream = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://fake-proxy",
+    )
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+    ) as response:
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    err = dict(_parse_sse(body))["error"]
+    assert err["code"] == "upstream_timeout"
+    assert err["status_code"] == 504
+
+
+async def test_api_chat_classifies_upstream_http_error(
+    client: httpx.AsyncClient,
+) -> None:
+    """Non-2xx response from upstream → HTTPStatusError → code=upstream_http_error,
+    status_code=502 (with the upstream status surfaced in the message)."""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(b""),
+        )
+
+    app.state.upstream = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://fake-proxy",
+    )
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+    ) as response:
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    err = dict(_parse_sse(body))["error"]
+    assert err["code"] == "upstream_http_error"
+    assert err["status_code"] == 502
+    assert "500" in err["message"]
+
+
+async def test_api_chat_classifies_agent_error_for_truncated_stream(
+    client: httpx.AsyncClient,
+) -> None:
+    """Upstream stream ends without [DONE] / finish_reason → run_agent raises
+    RuntimeError → code=agent_error, status_code=500."""
+    truncated = (
+        b'data: {"choices":[{"index":0,"delta":{"content":"start"},'
+        b'"finish_reason":null}]}\n\n'
+        # No [DONE], no finish_reason — agent must refuse to persist.
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(truncated),
+        )
+
+    app.state.upstream = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://fake-proxy",
+    )
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+    ) as response:
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    err = dict(_parse_sse(body))["error"]
+    assert err["code"] == "agent_error"
+    assert err["status_code"] == 500
+
+
 async def test_api_chat_cross_channel_send_filters_web_target(
     client: httpx.AsyncClient,
 ) -> None:

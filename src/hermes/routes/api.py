@@ -62,6 +62,35 @@ def _sse_event(event: str, data: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
+def _classify_chat_error(exc: BaseException) -> tuple[str, int, str]:
+    """Map an exception raised inside the agent loop to an error code and the
+    HTTP status it would correspond to in a non-streaming world.
+
+    The /api/chat response is already 200 by the time we see the error
+    (StreamingResponse has flushed headers), so the status code is reported
+    to the client *inside* the SSE error event — the frontend uses it to
+    distinguish "upstream provider is down" (502) from "upstream too slow"
+    (504) from "our agent blew up" (500). Same triage logic mirrors what
+    `routes/llm.py` does for `GET /models`.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        upstream_status = exc.response.status_code
+        return (
+            "upstream_http_error",
+            502,
+            f"upstream returned {upstream_status}",
+        )
+    if isinstance(exc, httpx.TimeoutException):
+        return ("upstream_timeout", 504, "upstream timed out")
+    if isinstance(exc, httpx.RequestError):
+        return (
+            "upstream_unreachable",
+            502,
+            f"could not reach upstream: {exc}",
+        )
+    return ("agent_error", 500, str(exc))
+
+
 @router.post("/chat")
 async def api_chat(request: Request) -> Response:
     try:
@@ -149,8 +178,17 @@ async def api_chat(request: Request) -> Response:
             await conversations.touch(db, convo.id)
             yield _sse_event("done", {})
         except Exception as exc:  # noqa: BLE001 — surface to client, don't crash worker
-            logger.warning("api_chat_agent_error", error=str(exc))
-            yield _sse_event("error", {"message": str(exc)})
+            code, status_code, message = _classify_chat_error(exc)
+            logger.warning(
+                "api_chat_agent_error",
+                error=str(exc),
+                code=code,
+                status_code=status_code,
+            )
+            yield _sse_event(
+                "error",
+                {"code": code, "status_code": status_code, "message": message},
+            )
         finally:
             # `finally` runs both on the error path AND on client disconnect.
             # Disconnect raises asyncio.CancelledError (BaseException, not
