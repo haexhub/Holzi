@@ -58,3 +58,20 @@ END;
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS reminders_due_pending
   ON reminders(due_at) WHERE fired_at IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- llm_credentials: at most one active row + a stable read-view used by
+-- the haex-claude-proxy sqlite-resolver. Bump the view to `_v2` if the
+-- contract ever has to change so we can run a deprecation window without
+-- breaking the plugin.
+-- ---------------------------------------------------------------------------
+CREATE UNIQUE INDEX IF NOT EXISTS llm_credentials_active_uq
+  ON llm_credentials(is_active) WHERE is_active = 1;
+
+CREATE VIEW IF NOT EXISTS proxy_credentials_v1 AS
+  SELECT
+    id, provider, mode, base_url,
+    api_key_iv, api_key_tag, api_key_data,
+    oauth_iv, oauth_tag, oauth_data, oauth_status, oauth_authorized_at
+  FROM llm_credentials
+  WHERE is_active = 1;
