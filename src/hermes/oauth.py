@@ -123,7 +123,15 @@ class ClaudeOAuthDriver:
         if flow_id in self._flows:
             raise OAuthDriverError(f"flow already active for id {flow_id}")
 
-        Path(home, ".claude").mkdir(parents=True, exist_ok=True)
+        # `.credentials.json` will contain the long-lived refresh token —
+        # lock down both dirs to the running user so other accounts on
+        # the same host can't read it before cleanup.
+        home_path = Path(home)
+        home_path.mkdir(parents=True, exist_ok=True)
+        home_path.chmod(0o700)
+        claude_dir = home_path / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        claude_dir.chmod(0o700)
 
         env = dict(os.environ)
         env["HOME"] = home
