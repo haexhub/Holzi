@@ -229,16 +229,11 @@ async def oauth_submit_code(
         )
 
     blob = encryptor.encrypt(creds.raw)
-    authorized_at = (
-        creds.expires_at_ms // 1000
-        if creds.expires_at_ms is not None
-        else int(time.time())
-    )
     updated = await repo.update_oauth_authorized(
         db,
         cred_id=cred_id,
         ciphertext=blob,
-        authorized_at=authorized_at,
+        authorized_at=int(time.time()),
     )
     remove_oauth_temp_home(cred_id)
     if updated is None:

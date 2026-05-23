@@ -130,6 +130,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.mcp_manager = mcp_mgr
             yield
     finally:
+        if app.state.oauth_driver is not None:
+            await app.state.oauth_driver.cancel_all()
         if app.state.scheduler is not None:
             await app.state.scheduler.stop()
         if app.state.signal_worker is not None:

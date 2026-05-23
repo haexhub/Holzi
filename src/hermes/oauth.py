@@ -29,6 +29,7 @@ import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -209,6 +210,13 @@ class ClaudeOAuthDriver:
     def active_ids(self) -> list[int]:
         return list(self._flows.keys())
 
+    async def cancel_all(self) -> None:
+        """Kill every in-flight subprocess. Lifespan teardown calls this
+        so abandoned `claude auth login` processes don't outlive the
+        Hermes server."""
+        for flow_id in self.active_ids():
+            await self.cancel(flow_id)
+
     async def _drain(
         self, reader: _ReaderLike | None, buf: bytearray
     ) -> None:
@@ -348,7 +356,6 @@ def _extract_expires_ms(raw: str) -> int | None:
         iso = obj.get("expires_at")
         if isinstance(iso, str):
             try:
-                from datetime import datetime
                 dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
                 return int(dt.timestamp() * 1000)
             except ValueError:
