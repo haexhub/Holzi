@@ -123,6 +123,31 @@ def test_build_client_for_oauth_claude_routes_to_proxy() -> None:
     assert "authorization" not in {k.lower() for k in client.headers}
 
 
+def test_build_client_for_anthropic_api_key_routes_to_proxy() -> None:
+    """Anthropic credentials always go through the haex-claude-proxy, even
+    when stored as api_key — api.anthropic.com's native shape is
+    /v1/messages (not OpenAI /v1/chat/completions) and `sk-ant-oat01-…`
+    setup-token credentials are rate-limit-blocked when used as Bearer
+    directly. The proxy reads the same DB row and handles both."""
+    enc = Encryptor(secrets.token_bytes(32))
+    ct = enc.encrypt("sk-ant-oat01-fake-test-token")
+    cred = LlmCredential(
+        id=1, provider="anthropic", mode="api_key", display_name="t",
+        base_url=None, model=None, is_active=True,
+        api_key_iv=ct.iv, api_key_tag=ct.tag, api_key_data=ct.data,
+        oauth_status=None, oauth_authorized_at=0,
+        oauth_iv=None, oauth_tag=None, oauth_data=None,
+        created_at=0, updated_at=0,
+    )
+    client = build_client_for_credential(
+        cred, encryptor=enc, fallback_proxy_url="http://haex-claude-proxy:8080"
+    )
+    assert str(client.base_url).rstrip("/") == "http://haex-claude-proxy:8080"
+    # No Authorization header — the agent's runner_session token is what
+    # the proxy reads, not the upstream credential.
+    assert "authorization" not in {k.lower() for k in client.headers}
+
+
 # ─── integration: CRUD endpoints rebuild app.state.upstream ──────────
 
 
