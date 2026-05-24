@@ -134,3 +134,36 @@ llm_credentials = Table(
     Column("created_at", Integer, nullable=False),
     Column("updated_at", Integer, nullable=False),
 )
+
+
+# Messenger inboxes. One row per (provider) account. Signal stores only
+# the discovered phone number — the actual linking secret lives in the
+# signal-cli container's volume, not here. Telegram stores an AES-GCM
+# encrypted bot token (same hex-string pattern as llm_credentials so the
+# whole DB stays text-only). The partial unique index in schema.sql
+# enforces "at most one active account per provider".
+messenger_accounts = Table(
+    "messenger_accounts",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    # 'signal' | 'telegram'
+    Column("provider", Text, nullable=False),
+    # 0 | 1 — at most one row per provider may be active (partial uq idx).
+    Column("is_active", Integer, nullable=False, server_default="0"),
+    # Signal: E.164 discovered after QR-link-as-secondary completes.
+    Column("phone_number", Text),
+    # Telegram-only display fields. bot_username comes from getMe after
+    # the token is validated; user-facing label only — the token itself
+    # lives in bot_token_*.
+    Column("bot_username", Text),
+    # Telegram bot token ciphertext. Hex strings, same pattern as
+    # llm_credentials.api_key_*.
+    Column("bot_token_iv", Text),
+    Column("bot_token_tag", Text),
+    Column("bot_token_data", Text),
+    # Optional allowlist of chat ids the bot may respond to. JSON array
+    # of stringified ints. NULL = respond to any chat the bot is in.
+    Column("allowed_chat_ids", Text),
+    Column("created_at", Integer, nullable=False),
+    Column("updated_at", Integer, nullable=False),
+)
