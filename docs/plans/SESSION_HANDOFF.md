@@ -1,87 +1,95 @@
-# Session handoff — 2026-05-24 evening
+# Session handoff — 2026-05-25
 
-Read this when picking up Hermes ([[project-hermes-agent]]) work in a new conversation. Per-task plan lives in [`2026-05-25-next-session.md`](./2026-05-25-next-session.md); session-start prompt in [`2026-05-25-prompt.md`](./2026-05-25-prompt.md).
+Read this when picking up Hermes ([[project-hermes-agent]]) work in a new conversation. Per-task plan lives in [`2026-05-26-next-session.md`](./2026-05-26-next-session.md); session-start prompt in [`2026-05-26-prompt.md`](./2026-05-26-prompt.md).
 
 ## tldr
 
-Chat funktioniert end-to-end via Claude Max OAuth. Eine Fix-PR ist offen — die muss zuerst rein, dann ist `main` wieder sauber.
+Hermes ist **production live** auf https://holzi.haex.cloud. Settings-Tabs (LLM + Messenger) sind drin, Signal-Linking-Flow funktioniert UI-driven (kein `docker exec` mehr). Bearer-Token aus dem `/login`-Screen ist die einzige Auth-Schicht.
+
+Keine offenen PRs. `main` ist auf allen drei Repos sauber.
+
+## Was diese Session (2026-05-24 / 2026-05-25) gemacht hat
 
 | PR | Repo | Was | State |
 |---|---|---|---|
-| [Holzi #23](https://github.com/haexhub/Holzi/pull/23) | Holzi | claude-code pin 2.1.126 + revert kaputter setup-token detour aus #22 | **OFFEN — zuerst mergen** |
+| Holzi #24 | Holzi | ci: build holzi image multi-arch | merged |
+| holzi-frontend #13 + #15 + #16 | holzi-frontend | Dockerise SPA als nginx-static, pnpm-v10-pin, `nuxt generate` statt `nuxt build` | merged |
+| haex-claude-proxy-resolver-sqlite #2 + #3 + #5 | proxy-resolver-sqlite | Dockerise plugin → `ghcr.io/haexhub/haex-claude-proxy-resolver-sqlite:latest`, USER-root install layer, `--install-links` damit das Plugin nicht symlinked wird | merged |
+| ansible #20 / #21 / #22 / #23 / #24 / #25 | ansible | Holzi-Role + watchtower-fork + holzi-Subdomain-Switch + Authentik-Forward-Auth (verworfen) + holzi-frontend-Role + dedizierter holzi-claude-proxy Sidecar | alle merged |
+| Holzi #26 | Holzi | messenger_accounts Schema + Repo + API + Signal-Link-Endpoints + Worker-Hot-Reload | merged |
+| holzi-frontend #17 | holzi-frontend | Settings-Tabs Parent-Layout + `/settings/messenger` Page mit QR-Link-State-Machine | merged |
 
-Pre-flight: PR #23 mergen, lokal pullen, `make up-local-full`, dann Pick aus [`2026-05-25-next-session.md`](./2026-05-25-next-session.md).
+## Production-Topologie (Status)
+
+Drei Container im selben docker-compose Stack auf `~/apps/holzi/` (Backend) + `~/apps/holzi-frontend/`:
+
+```
+holzi.haex.cloud
+├── /                          → holzi-frontend (nginx static + SPA fallback)
+└── /api/* /chat /mcp/* /healthz  → hermes-server (FastAPI)
+    └── http://holzi-claude-proxy:8080  (internal, sqlite-resolver, reads /data/hermes.db)
+```
+
+Specifyrs `haex-claude-proxy` (Postgres-resolver) bleibt unangetastet auf dem `companies`-Network. Watchtower zieht `:latest` alle 5 min via `nickfedor/watchtower:1.17.1` (containrrr ist archiviert).
+
+Details + Plugin-Bake-Pattern in [[project-holzi-deployment]] (memory).
 
 ## Branch state
 
-Verify mit `git fetch --prune && git log --oneline origin/main -n 8` vor allem.
-
 ```
 origin/main (Holzi):
-  5c3214c fix(oauth): drive claude setup-token under a PTY with bracketed paste (#22)  ← BROKEN, fix in #23
-  ac7b57b fix(llm): block activation of pending/expired OAuth credentials (#21)
-  df8c59a feat(api/chat): classify upstream errors with status codes in SSE payload (#20)
-  1cabf88 feat: per-credential model + GET /credentials/{id}/models (#19)
-  1a136e4 docs: SESSION_HANDOFF refresh + next-session plan for 2026-05-24
-  d28a5a1 fix(docker): install Node + claude CLI in hermes-server image (#18)
-  b81ad40 feat: local dev-stack uses the sqlite credential resolver (#17)
-  04f0606 feat: agent loop reads the active DB credential (#16)
+  61b95e9 feat(messenger): UI-driven Signal linking + messenger_accounts schema (#26)
+  …
 
 origin/main (holzi-frontend):
-  0627dee fix(settings): hide Aktivieren on pending/expired OAuth + show hint (#9)
-  d9ce5dd feat: per-credential model picker (searchable combobox) (#8)
-  b2174ef feat: /settings/llm page (credential list + api-key + claude OAuth) (#7)
+  <neuester> feat(settings): tabs layout + Signal-linking UI (#17)
+  …
 
-Open PRs:
-  Holzi#23   fix(oauth): pin claude 2.1.126 + drop the setup-token detour from #22
+origin/main (haex-claude-proxy-resolver-sqlite):
+  <neuester> fix(docker): use --install-links so the plugin gets copied (#5)
+  …
 
-Closed branches (alle merged oder verworfen):
-  Holzi: #19, #20, #21, #22
-  holzi-frontend: #8, #9
-  haex-claude-proxy: fix/oauth-token-env-extra (verworfen, branch deleted)
-  haex-claude-proxy-resolver-sqlite: feat/oauth-token-env-extra (verworfen, branch deleted)
+origin/master (ansible):
+  <neuester> feat(holzi): bundle dedicated haex-claude-proxy sidecar (#25)
+  …
 ```
 
-## What landed this session (2026-05-24)
+Local leftover branches: `chore/holzi-subdomain`, `chore/watchtower-fork`, `feat/holzi-authentik` etc. in ansible — alles squash-merged, safe zu löschen wenn aufgeräumt werden soll.
 
-1. **#19, #20, #21 gemerged** — per-credential model + chat error semantics + activate-guard für pending OAuth.
-2. **#22 gemerged ABER kaputt** — setup-token-PTY-detour. claude-code 2.1.121 hatte den `Paste code here` Prompt entfernt; ich hab statt einfach claude-code zu bumpen versucht `setup-token` + Token-extraction zu nutzen. Die resultierenden `sk-ant-oat01-…` Tokens werden aber von api.anthropic.com mit 429 blockt.
-3. **#23 offen** — rebuilds main from #21's tip + revert von #22 + claude 2.1.126 pin (matches Specifyr) + behaltene small fixes (`upstream.py` routet Anthropic IMMER durch Proxy, fixt `/v1/v1/` httpx-collision).
-4. **Frontend #8 + #9 gemerged**.
-5. **Memory** `[[project-hermes-oauth-claude-2-1]]` aktualisiert: claude-code muss >= 2.1.126 sein, `setup-token` ist NICHT der Weg.
-6. **End-to-end manuell verifiziert**: OAuth-Flow + Chat-Antwort von Claude Max läuft lokal.
+**Lokaler Stash auf resolver-sqlite**: `stash@{0}: wip: drop sk-ant-oat01 special-case, route via env-var` — Refactor-Idee, nicht implementiert, kann ignoriert oder später angeschaut werden.
 
-## What still to do (Reihenfolge)
+## What still to do
 
-Per-task in [`2026-05-25-next-session.md`](./2026-05-25-next-session.md). Highlights:
+Per-task in [`2026-05-26-next-session.md`](./2026-05-26-next-session.md). Highlights:
 
-1. **#23 mergen** (Pre-flight)
-2. **Frontend Quick-Wins**: Dark-mode toggle, Empty-state, bessere Error-Toasts (alle ~30min)
-3. **Conversation auto-title** (Server-side, sichtbar, klein blast-radius)
-4. **Mobile Layout** (heute fixed grid → responsive collapse)
-5. **E2E `/api/chat` → agent → tool roundtrip test**
-6. **Coverage in CI**
-7. **External MCP client manager** (der nächste post-MVP Brocken)
+1. **Manuelles End-to-End-Smoke** der Signal-Linking-Flow im Browser (QR scannen, aktivieren, Note-to-Self → Antwort) — kann der User selbst, kostet aber Zeit
+2. **Phase 3: Telegram-Bot-Integration** (Schema schon da, Routes + Worker fehlen)
+3. **Roadmap-Items aus `docs/plans/2026-05-22-roadmap.md` Section A/B** die noch offen sind (Conversation Auto-Title, Mobile Layout, SSE Reconnect, etc.)
+4. **Authentication-Cleanup** falls Bearer-only-Modell langfristig bleiben soll: kann die SPA's `/login` etwa Browser-passkeys nutzen? Heute reines Text-Token-Paste
 
 ## Workflow reminders
 
-- Active gh-Account: `haexhub`. Push fällt zurück auf `haex-space`, dann `gh auth switch --user haexhub`. Siehe [[feedback-pr-workflow-hermes]].
+- Active gh-Account: `haexhub`. Push fällt manchmal auf `haex-space`, dann `gh auth switch --user haexhub`. Siehe [[feedback-pr-workflow-hermes]].
 - CodeRabbit-Findings triagen gegen [[feedback-coderabbit-skip-patterns]].
-- CodeRabbit Rate-Limit: 1 Review/Stunde auf der Orga. Re-trigger via `@coderabbitai review` als PR-Comment, ~3–4 min Turnaround.
-- Keine "Generated with Claude Code" / "Co-Authored-By: Claude" Trailer in Commits.
-- Konversation: Deutsch. Code/commits/PR-Bodies: Englisch.
-- Git-Config in `Holzi/` und `holzi-frontend/` ist auf `Martin Drechsel <mdrechsel@itemis.com>` gesetzt — bitte so lassen.
+- Keine "Generated with Claude Code" Trailer.
+- Conversation: Deutsch. Code/commits/PR-Bodies: Englisch.
+- Force-Push ist vom auto-classifier geblockt — bei Squash-Merge-Konflikt: PR schließen, fresh Branch von main neu aufmachen.
 
 ## Tools / accounts / paths
 
-- **Repo**: https://github.com/haexhub/Holzi
-- **Frontend repo**: https://github.com/haexhub/holzi-frontend (private)
-- **Plugin repo**: https://github.com/haexhub/haex-claude-proxy-resolver-sqlite (private)
-- **Working dirs**: `/home/haex/Projekte/Holzi`, `/home/haex/Projekte/holzi-frontend`, `/home/haex/Projekte/haex-claude-proxy-resolver-sqlite`
-- **Backend**: `uv run pytest`, `uv run ruff check src tests`, `uv run mypy src`. 258 tests grün auf `fix/pin-claude-2-1-126-and-revert-setup-token` (PR #23).
-- **Frontend**: `pnpm test` (30 tests), `pnpm typecheck`, `pnpm run gen:api` (regen nach Backend-Änderung).
-- **Local dev-stack**: `make up-local-full` → backend + frontend + proxy + traefik auf `*.localhost:11080`. `.env` muss `HERMES_AUTH_TOKEN` + `HERMES_SECRET_KEY` (64-hex) gesetzt haben.
+- **Backend repo**: https://github.com/haexhub/Holzi → `/home/haex/Projekte/Holzi`
+- **Frontend repo**: https://github.com/haexhub/holzi-frontend (private) → `/home/haex/Projekte/holzi-frontend`
+- **Plugin repo**: https://github.com/haexhub/haex-claude-proxy-resolver-sqlite (private) → `/home/haex/Projekte/haex-claude-proxy-resolver-sqlite`
+- **Ansible repo**: https://github.com/haexhub/ansible (private) → `/home/haex/Projekte/ansible` (default branch ist `master`, nicht `main`!)
+- **Production-SSH**: `ssh haex@haex.cloud`. App-Verzeichnisse: `~/apps/holzi/`, `~/apps/holzi-frontend/`.
+- **Secrets**: `~/Projekte/ansible/secrets/haex.cloud.yml` (gitignored). `secrets.holzi.{auth_token,secret_key}`.
+- **Backend**: `uv run pytest`, `uv run ruff check src tests`, `uv run mypy src`. 272 tests.
+- **Frontend**: `pnpm test` (38), `pnpm typecheck`.
 - **Design docs**: `docs/plans/2026-05-21-hermes-mvp-design.md`, `docs/plans/2026-05-22-roadmap.md`, `docs/plans/2026-05-23-llm-credentials-design.md`.
-- **Next-session plan**: [`2026-05-25-next-session.md`](./2026-05-25-next-session.md).
-- **Session-start prompt**: [`2026-05-25-prompt.md`](./2026-05-25-prompt.md).
-- Conventions: `~/.claude/CLAUDE.md` plus [[feedback-no-vpn]], [[feedback-coderabbit-skip-patterns]], [[feedback-pr-workflow-hermes]], [[project-hermes-oauth-claude-2-1]].
+- **Memory** für neue Sessions: lies [[project-hermes-agent]], [[project-holzi-frontend]], [[project-holzi-deployment]], [[project-haex-claude-proxy-resolver-sqlite]], [[feedback-pr-workflow-hermes]].
+
+## Non-goals / explicit OUTs
+
+- **WhatsApp** — Baileys/whatsapp-web.js verstoßen gegen Meta-ToS, können das persönliche Konto bannen. Nicht implementieren.
+- **Authentik-Forward-Auth vor holzi.haex.cloud** — wurde diskutiert + ausgebaut (PR ansible#23). Würde zusätzlich zum HERMES_AUTH_TOKEN-Bearer einen zweiten Login-Layer verlangen den die SPA nicht überbrücken kann. Falls jemals doch nötig: `holzi.use_authentik: true` in Inventory + Blueprint zurückbringen.
+- **Alembic** als Migration-Tool — noch nicht nötig, additive Changes laufen über `metadata.create_all` + `_apply_lightweight_migrations`. Erst einführen wenn DROP/RENAME ansteht.
