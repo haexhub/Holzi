@@ -75,3 +75,11 @@ CREATE VIEW IF NOT EXISTS proxy_credentials_v1 AS
     oauth_iv, oauth_tag, oauth_data, oauth_status, oauth_authorized_at
   FROM llm_credentials
   WHERE is_active = 1;
+
+-- ---------------------------------------------------------------------------
+-- messenger_accounts: at most one active row per provider so the
+-- worker-rebuild logic in main.py can pick "the" signal/telegram account
+-- without disambiguating. Drop the index to support multi-account.
+-- ---------------------------------------------------------------------------
+CREATE UNIQUE INDEX IF NOT EXISTS messenger_accounts_active_per_provider
+  ON messenger_accounts(provider) WHERE is_active = 1;

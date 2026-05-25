@@ -21,9 +21,9 @@ from hermes.repository import llm_credentials as llm_credentials_repo
 from hermes.routes.api import router as api_router
 from hermes.routes.chat import router as chat_router
 from hermes.routes.llm import router as llm_router
+from hermes.routes.messenger import router as messenger_router
 from hermes.scheduler import ReminderScheduler
-from hermes.signal.client import SignalClient
-from hermes.signal.worker import SignalWorker
+from hermes.signal.lifecycle import rebuild_signal_worker_from_db
 from hermes.tool_catalog import build_tool_catalog
 from hermes.upstream import build_fallback_client, rebuild_upstream_from_db
 
@@ -90,32 +90,49 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             fallback_llm_api_key=settings.llm_api_key,
         )
 
-        if settings.signal_number:
-            app.state.signal_http = httpx.AsyncClient(base_url=settings.signal_url, timeout=60.0)
-            app.state.signal_client = SignalClient(app.state.signal_http, settings.signal_number)
-            app.state.signal_self_number = settings.signal_number
+        # Always create the signal-cli-rest-api http client — the /link
+        # endpoints under /api/messenger need it even when no number is
+        # linked yet. The actual worker only spins up once a row in
+        # messenger_accounts is marked active.
+        app.state.signal_http = httpx.AsyncClient(base_url=settings.signal_url, timeout=60.0)
 
-            async def signal_agent_runner(
-                db: AsyncEngine, conversation_id: int
-            ) -> str:
-                model = (
-                    await llm_credentials_repo.get_active_model(db)
-                ) or settings.model
-                return await run_agent(
-                    upstream=app.state.upstream,
-                    db=db,
-                    conversation_id=conversation_id,
-                    system_prompt=SIGNAL_SYSTEM_PROMPT,
-                    model=model,
-                )
-
-            app.state.signal_worker = SignalWorker(
-                app.state.signal_client,
-                app.state.db,
-                settings.signal_number,
-                agent_runner=signal_agent_runner,
+        async def signal_agent_runner(
+            db: AsyncEngine, conversation_id: int
+        ) -> str:
+            model = (
+                await llm_credentials_repo.get_active_model(db)
+            ) or settings.model
+            return await run_agent(
+                upstream=app.state.upstream,
+                db=db,
+                conversation_id=conversation_id,
+                system_prompt=SIGNAL_SYSTEM_PROMPT,
+                model=model,
             )
-            await app.state.signal_worker.start()
+
+        # Registered on app.state so the hot-reload path in
+        # signal/lifecycle.py can rebuild the worker on activate/delete.
+        app.state.signal_agent_runner_factory = signal_agent_runner
+
+        # Start the worker if an active signal account already exists in
+        # the DB. Legacy fallback: if HERMES_SIGNAL_NUMBER is set but no
+        # DB row exists, materialise one — keeps existing env-driven
+        # local-dev setups working until the UI link flow takes over.
+        if settings.signal_number:
+            from hermes.repository import messenger as _messenger_repo
+
+            existing = await _messenger_repo.get_by_phone(
+                app.state.db, settings.signal_number
+            )
+            if existing is None:
+                created = await _messenger_repo.create_signal(
+                    app.state.db, settings.signal_number
+                )
+                await _messenger_repo.activate(app.state.db, created.id)
+                logger.info(
+                    "signal_env_account_seeded", phone_number=settings.signal_number
+                )
+        await rebuild_signal_worker_from_db(app)
 
         app.state.external_http = httpx.AsyncClient(timeout=20.0)
         app.state.brave_api_key = settings.brave_api_key or None
@@ -167,6 +184,7 @@ app.add_middleware(BaseHTTPMiddleware, dispatch=bearer_auth_middleware)
 app.include_router(chat_router)
 app.include_router(api_router)
 app.include_router(llm_router)
+app.include_router(messenger_router)
 
 
 @app.get("/healthz")

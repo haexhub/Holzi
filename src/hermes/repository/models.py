@@ -72,3 +72,22 @@ class LlmCredential:
     oauth_data: str | None
     created_at: int
     updated_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class MessengerAccount:
+    """A row from `messenger_accounts`. `bot_token_*` ciphertext columns
+    are only populated for telegram rows; signal rows leave them NULL and
+    keep their state in the signal-cli volume."""
+
+    id: int
+    provider: str
+    is_active: bool
+    phone_number: str | None
+    bot_username: str | None
+    bot_token_iv: str | None
+    bot_token_tag: str | None
+    bot_token_data: str | None
+    allowed_chat_ids: str | None
+    created_at: int
+    updated_at: int
