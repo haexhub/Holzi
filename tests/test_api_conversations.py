@@ -93,6 +93,72 @@ async def test_api_conversation_detail_unknown_id_returns_404(
     assert response.status_code == 404
 
 
+async def test_api_conversation_patch_renames_conversation(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(
+        app.state.db, channel="web", title="old title", ts=1000
+    )
+
+    response = await client.patch(
+        f"/api/conversations/{convo.id}",
+        headers=AUTH,
+        json={"title": "  new\n  title  "},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == convo.id
+    assert body["title"] == "new title"
+    stored = await conversations.get(app.state.db, convo.id)
+    assert stored is not None
+    assert stored.title == "new title"
+    assert stored.updated_at >= convo.updated_at
+
+
+async def test_api_conversation_patch_rejects_blank_title(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+
+    response = await client.patch(
+        f"/api/conversations/{convo.id}", headers=AUTH, json={"title": "   "}
+    )
+
+    assert response.status_code == 400
+
+
+async def test_api_conversation_patch_unknown_id_returns_404(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.patch(
+        "/api/conversations/99999", headers=AUTH, json={"title": "missing"}
+    )
+    assert response.status_code == 404
+
+
+async def test_api_conversation_delete_removes_conversation_and_messages(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    await messages.append(
+        app.state.db, conversation_id=convo.id, role="user", content="bye", ts=1001
+    )
+
+    response = await client.delete(f"/api/conversations/{convo.id}", headers=AUTH)
+
+    assert response.status_code == 204
+    assert await conversations.get(app.state.db, convo.id) is None
+    assert await messages.list_by_conversation(app.state.db, convo.id) == []
+
+
+async def test_api_conversation_delete_unknown_id_returns_404(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.delete("/api/conversations/99999", headers=AUTH)
+    assert response.status_code == 404
+
+
 async def test_api_conversations_rejects_invalid_limit(
     client: httpx.AsyncClient,
 ) -> None:

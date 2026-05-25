@@ -48,6 +48,15 @@ def _validate_limit(limit: int, *, max_limit: int = MAX_LIST_LIMIT) -> int:
     return limit
 
 
+def _derive_conversation_title(message: str, *, max_len: int = 60) -> str:
+    title = " ".join(message.split())
+    if not title:
+        return "New chat"
+    if len(title) <= max_len:
+        return title
+    return f"{title[: max_len - 3].rstrip()}..."
+
+
 # ---------------------------------------------------------------------------
 # /api/chat
 # ---------------------------------------------------------------------------
@@ -107,7 +116,11 @@ async def api_chat(request: Request) -> Response:
     upstream: httpx.AsyncClient = request.app.state.upstream
 
     if payload.conversation_id is None:
-        convo = await conversations.create(db, channel=WEB_CHANNEL)
+        convo = await conversations.create(
+            db,
+            channel=WEB_CHANNEL,
+            title=_derive_conversation_title(payload.message),
+        )
     else:
         existing = await conversations.get(db, payload.conversation_id)
         if existing is None:
@@ -233,6 +246,10 @@ class ConversationDetailResponse(BaseModel):
     messages: list[MessageResponse]
 
 
+class ConversationUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
 @router.get("/conversations", response_model=list[ConversationSummaryResponse])
 async def api_list_conversations(
     request: Request, channel: str | None = None, limit: int = 50
@@ -279,6 +296,35 @@ async def api_get_conversation(
             for m in msgs
         ],
     }
+
+
+@router.patch("/conversations/{conv_id}", response_model=ConversationResponse)
+async def api_update_conversation(
+    request: Request, conv_id: int, body: ConversationUpdateRequest
+) -> dict[str, Any]:
+    title = " ".join(body.title.split())
+    if not title:
+        raise HTTPException(status_code=400, detail="title must not be blank")
+
+    db: AsyncEngine = request.app.state.db
+    updated = await conversations.update_title(db, conv_id, title=title)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return {
+        "id": updated.id,
+        "channel": updated.channel,
+        "title": updated.title,
+        "started_at": updated.started_at,
+        "updated_at": updated.updated_at,
+    }
+
+
+@router.delete("/conversations/{conv_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def api_delete_conversation(request: Request, conv_id: int) -> Response:
+    db: AsyncEngine = request.app.state.db
+    if not await conversations.delete(db, conv_id):
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------------------------

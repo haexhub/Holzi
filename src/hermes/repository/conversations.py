@@ -137,6 +137,42 @@ async def message_count(engine: AsyncEngine, conversation_id: int) -> int:
     return int(row[0]) if row else 0
 
 
+async def update_title(
+    engine: AsyncEngine,
+    conversation_id: int,
+    *,
+    title: str | None,
+    ts: int | None = None,
+) -> Conversation | None:
+    now = ts if ts is not None else int(time.time())
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            t_conversations.update()
+            .where(t_conversations.c.id == conversation_id)
+            .values(title=title, updated_at=now)
+            .returning(t_conversations)
+        )
+        row = result.first()
+    return _row_to_conversation(row) if row is not None else None
+
+
+async def delete(engine: AsyncEngine, conversation_id: int) -> bool:
+    async with engine.begin() as conn:
+        existing = await conn.execute(
+            select(t_conversations.c.id).where(t_conversations.c.id == conversation_id)
+        )
+        if existing.first() is None:
+            return False
+        # Be explicit instead of relying on SQLite FK cascade settings.
+        await conn.execute(
+            t_messages.delete().where(t_messages.c.conversation_id == conversation_id)
+        )
+        await conn.execute(
+            t_conversations.delete().where(t_conversations.c.id == conversation_id)
+        )
+    return True
+
+
 async def touch(
     engine: AsyncEngine,
     conversation_id: int,
