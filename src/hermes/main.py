@@ -24,6 +24,7 @@ from hermes.routes.llm import router as llm_router
 from hermes.routes.messenger import router as messenger_router
 from hermes.scheduler import ReminderScheduler
 from hermes.signal.lifecycle import rebuild_signal_worker_from_db
+from hermes.telegram.lifecycle import rebuild_telegram_worker_from_db
 from hermes.tool_catalog import build_tool_catalog
 from hermes.upstream import build_fallback_client, rebuild_upstream_from_db
 
@@ -32,6 +33,12 @@ configure_logging()
 SIGNAL_SYSTEM_PROMPT = (
     "You are Hermes, a personal AI assistant for Martin, reached via Signal "
     "Note-to-Self. Be concise — usually one to three short sentences. Match "
+    "Martin's preference for terse, technical communication."
+)
+
+TELEGRAM_SYSTEM_PROMPT = (
+    "You are Hermes, a personal AI assistant for Martin, reached via a "
+    "Telegram bot. Be concise — usually one to three short sentences. Match "
     "Martin's preference for terse, technical communication."
 )
 
@@ -60,6 +67,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.signal_client = None
     app.state.signal_self_number = None
     app.state.signal_worker = None
+    app.state.telegram_worker = None
+    app.state.telegram_bot_username = None
+    app.state.telegram_allowed_chat_ids = None
     app.state.external_http = None
     app.state.brave_api_key = None
     app.state.scheduler = None
@@ -137,6 +147,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.external_http = httpx.AsyncClient(timeout=20.0)
         app.state.brave_api_key = settings.brave_api_key or None
 
+        async def telegram_agent_runner(
+            db: AsyncEngine, conversation_id: int
+        ) -> str:
+            model = (
+                await llm_credentials_repo.get_active_model(db)
+            ) or settings.model
+            return await run_agent(
+                upstream=app.state.upstream,
+                db=db,
+                conversation_id=conversation_id,
+                system_prompt=TELEGRAM_SYSTEM_PROMPT,
+                model=model,
+            )
+
+        # Telegram worker hot-reload depends on external_http, so this
+        # has to come after the external_http create above.
+        app.state.telegram_agent_runner_factory = telegram_agent_runner
+        await rebuild_telegram_worker_from_db(app)
+
         # MCP and the /mcp/manifest surface use a current_channel=None catalog
         # — external callers (Cline, HaexChat) don't carry a single
         # "current channel" notion. /api/chat rebuilds per request with
@@ -170,6 +199,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.signal_worker.stop()
         if app.state.signal_http is not None:
             await app.state.signal_http.aclose()
+        if app.state.telegram_worker is not None:
+            await app.state.telegram_worker.stop()
         if app.state.external_http is not None:
             await app.state.external_http.aclose()
         if app.state.upstream is not None:

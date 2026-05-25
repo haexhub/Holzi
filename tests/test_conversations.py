@@ -82,6 +82,55 @@ async def test_list_all_can_filter_by_channel_and_since(
     assert {c.id for c in recent} == {b.id, web.id}
 
 
+async def test_find_latest_by_external_id_returns_most_recent(
+    conn: AsyncEngine,
+) -> None:
+    a = await conversations.create(
+        conn, channel="telegram", external_id="tg:42", ts=1000
+    )
+    b = await conversations.create(
+        conn, channel="telegram", external_id="tg:42", ts=3000
+    )
+    # different chat — must not be returned
+    await conversations.create(conn, channel="telegram", external_id="tg:99", ts=4000)
+
+    found = await conversations.find_latest_by_external_id(
+        conn, channel="telegram", external_id="tg:42"
+    )
+    assert found is not None
+    assert found.id == b.id
+    assert a.id != b.id  # sanity
+
+
+async def test_find_latest_by_external_id_returns_none_when_no_match(
+    conn: AsyncEngine,
+) -> None:
+    await conversations.create(
+        conn, channel="telegram", external_id="tg:1", ts=1000
+    )
+    assert (
+        await conversations.find_latest_by_external_id(
+            conn, channel="telegram", external_id="tg:2"
+        )
+        is None
+    )
+
+
+async def test_find_latest_by_external_id_scopes_by_channel(
+    conn: AsyncEngine,
+) -> None:
+    """Same external_id under a different channel must not bleed through."""
+    await conversations.create(
+        conn, channel="signal", external_id="tg:42", ts=1000
+    )
+    assert (
+        await conversations.find_latest_by_external_id(
+            conn, channel="telegram", external_id="tg:42"
+        )
+        is None
+    )
+
+
 async def test_message_count_returns_zero_for_empty_conversation(
     conn: AsyncEngine,
 ) -> None:

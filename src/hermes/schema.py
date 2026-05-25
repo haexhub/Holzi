@@ -22,7 +22,7 @@ conversations = Table(
     "conversations",
     metadata,
     Column("id", Integer, primary_key=True),
-    # 'signal' | 'web' | 'vscode'
+    # 'signal' | 'web' | 'vscode' | 'telegram'
     Column("channel", Text, nullable=False),
     Column("external_id", Text),
     Column("title", Text),

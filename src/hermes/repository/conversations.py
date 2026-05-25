@@ -79,6 +79,32 @@ async def list_by_channel(
     return [_row_to_conversation(r) for r in rows]
 
 
+async def find_latest_by_external_id(
+    engine: AsyncEngine,
+    *,
+    channel: str,
+    external_id: str,
+) -> Conversation | None:
+    """Latest conversation for `(channel, external_id)`, or None.
+
+    Used by the Telegram worker to thread per-chat: every incoming
+    chat_id maps to its own conversation row via `external_id="tg:<id>"`,
+    distinct from other chats and from web/vscode sessions.
+    """
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            select(t_conversations)
+            .where(
+                t_conversations.c.channel == channel,
+                t_conversations.c.external_id == external_id,
+            )
+            .order_by(desc(t_conversations.c.updated_at))
+            .limit(1)
+        )
+        row = result.first()
+    return _row_to_conversation(row) if row is not None else None
+
+
 async def list_all(
     engine: AsyncEngine,
     *,
