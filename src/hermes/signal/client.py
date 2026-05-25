@@ -43,14 +43,15 @@ async def start_qr_link(http: httpx.AsyncClient, *, device_name: str) -> bytes:
     """Ask signal-cli-rest-api to generate a linking QR. Returns the
     PNG bytes — caller forwards them as `image/png` to the browser.
 
-    Endpoint: POST /v1/qrcodelink/{device_name}. signal-cli holds the
+    Endpoint: GET /v1/qrcodelink?device_name=…. signal-cli holds the
     request open while it waits for the primary device to scan the QR
     and confirm. Default timeout in signal-cli-rest-api is generous
     (~120s); we set a matching timeout on the call so a slow scan
     doesn't trip our default 30s.
     """
-    response = await http.post(
-        f"/v1/qrcodelink/{device_name}",
+    response = await http.get(
+        "/v1/qrcodelink",
+        params={"device_name": device_name},
         timeout=180.0,
     )
     response.raise_for_status()
