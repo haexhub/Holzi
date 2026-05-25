@@ -29,8 +29,8 @@ class _FakeSignalCli:
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path.startswith("/v1/qrcodelink/"):
-            self.link_calls.append(path.removeprefix("/v1/qrcodelink/"))
+        if path == "/v1/qrcodelink":
+            self.link_calls.append(request.url.params.get("device_name", ""))
             return httpx.Response(200, content=self.qr_png, headers={"content-type": "image/png"})
         if path == "/v1/accounts":
             return httpx.Response(200, json=self.linked_numbers)
