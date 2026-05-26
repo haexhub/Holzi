@@ -11,7 +11,7 @@ from starlette.types import Receive, Scope, Send
 from hermes import __version__
 from hermes.agent import run_agent
 from hermes.auth import bearer_auth_middleware
-from hermes.config import settings
+from hermes.config import conversation_scratch_root, settings
 from hermes.crypto import Encryptor, resolve_master_key
 from hermes.db import init_db
 from hermes.logging import configure_logging, logger
@@ -22,7 +22,7 @@ from hermes.routes.api import router as api_router
 from hermes.routes.chat import router as chat_router
 from hermes.routes.llm import router as llm_router
 from hermes.routes.messenger import router as messenger_router
-from hermes.scheduler import ReminderScheduler
+from hermes.scheduler import ConversationSweepScheduler, ReminderScheduler
 from hermes.signal.lifecycle import rebuild_signal_worker_from_db
 from hermes.telegram.lifecycle import rebuild_telegram_worker_from_db
 from hermes.tool_catalog import build_tool_catalog
@@ -73,6 +73,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.external_http = None
     app.state.brave_api_key = None
     app.state.scheduler = None
+    app.state.conversation_sweeper = None
     app.state.tool_catalog = []
 
     try:
@@ -187,6 +188,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         await app.state.scheduler.start()
 
+        # Scratch dir lives next to the DB by default; sweeper deletes
+        # the dir alongside the conversation row when TTL hits.
+        scratch_root = conversation_scratch_root()
+        scratch_root.mkdir(parents=True, exist_ok=True)
+        app.state.conversation_sweeper = ConversationSweepScheduler(
+            app.state.db, scratch_root
+        )
+        await app.state.conversation_sweeper.start()
+
         async with mcp_session_manager(app.state.tool_catalog) as mcp_mgr:
             app.state.mcp_manager = mcp_mgr
             yield
@@ -195,6 +205,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.oauth_driver.cancel_all()
         if app.state.scheduler is not None:
             await app.state.scheduler.stop()
+        if app.state.conversation_sweeper is not None:
+            await app.state.conversation_sweeper.stop()
         if app.state.signal_worker is not None:
             await app.state.signal_worker.stop()
         if app.state.signal_http is not None:

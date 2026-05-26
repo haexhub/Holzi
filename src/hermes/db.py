@@ -100,6 +100,20 @@ async def _apply_lightweight_migrations(conn) -> None:
     if "model" not in existing:
         await conn.execute(text("ALTER TABLE llm_credentials ADD COLUMN model TEXT"))
 
+    cols = await conn.execute(text("PRAGMA table_info(conversations)"))
+    existing = {row[1] for row in cols.all()}
+    if "bookmarked" not in existing:
+        await conn.execute(
+            text(
+                "ALTER TABLE conversations ADD COLUMN bookmarked "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+    if "expires_at" not in existing:
+        await conn.execute(
+            text("ALTER TABLE conversations ADD COLUMN expires_at INTEGER")
+        )
+
 
 def _split_statements(sql: str) -> list[str]:
     """Split a SQL script into individual statements, respecting BEGIN/END

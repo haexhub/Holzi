@@ -1,9 +1,12 @@
 import re
+import shutil
 import time
+from pathlib import Path
 
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.config import settings
 from hermes.repository.models import Conversation
 from hermes.schema import conversations as t_conversations
 from hermes.schema import messages as t_messages
@@ -14,6 +17,20 @@ from hermes.schema import messages as t_messages
 # can't break the MATCH parser or sneak into LIKE patterns.
 _FTS_TOKEN_RE = re.compile(r"\w+", flags=re.UNICODE)
 
+_SECONDS_PER_DAY = 86_400
+
+
+def _compute_expires_at(updated_at: int, *, ttl_days: int | None = None) -> int:
+    """TTL expiration timestamp for a non-bookmarked conversation."""
+    days = ttl_days if ttl_days is not None else settings.conversation_ttl_days
+    return updated_at + days * _SECONDS_PER_DAY
+
+
+def _scratch_dir(scratch_root: Path | None, conversation_id: int) -> Path | None:
+    if scratch_root is None:
+        return None
+    return scratch_root / str(conversation_id)
+
 
 def _row_to_conversation(row) -> Conversation:
     return Conversation(
@@ -23,6 +40,8 @@ def _row_to_conversation(row) -> Conversation:
         title=row.title,
         started_at=row.started_at,
         updated_at=row.updated_at,
+        bookmarked=bool(row.bookmarked),
+        expires_at=row.expires_at,
     )
 
 
@@ -33,8 +52,10 @@ async def create(
     external_id: str | None = None,
     title: str | None = None,
     ts: int | None = None,
+    bookmarked: bool = False,
 ) -> Conversation:
     now = ts if ts is not None else int(time.time())
+    expires_at = None if bookmarked else _compute_expires_at(now)
     async with engine.begin() as conn:
         result = await conn.execute(
             t_conversations.insert()
@@ -44,6 +65,8 @@ async def create(
                 title=title,
                 started_at=now,
                 updated_at=now,
+                bookmarked=1 if bookmarked else 0,
+                expires_at=expires_at,
             )
             .returning(t_conversations.c.id)
         )
@@ -57,6 +80,8 @@ async def create(
         title=title,
         started_at=now,
         updated_at=now,
+        bookmarked=bookmarked,
+        expires_at=expires_at,
     )
 
 
@@ -201,7 +226,8 @@ async def search(
         params["channel"] = channel
 
     sql = text(
-        "SELECT c.id, c.channel, c.external_id, c.title, c.started_at, c.updated_at "
+        "SELECT c.id, c.channel, c.external_id, c.title, c.started_at, "
+        "c.updated_at, c.bookmarked, c.expires_at "
         "FROM conversations c "
         f"WHERE {channel_clause}({' OR '.join(conditions)}) "
         "ORDER BY c.updated_at DESC LIMIT :limit"
@@ -231,19 +257,43 @@ async def update_title(
     title: str | None,
     ts: int | None = None,
 ) -> Conversation | None:
+    """Rename a conversation. Touches `updated_at` and refreshes
+    `expires_at` for non-bookmarked threads — a rename counts as user
+    activity worth keeping the row around for.
+    """
     now = ts if ts is not None else int(time.time())
     async with engine.begin() as conn:
+        existing = await conn.execute(
+            select(t_conversations.c.bookmarked).where(
+                t_conversations.c.id == conversation_id
+            )
+        )
+        ex_row = existing.first()
+        if ex_row is None:
+            return None
+        expires_at = None if ex_row.bookmarked else _compute_expires_at(now)
         result = await conn.execute(
             t_conversations.update()
             .where(t_conversations.c.id == conversation_id)
-            .values(title=title, updated_at=now)
+            .values(title=title, updated_at=now, expires_at=expires_at)
             .returning(t_conversations)
         )
         row = result.first()
     return _row_to_conversation(row) if row is not None else None
 
 
-async def delete(engine: AsyncEngine, conversation_id: int) -> bool:
+async def delete(
+    engine: AsyncEngine,
+    conversation_id: int,
+    *,
+    scratch_root: Path | None = None,
+) -> bool:
+    """Remove the conversation, its messages, and (if a scratch root is
+    given) the per-conversation scratch directory. Returns False when
+    the row doesn't exist; the scratch dir is removed even when it was
+    never materialised — `shutil.rmtree(..., ignore_errors=True)` is a
+    no-op on missing paths.
+    """
     async with engine.begin() as conn:
         existing = await conn.execute(
             select(t_conversations.c.id).where(t_conversations.c.id == conversation_id)
@@ -257,6 +307,9 @@ async def delete(engine: AsyncEngine, conversation_id: int) -> bool:
         await conn.execute(
             t_conversations.delete().where(t_conversations.c.id == conversation_id)
         )
+    scratch = _scratch_dir(scratch_root, conversation_id)
+    if scratch is not None:
+        shutil.rmtree(scratch, ignore_errors=True)
     return True
 
 
@@ -266,10 +319,107 @@ async def touch(
     *,
     ts: int | None = None,
 ) -> None:
+    """Mark the conversation as active. Refreshes the TTL for non-
+    bookmarked threads so a chatty conversation never accidentally ages
+    out mid-session.
+    """
     now = ts if ts is not None else int(time.time())
     async with engine.begin() as conn:
+        existing = await conn.execute(
+            select(t_conversations.c.bookmarked).where(
+                t_conversations.c.id == conversation_id
+            )
+        )
+        ex_row = existing.first()
+        if ex_row is None:
+            return
+        expires_at = None if ex_row.bookmarked else _compute_expires_at(now)
         await conn.execute(
             t_conversations.update()
             .where(t_conversations.c.id == conversation_id)
-            .values(updated_at=now)
+            .values(updated_at=now, expires_at=expires_at)
         )
+
+
+async def set_bookmarked(
+    engine: AsyncEngine,
+    conversation_id: int,
+    *,
+    bookmarked: bool,
+    ts: int | None = None,
+) -> Conversation | None:
+    """Pin or unpin a conversation. Pinning sets `expires_at = NULL`;
+    unpinning recomputes `expires_at` from the current `updated_at` so
+    a long-ignored unpinned thread doesn't immediately disappear in the
+    next sweep.
+    """
+    now = ts if ts is not None else int(time.time())
+    async with engine.begin() as conn:
+        existing = await conn.execute(
+            select(t_conversations.c.updated_at).where(
+                t_conversations.c.id == conversation_id
+            )
+        )
+        ex_row = existing.first()
+        if ex_row is None:
+            return None
+        if bookmarked:
+            expires_at: int | None = None
+        else:
+            # Reset the clock from "now" so unbookmarking a stale thread
+            # gives the user the full TTL window to decide on it.
+            expires_at = _compute_expires_at(now)
+            # Refresh updated_at so sorting matches user intent.
+        new_updated = now if not bookmarked else ex_row.updated_at
+        result = await conn.execute(
+            t_conversations.update()
+            .where(t_conversations.c.id == conversation_id)
+            .values(
+                bookmarked=1 if bookmarked else 0,
+                expires_at=expires_at,
+                updated_at=new_updated,
+            )
+            .returning(t_conversations)
+        )
+        row = result.first()
+    return _row_to_conversation(row) if row is not None else None
+
+
+async def list_expired(
+    engine: AsyncEngine,
+    *,
+    now: int,
+    limit: int = 500,
+) -> list[Conversation]:
+    """Conversations whose TTL is past `now`. Bookmarked rows have
+    `expires_at = NULL` and are excluded automatically."""
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            select(t_conversations)
+            .where(t_conversations.c.expires_at.is_not(None))
+            .where(t_conversations.c.expires_at <= now)
+            .order_by(t_conversations.c.expires_at)
+            .limit(limit)
+        )
+        rows = result.all()
+    return [_row_to_conversation(r) for r in rows]
+
+
+async def sweep_expired(
+    engine: AsyncEngine,
+    *,
+    now: int,
+    scratch_root: Path | None = None,
+    limit: int = 500,
+) -> list[int]:
+    """Delete every conversation whose `expires_at` is past `now`.
+    Returns the IDs deleted. Bookmarked rows are skipped (NULL filter).
+    Each row's scratch directory is removed too when `scratch_root` is
+    given.
+    """
+    expired = await list_expired(engine, now=now, limit=limit)
+    deleted: list[int] = []
+    for c in expired:
+        if await delete(engine, c.id, scratch_root=scratch_root):
+            deleted.append(c.id)
+    return deleted

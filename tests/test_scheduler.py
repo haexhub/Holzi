@@ -1,11 +1,12 @@
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from hermes.repository import reminders
-from hermes.scheduler import ReminderScheduler
+from hermes.repository import conversations, reminders
+from hermes.scheduler import ConversationSweepScheduler, ReminderScheduler
 from hermes.signal.client import SignalClient
 
 SELF_NUMBER = "+491701234567"
@@ -83,3 +84,39 @@ async def test_fire_due_leaves_reminder_pending_when_send_fails(
     assert fired == 0
     pending = await reminders.list_all(conn)
     assert len(pending) == 1  # next tick will retry
+
+
+# ---------------------------------------------------------------------------
+# ConversationSweepScheduler
+# ---------------------------------------------------------------------------
+
+
+async def test_conversation_sweep_deletes_expired_and_keeps_bookmarked(
+    conn: AsyncEngine, tmp_path: Path
+) -> None:
+    expired = await conversations.create(conn, channel="web", ts=0)
+    pinned = await conversations.create(
+        conn, channel="web", ts=0, bookmarked=True
+    )
+    fresh = await conversations.create(conn, channel="web", ts=10_000_000)
+
+    scratch_root = tmp_path / "conversations"
+    scratch_root.mkdir()
+    (scratch_root / str(expired.id)).mkdir()
+
+    sweeper = ConversationSweepScheduler(conn, scratch_root)
+    deleted = await sweeper.sweep(now=expired.expires_at + 1)  # type: ignore[operator]
+
+    assert deleted == [expired.id]
+    assert await conversations.get(conn, expired.id) is None
+    assert await conversations.get(conn, pinned.id) is not None
+    assert await conversations.get(conn, fresh.id) is not None
+    assert not (scratch_root / str(expired.id)).exists()
+
+
+async def test_conversation_sweep_noop_when_nothing_expired(
+    conn: AsyncEngine, tmp_path: Path
+) -> None:
+    await conversations.create(conn, channel="web", ts=10_000_000)
+    sweeper = ConversationSweepScheduler(conn, tmp_path / "conversations")
+    assert await sweeper.sweep(now=10_000_001) == []

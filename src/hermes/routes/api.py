@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import run_agent
-from hermes.config import settings
+from hermes.config import conversation_scratch_root, settings
 from hermes.logging import logger
 from hermes.repository import (
     conversations,
@@ -228,10 +228,26 @@ class ConversationResponse(BaseModel):
     title: str | None
     started_at: int
     updated_at: int
+    bookmarked: bool
+    # unix epoch seconds; null when the conversation is bookmarked
+    # (never expires).
+    expires_at: int | None
 
 
 class ConversationSummaryResponse(ConversationResponse):
     message_count: int
+
+
+def _conversation_to_dict(c: Any) -> dict[str, Any]:
+    return {
+        "id": c.id,
+        "channel": c.channel,
+        "title": c.title,
+        "started_at": c.started_at,
+        "updated_at": c.updated_at,
+        "bookmarked": bool(c.bookmarked),
+        "expires_at": c.expires_at,
+    }
 
 
 class MessageResponse(BaseModel):
@@ -266,16 +282,9 @@ async def api_list_conversations(
     out: list[dict[str, Any]] = []
     for c in convos:
         count = await conversations.message_count(db, c.id)
-        out.append(
-            {
-                "id": c.id,
-                "channel": c.channel,
-                "title": c.title,
-                "started_at": c.started_at,
-                "updated_at": c.updated_at,
-                "message_count": count,
-            }
-        )
+        item = _conversation_to_dict(c)
+        item["message_count"] = count
+        out.append(item)
     return out
 
 
@@ -290,13 +299,7 @@ async def api_get_conversation(
         raise HTTPException(status_code=404, detail="conversation not found")
     msgs = await messages.list_by_conversation(db, conv_id, limit=limit)
     return {
-        "conversation": {
-            "id": convo.id,
-            "channel": convo.channel,
-            "title": convo.title,
-            "started_at": convo.started_at,
-            "updated_at": convo.updated_at,
-        },
+        "conversation": _conversation_to_dict(convo),
         "messages": [
             {"id": m.id, "role": m.role, "content": m.content, "ts": m.ts}
             for m in msgs
@@ -316,21 +319,40 @@ async def api_update_conversation(
     updated = await conversations.update_title(db, conv_id, title=title)
     if updated is None:
         raise HTTPException(status_code=404, detail="conversation not found")
-    return {
-        "id": updated.id,
-        "channel": updated.channel,
-        "title": updated.title,
-        "started_at": updated.started_at,
-        "updated_at": updated.updated_at,
-    }
+    return _conversation_to_dict(updated)
 
 
 @router.delete("/conversations/{conv_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def api_delete_conversation(request: Request, conv_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
-    if not await conversations.delete(db, conv_id):
+    deleted = await conversations.delete(
+        db, conv_id, scratch_root=conversation_scratch_root()
+    )
+    if not deleted:
         raise HTTPException(status_code=404, detail="conversation not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/conversations/{conv_id}/bookmark", response_model=ConversationResponse
+)
+async def api_toggle_bookmark_conversation(
+    request: Request, conv_id: int
+) -> dict[str, Any]:
+    """Toggle the conversation's bookmarked flag. Bookmarked rows have
+    `expires_at = NULL` and survive the daily sweep; unbookmarking
+    re-arms the TTL from now."""
+    db: AsyncEngine = request.app.state.db
+    existing = await conversations.get(db, conv_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    updated = await conversations.set_bookmarked(
+        db, conv_id, bookmarked=not existing.bookmarked
+    )
+    if updated is None:
+        # Lost-the-race between get() and set_bookmarked().
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return _conversation_to_dict(updated)
 
 
 # ---------------------------------------------------------------------------

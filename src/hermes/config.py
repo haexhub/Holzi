@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -27,6 +29,31 @@ class Settings(BaseSettings):
     signal_number: str = ""
     model: str = "claude-opus-4-7"
     brave_api_key: str = ""
+    # Default conversation TTL — 30 days from the last user message.
+    # Bookmarked conversations override this (expires_at = NULL).
+    conversation_ttl_days: int = 30
+    # Root for per-conversation scratch directories
+    # (`{data_dir}/conversations/{id}/`). Defaults to the db_path's
+    # parent so backups capture the DB + scratch together.
+    data_dir: str | None = None
 
 
 settings = Settings()  # type: ignore[call-arg]
+
+
+def get_data_dir() -> Path:
+    """Resolve the on-disk data root for non-DB state (master key,
+    scratch directories). Honours `HERMES_DATA_DIR`; falls back to the
+    DB file's parent so a single backup of one directory covers both.
+    Pure :memory: deployments (tests) get cwd as a last resort.
+    """
+    if settings.data_dir:
+        return Path(settings.data_dir)
+    if settings.db_path == ":memory:":
+        return Path.cwd()
+    return Path(settings.db_path).resolve().parent
+
+
+def conversation_scratch_root() -> Path:
+    """Where per-conversation scratch directories live."""
+    return get_data_dir() / "conversations"

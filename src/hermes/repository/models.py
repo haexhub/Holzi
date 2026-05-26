@@ -9,6 +9,10 @@ class Conversation:
     title: str | None
     started_at: int
     updated_at: int
+    bookmarked: bool = False
+    # unix epoch seconds; None means the conversation is bookmarked
+    # (never expires).
+    expires_at: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
