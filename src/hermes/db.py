@@ -113,6 +113,21 @@ async def _apply_lightweight_migrations(conn) -> None:
         await conn.execute(
             text("ALTER TABLE conversations ADD COLUMN expires_at INTEGER")
         )
+        # Backfill `expires_at` for rows that existed before this migration —
+        # otherwise the sweep skips every legacy conversation (it filters
+        # `expires_at IS NOT NULL`) and the feature is silently inert on
+        # already-deployed DBs. Import-locally to avoid an import cycle
+        # between db.py and config.py.
+        from hermes.config import settings
+
+        await conn.execute(
+            text(
+                "UPDATE conversations "
+                "SET expires_at = updated_at + :window "
+                "WHERE expires_at IS NULL AND bookmarked = 0"
+            ),
+            {"window": settings.conversation_ttl_days * 86_400},
+        )
 
 
 def _split_statements(sql: str) -> list[str]:

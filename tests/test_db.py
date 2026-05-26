@@ -46,3 +46,56 @@ async def test_init_db_enables_foreign_keys(tmp_path: Path) -> None:
             assert row is not None and row[0] == 1
     finally:
         await engine.dispose()
+
+
+async def test_migration_backfills_expires_at_for_legacy_conversations(
+    tmp_path: Path,
+) -> None:
+    """A DB created before plan 01b adds the retention columns later;
+    legacy rows must end up with a real `expires_at` so the sweep can
+    actually age them out. Without the backfill the rows stay NULL and
+    the retention feature is silently inert on every existing deployment.
+    """
+    from hermes.config import settings
+
+    db_path = str(tmp_path / "legacy.db")
+    # Stand up a pre-migration shape by hand: no `bookmarked`/`expires_at`.
+    pre_engine = await init_db(db_path)
+    async with pre_engine.begin() as conn:
+        await conn.execute(text("DROP TABLE conversations"))
+        await conn.execute(
+            text(
+                "CREATE TABLE conversations ("
+                "id INTEGER PRIMARY KEY, "
+                "channel TEXT NOT NULL, "
+                "external_id TEXT, "
+                "title TEXT, "
+                "started_at INTEGER NOT NULL, "
+                "updated_at INTEGER NOT NULL)"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO conversations(channel, started_at, updated_at) "
+                "VALUES ('web', 1000, 2000)"
+            )
+        )
+    await pre_engine.dispose()
+
+    # Re-open: the migration must add the new columns AND backfill.
+    engine = await init_db(db_path)
+    try:
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    "SELECT bookmarked, expires_at, updated_at "
+                    "FROM conversations"
+                )
+            )
+            row = result.first()
+        assert row is not None
+        assert row.bookmarked == 0
+        assert row.updated_at == 2000
+        assert row.expires_at == 2000 + settings.conversation_ttl_days * 86_400
+    finally:
+        await engine.dispose()
