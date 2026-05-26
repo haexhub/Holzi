@@ -1,11 +1,18 @@
+import re
 import time
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository.models import Conversation
 from hermes.schema import conversations as t_conversations
 from hermes.schema import messages as t_messages
+
+# Tokens fed to FTS5 MATCH must be bare words — wrapping each in double
+# quotes makes the parser treat user input as literal phrases instead of
+# operators ("*", "AND", parentheses, quotes...) so a search box never
+# triggers a SQL error from unbalanced syntax.
+_FTS_TOKEN_RE = re.compile(r"\w+", flags=re.UNICODE)
 
 
 def _row_to_conversation(row) -> Conversation:
@@ -122,6 +129,77 @@ async def list_all(
 
     async with engine.connect() as conn:
         result = await conn.execute(stmt)
+        rows = result.all()
+    return [_row_to_conversation(r) for r in rows]
+
+
+async def search(
+    engine: AsyncEngine,
+    *,
+    query: str,
+    channel: str | None = None,
+    limit: int = 20,
+) -> list[Conversation]:
+    """Find conversations whose title or any message content matches ``query``.
+
+    Title hits use a case-insensitive ``LIKE`` substring scan; message hits use
+    SQLite FTS5 against ``messages_fts``. The two hit-sets are unioned at the
+    conversation level so a thread appearing in both shows up exactly once.
+    Results are sorted newest-first and capped at ``limit``.
+
+    A blank/empty query (or one made entirely of FTS-meaningless punctuation)
+    falls back to :func:`list_all` so the search box can be "cleared" by
+    typing whitespace without producing a 400.
+    """
+    stripped = query.strip()
+    if not stripped:
+        return await list_all(engine, channel=channel, limit=limit)
+
+    tokens = _FTS_TOKEN_RE.findall(stripped)
+    if not tokens:
+        return []
+
+    # One LIKE per token, ORed. Matches the FTS5 OR semantics we'd get if we
+    # ran the same tokens against the message index, and means punctuation
+    # ("*", quotes) from the user input doesn't sneak into the LIKE pattern
+    # and miss otherwise-valid titles.
+    params: dict[str, object] = {"limit": limit}
+    title_clauses: list[str] = []
+    for i, tok in enumerate(tokens):
+        key = f"title_pat_{i}"
+        title_clauses.append(f"LOWER(c.title) LIKE :{key}")
+        params[key] = f"%{tok.lower()}%"
+
+    fts_match = " ".join(f'"{t}"' for t in tokens)
+    params["fts_q"] = fts_match
+
+    # Build the WHERE on the conversations table so SELECT produces full
+    # conversation rows (no DISTINCT needed — we filter on c.id).
+    conditions = [
+        "(" + " OR ".join(title_clauses) + ")",
+        (
+            "c.id IN ("
+            "SELECT m.conversation_id FROM messages m "
+            "JOIN messages_fts f ON f.rowid = m.id "
+            "WHERE messages_fts MATCH :fts_q"
+            ")"
+        ),
+    ]
+
+    channel_clause = ""
+    if channel is not None:
+        channel_clause = "c.channel = :channel AND "
+        params["channel"] = channel
+
+    sql = text(
+        "SELECT c.id, c.channel, c.external_id, c.title, c.started_at, c.updated_at "
+        "FROM conversations c "
+        f"WHERE {channel_clause}({' OR '.join(conditions)}) "
+        "ORDER BY c.updated_at DESC LIMIT :limit"
+    )
+
+    async with engine.connect() as conn:
+        result = await conn.execute(sql, params)
         rows = result.all()
     return [_row_to_conversation(r) for r in rows]
 

@@ -252,11 +252,17 @@ class ConversationUpdateRequest(BaseModel):
 
 @router.get("/conversations", response_model=list[ConversationSummaryResponse])
 async def api_list_conversations(
-    request: Request, channel: str | None = None, limit: int = 50
+    request: Request,
+    channel: str | None = None,
+    q: str | None = None,
+    limit: int = 50,
 ) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
-    convos = await conversations.list_all(db, channel=channel, limit=limit)
+    if q is not None and q.strip():
+        convos = await conversations.search(db, query=q, channel=channel, limit=limit)
+    else:
+        convos = await conversations.list_all(db, channel=channel, limit=limit)
     out: list[dict[str, Any]] = []
     for c in convos:
         count = await conversations.message_count(db, c.id)

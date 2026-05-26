@@ -151,3 +151,95 @@ async def test_message_count_counts_only_target_conversation(
 
     assert await conversations.message_count(conn, a.id) == 2
     assert await conversations.message_count(conn, b.id) == 1
+
+
+async def test_search_finds_by_title_substring(conn: AsyncEngine) -> None:
+    hit = await conversations.create(
+        conn, channel="web", title="Refactor auth", ts=1000
+    )
+    await conversations.create(conn, channel="web", title="Plan groceries", ts=2000)
+
+    results = await conversations.search(conn, query="refactor")
+    assert [c.id for c in results] == [hit.id]
+
+
+async def test_search_finds_by_message_content(conn: AsyncEngine) -> None:
+    from hermes.repository import messages
+
+    convo = await conversations.create(conn, channel="web", title="t", ts=1000)
+    await messages.append(
+        conn,
+        conversation_id=convo.id,
+        role="user",
+        content="reschedule the dentist",
+        ts=1500,
+    )
+
+    results = await conversations.search(conn, query="dentist")
+    assert [c.id for c in results] == [convo.id]
+
+
+async def test_search_dedupes_title_and_message_hits(conn: AsyncEngine) -> None:
+    from hermes.repository import messages
+
+    convo = await conversations.create(
+        conn, channel="web", title="dentist visit", ts=1000
+    )
+    await messages.append(
+        conn,
+        conversation_id=convo.id,
+        role="user",
+        content="dentist confirmed",
+        ts=1500,
+    )
+
+    results = await conversations.search(conn, query="dentist")
+    assert [c.id for c in results] == [convo.id]
+
+
+async def test_search_can_filter_by_channel(conn: AsyncEngine) -> None:
+    web = await conversations.create(
+        conn, channel="web", title="standup", ts=1000
+    )
+    await conversations.create(
+        conn, channel="signal", title="standup", ts=2000
+    )
+
+    results = await conversations.search(conn, query="standup", channel="web")
+    assert [c.id for c in results] == [web.id]
+
+
+async def test_search_returns_empty_for_no_hits(conn: AsyncEngine) -> None:
+    await conversations.create(conn, channel="web", title="hello", ts=1000)
+    assert await conversations.search(conn, query="zzznomatchzzz") == []
+
+
+async def test_search_orders_results_newest_first(conn: AsyncEngine) -> None:
+    older = await conversations.create(
+        conn, channel="web", title="payroll", ts=1000
+    )
+    newer = await conversations.create(
+        conn, channel="web", title="payroll", ts=5000
+    )
+
+    results = await conversations.search(conn, query="payroll")
+    assert [c.id for c in results] == [newer.id, older.id]
+
+
+async def test_search_blank_query_falls_back_to_list_all(
+    conn: AsyncEngine,
+) -> None:
+    a = await conversations.create(conn, channel="web", ts=1000)
+    b = await conversations.create(conn, channel="web", ts=2000)
+
+    results = await conversations.search(conn, query="   ")
+    assert [c.id for c in results] == [b.id, a.id]
+
+
+async def test_search_strips_fts_operators(conn: AsyncEngine) -> None:
+    """User input with FTS5-meaningful characters must not raise a SQL error."""
+    convo = await conversations.create(
+        conn, channel="web", title="payroll review", ts=1000
+    )
+    results = await conversations.search(conn, query='"payroll*"')
+    assert [c.id for c in results] == [convo.id]
