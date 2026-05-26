@@ -1,6 +1,6 @@
 import time
 
-from sqlalchemy import asc, select, text
+from sqlalchemy import asc, desc, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository.models import Message
@@ -68,6 +68,49 @@ async def list_by_conversation(
         )
         rows = result.all()
     return [_row_to_message(r) for r in rows]
+
+
+async def last_user_message(
+    engine: AsyncEngine,
+    conversation_id: int,
+) -> Message | None:
+    """Return the most recently appended user message in the conversation,
+    or None if it has no user turn yet."""
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            select(t_messages)
+            .where(
+                t_messages.c.conversation_id == conversation_id,
+                t_messages.c.role == "user",
+            )
+            .order_by(desc(t_messages.c.id))
+            .limit(1)
+        )
+        row = result.first()
+    return _row_to_message(row) if row is not None else None
+
+
+async def delete_after(
+    engine: AsyncEngine,
+    conversation_id: int,
+    *,
+    after_id: int,
+) -> int:
+    """Delete every message in the conversation whose id is greater than
+    `after_id`, returning how many rows were removed.
+
+    Messages are append-only with autoincrement ids, so `id > after_id`
+    is exactly the tail that follows `after_id` chronologically. The FTS
+    index is kept in sync by the AFTER DELETE trigger on `messages`.
+    """
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            t_messages.delete().where(
+                t_messages.c.conversation_id == conversation_id,
+                t_messages.c.id > after_id,
+            )
+        )
+    return result.rowcount
 
 
 async def fts_search(

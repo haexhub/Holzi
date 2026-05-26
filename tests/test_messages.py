@@ -99,3 +99,91 @@ async def test_fts_index_updates_when_message_is_deleted(
 
     hits = await messages.fts_search(conn, query="zorblax")
     assert hits == []
+
+
+async def test_last_user_message_returns_most_recent_user_turn(
+    conn: AsyncEngine, convo_id: int
+) -> None:
+    await messages.append(conn, conversation_id=convo_id, role="user", content="first", ts=10)
+    await messages.append(
+        conn, conversation_id=convo_id, role="assistant", content="reply", ts=20
+    )
+    last = await messages.append(
+        conn, conversation_id=convo_id, role="user", content="second", ts=30
+    )
+    await messages.append(
+        conn, conversation_id=convo_id, role="assistant", content="reply 2", ts=40
+    )
+
+    found = await messages.last_user_message(conn, convo_id)
+    assert found is not None
+    assert found.id == last.id
+    assert found.content == "second"
+
+
+async def test_last_user_message_returns_none_when_no_user_turn(
+    conn: AsyncEngine, convo_id: int
+) -> None:
+    await messages.append(
+        conn, conversation_id=convo_id, role="assistant", content="orphan", ts=10
+    )
+    assert await messages.last_user_message(conn, convo_id) is None
+
+
+async def test_delete_after_removes_trailing_messages(
+    conn: AsyncEngine, convo_id: int
+) -> None:
+    await messages.append(conn, conversation_id=convo_id, role="user", content="q", ts=10)
+    user = await messages.append(
+        conn, conversation_id=convo_id, role="user", content="ask again", ts=20
+    )
+    await messages.append(
+        conn, conversation_id=convo_id, role="assistant", content="tool call", ts=30
+    )
+    await messages.append(conn, conversation_id=convo_id, role="tool", content="result", ts=40)
+    await messages.append(
+        conn, conversation_id=convo_id, role="assistant", content="answer", ts=50
+    )
+
+    deleted = await messages.delete_after(conn, convo_id, after_id=user.id)
+    assert deleted == 3
+
+    remaining = await messages.list_by_conversation(conn, convo_id)
+    assert [(m.role, m.content) for m in remaining] == [
+        ("user", "q"),
+        ("user", "ask again"),
+    ]
+
+
+async def test_delete_after_keeps_fts_index_in_sync(
+    conn: AsyncEngine, convo_id: int
+) -> None:
+    user = await messages.append(
+        conn, conversation_id=convo_id, role="user", content="keep me", ts=10
+    )
+    await messages.append(
+        conn, conversation_id=convo_id, role="assistant", content="zorblax", ts=20
+    )
+
+    await messages.delete_after(conn, convo_id, after_id=user.id)
+
+    assert await messages.fts_search(conn, query="zorblax") == []
+
+
+async def test_delete_after_is_scoped_to_conversation(conn: AsyncEngine) -> None:
+    convo_a = await conversations.create(conn, channel="web", ts=1)
+    convo_b = await conversations.create(conn, channel="web", ts=2)
+    user_a = await messages.append(
+        conn, conversation_id=convo_a.id, role="user", content="a-user", ts=10
+    )
+    await messages.append(
+        conn, conversation_id=convo_a.id, role="assistant", content="a-reply", ts=20
+    )
+    await messages.append(
+        conn, conversation_id=convo_b.id, role="assistant", content="b-reply", ts=30
+    )
+
+    deleted = await messages.delete_after(conn, convo_a.id, after_id=user_a.id)
+    assert deleted == 1
+    b_msgs = await messages.list_by_conversation(conn, convo_b.id)
+    assert [m.content for m in b_msgs] == ["b-reply"]
