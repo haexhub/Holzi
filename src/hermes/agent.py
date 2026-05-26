@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -13,12 +14,42 @@ CHAT_PATH = "/v1/chat/completions"
 OnChunk = Callable[[str], Awaitable[None]]
 
 
+class ChatRunCancelled(Exception):
+    """Raised when run_agent observes its cancel_event between steps.
+
+    Distinct from `asyncio.CancelledError`: cancellation here is a
+    cooperative user-initiated abort signalled via an `asyncio.Event`,
+    not a task-level cancel. The web layer maps this to a `cancelled`
+    SSE event and skips persisting a final assistant turn. The in-memory
+    run registry that backs the event lives on `app.state` and assumes
+    the single-worker / single-user deployment invariant documented at
+    the top of this module.
+    """
+
+
+# Single-worker invariant:
+# The /api/chat cancel feature stores per-request cancellation events in an
+# in-memory dict on `app.state` (see routes/api.py). That mapping is only
+# correct if every request for a given run_id lands in the same Python
+# process. The deployment model is "one container = one user = one
+# uvicorn worker" (see docs/plans/holzi-agent-parity/README.md), so this
+# holds in production. `main.py` refuses to start when WEB_CONCURRENCY /
+# UVICORN_WORKERS / GUNICORN_WORKERS asks for >1 worker. If you ever
+# need to scale horizontally, move the registry to Redis (or similar)
+# before lifting that check.
+
+
 @dataclass(frozen=True, slots=True)
 class Tool:
     name: str
     description: str
     parameters_schema: dict[str, Any]
     handler: Callable[[dict[str, Any]], Awaitable[str]]
+
+
+def _raise_if_cancelled(cancel_event: asyncio.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise ChatRunCancelled()
 
 
 async def run_agent(
@@ -31,6 +62,7 @@ async def run_agent(
     tools: list[Tool] | None = None,
     max_iterations: int = 10,
     on_chunk: OnChunk | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> str:
     """Run a single agent turn until the assistant stops requesting tool calls.
 
@@ -45,6 +77,13 @@ async def run_agent(
     still produce no visible text chunks (the LLM emits empty content
     deltas alongside the tool_call deltas). When `on_chunk` is None the
     non-streaming JSON path is used (Signal worker, MCP, tests).
+
+    If `cancel_event` is supplied and gets set during the run, the agent
+    raises `ChatRunCancelled` at the next safe check (before/after
+    upstream, before/after tool execution). No final assistant message is
+    persisted in that case — but tool rounds that completed before
+    cancellation remain in history, since the conversation truly contains
+    those side effects.
     """
     history = await messages.list_by_conversation(db, conversation_id)
     request_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -55,6 +94,8 @@ async def run_agent(
     tool_lookup = {t.name: t for t in tools} if tools else {}
 
     for _ in range(max_iterations):
+        _raise_if_cancelled(cancel_event)
+
         body: dict[str, Any] = {"model": model, "messages": request_messages}
         if tools_payload:
             body["tools"] = tools_payload
@@ -64,8 +105,10 @@ async def run_agent(
         else:
             body["stream"] = True
             assistant_text, tool_calls = await _request_round_stream(
-                upstream, body, on_chunk
+                upstream, body, on_chunk, cancel_event
             )
+
+        _raise_if_cancelled(cancel_event)
 
         if not tool_calls:
             await messages.append(
@@ -91,7 +134,9 @@ async def run_agent(
         )
 
         for call in tool_calls:
+            _raise_if_cancelled(cancel_event)
             result = await _execute_tool_call(call, tool_lookup)
+            _raise_if_cancelled(cancel_event)
             request_messages.append(
                 {
                     "role": "tool",
@@ -128,6 +173,7 @@ async def _request_round_stream(
     upstream: httpx.AsyncClient,
     body: dict[str, Any],
     on_chunk: OnChunk,
+    cancel_event: asyncio.Event | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     text_parts: list[str] = []
     # Indexed by `delta.tool_calls[i].index` because each call's fields
@@ -167,6 +213,13 @@ async def _request_round_stream(
 
             for tc in delta.get("tool_calls") or []:
                 _accumulate_tool_call(tool_calls_by_idx, tc)
+
+            # Cooperative cancel point: check after each delta so the user
+            # can stop a still-running stream without waiting for upstream
+            # to finish. We don't try to break out mid-network-read — if
+            # the upstream stalls, the client disconnect path (which task-
+            # cancels run_agent) is still the escape hatch.
+            _raise_if_cancelled(cancel_event)
 
     if not saw_terminal_marker:
         raise RuntimeError(

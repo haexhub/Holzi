@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import json
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
@@ -10,7 +11,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from hermes.agent import run_agent
+from hermes.agent import ChatRunCancelled, run_agent
 from hermes.config import conversation_scratch_root, settings
 from hermes.logging import logger
 from hermes.repository import (
@@ -148,8 +149,18 @@ async def api_chat(request: Request) -> Response:
         current_channel=WEB_CHANNEL,
     )
 
+    # Per-request cancellation handle. The registry on app.state maps
+    # run_id → asyncio.Event; POST /api/chat/runs/{id}/cancel sets the
+    # event, run_agent observes it between safe steps. Single-worker /
+    # single-user invariant documented in hermes/agent.py.
+    run_id = uuid.uuid4().hex
+    chat_runs: dict[str, asyncio.Event] = request.app.state.chat_runs
+    cancel_event = asyncio.Event()
+    chat_runs[run_id] = cancel_event
+
     async def gen() -> AsyncIterator[bytes]:
         yield _sse_event("session", {"conversation_id": convo.id})
+        yield _sse_event("run", {"run_id": run_id})
 
         # Bridge run_agent's on_chunk callback (called from inside the agent
         # task) to the SSE generator via an async queue. `None` is the
@@ -175,6 +186,7 @@ async def api_chat(request: Request) -> Response:
                     model=model,
                     tools=tools,
                     on_chunk=on_chunk,
+                    cancel_event=cancel_event,
                 )
             finally:
                 await queue.put(None)
@@ -190,6 +202,12 @@ async def api_chat(request: Request) -> Response:
             await task
             await conversations.touch(db, convo.id)
             yield _sse_event("done", {})
+        except ChatRunCancelled:
+            # User-initiated cancel. `cancelled` is the single terminal
+            # event for this turn — no trailing `done`. The frontend
+            # renders the turn as aborted instead of appending a fake
+            # assistant message.
+            yield _sse_event("cancelled", {})
         except Exception as exc:  # noqa: BLE001 — surface to client, don't crash worker
             code, status_code, message = _classify_chat_error(exc)
             logger.warning(
@@ -213,8 +231,37 @@ async def api_chat(request: Request) -> Response:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            # Unregister regardless of how we exited (done / error /
+            # cancelled / client-disconnect). Leaving stale entries would
+            # let a future cancel hit the wrong run after run_id reuse.
+            chat_runs.pop(run_id, None)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@router.post(
+    "/chat/runs/{run_id}/cancel",
+    status_code=status.HTTP_204_NO_CONTENT,
+    # Declare 404 explicitly so the generated frontend types include it —
+    # without this the OpenAPI doc only lists 204, and the client has to
+    # special-case the "run already finished" race without type support.
+    responses={404: {"description": "Unknown or already-finished run_id"}},
+)
+async def api_chat_cancel_run(request: Request, run_id: str) -> Response:
+    """Cooperatively cancel an in-flight /api/chat run.
+
+    Returns 204 once the cancellation signal is delivered. The actual
+    `cancelled` SSE event is emitted on the streaming response when the
+    agent reaches the next safe step. Unknown / already-finished run IDs
+    return 404 — we don't pretend a cancel succeeded for a run we no
+    longer track.
+    """
+    chat_runs: dict[str, asyncio.Event] = request.app.state.chat_runs
+    event = chat_runs.get(run_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="unknown run_id")
+    event.set()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------------------------

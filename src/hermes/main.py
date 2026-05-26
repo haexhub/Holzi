@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -49,8 +50,35 @@ def build_upstream_client(llm_url: str, llm_api_key: str) -> httpx.AsyncClient:
     return build_fallback_client(llm_url=llm_url, llm_api_key=llm_api_key)
 
 
+def _refuse_multi_worker_startup() -> None:
+    """Holzi's in-memory cancel registry (and future approval registry)
+    require that every request for a given run_id lands in the same
+    process. Bail out loudly if the operator configured uvicorn /
+    gunicorn for >1 worker, rather than silently miss cancels.
+
+    Checked envs match what the supported deploy tooling actually sets:
+    uvicorn reads UVICORN_WORKERS, gunicorn reads GUNICORN_WORKERS, and
+    both honour the more generic WEB_CONCURRENCY.
+    """
+    for env in ("UVICORN_WORKERS", "GUNICORN_WORKERS", "WEB_CONCURRENCY"):
+        raw = os.environ.get(env)
+        if raw is None or raw.strip() == "":
+            continue
+        try:
+            workers = int(raw)
+        except ValueError:
+            continue
+        if workers > 1:
+            raise RuntimeError(
+                f"Holzi requires a single worker (got {env}={workers}). "
+                "The in-memory chat-run registry assumes one process per "
+                "user; scale by running more containers, not more workers."
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    _refuse_multi_worker_startup()
     logger.info(
         "hermes_starting",
         version=__version__,
@@ -60,6 +88,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model=settings.model,
     )
     app.state.db = None
+    # run_id → asyncio.Event for in-flight /api/chat turns. See
+    # routes/api.py and hermes/agent.py for the contract.
+    app.state.chat_runs = {}
     app.state.encryptor = None
     app.state.oauth_driver = None
     app.state.upstream = None
