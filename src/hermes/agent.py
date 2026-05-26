@@ -219,8 +219,7 @@ async def _request_round_stream(
             # to finish. We don't try to break out mid-network-read — if
             # the upstream stalls, the client disconnect path (which task-
             # cancels run_agent) is still the escape hatch.
-            if cancel_event is not None and cancel_event.is_set():
-                raise ChatRunCancelled()
+            _raise_if_cancelled(cancel_event)
 
     if not saw_terminal_marker:
         raise RuntimeError(

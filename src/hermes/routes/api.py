@@ -240,7 +240,12 @@ async def api_chat(request: Request) -> Response:
 
 
 @router.post(
-    "/chat/runs/{run_id}/cancel", status_code=status.HTTP_204_NO_CONTENT
+    "/chat/runs/{run_id}/cancel",
+    status_code=status.HTTP_204_NO_CONTENT,
+    # Declare 404 explicitly so the generated frontend types include it —
+    # without this the OpenAPI doc only lists 204, and the client has to
+    # special-case the "run already finished" race without type support.
+    responses={404: {"description": "Unknown or already-finished run_id"}},
 )
 async def api_chat_cancel_run(request: Request, run_id: str) -> Response:
     """Cooperatively cancel an in-flight /api/chat run.
