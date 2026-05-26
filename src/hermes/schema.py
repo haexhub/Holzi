@@ -29,6 +29,11 @@ conversations = Table(
     # unix epoch seconds
     Column("started_at", Integer, nullable=False),
     Column("updated_at", Integer, nullable=False),
+    # 0 | 1 — pinned threads survive the daily TTL sweep.
+    Column("bookmarked", Integer, nullable=False, server_default="0"),
+    # unix epoch seconds; NULL means the conversation is bookmarked
+    # (never expires). Refreshed whenever `updated_at` moves.
+    Column("expires_at", Integer),
 )
 
 Index(

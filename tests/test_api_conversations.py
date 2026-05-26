@@ -2,11 +2,13 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 
+from hermes.config import conversation_scratch_root, settings
 from hermes.main import app
 from hermes.repository import conversations, messages
 
 VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
+_DAY = 86_400
 
 
 @pytest.fixture
@@ -150,6 +152,22 @@ async def test_api_conversation_delete_removes_conversation_and_messages(
     assert response.status_code == 204
     assert await conversations.get(app.state.db, convo.id) is None
     assert await messages.list_by_conversation(app.state.db, convo.id) == []
+
+
+async def test_api_conversation_delete_removes_scratch_dir(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    scratch_root = conversation_scratch_root()
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    scratch = scratch_root / str(convo.id)
+    scratch.mkdir()
+    (scratch / "upload.bin").write_bytes(b"hello")
+
+    response = await client.delete(f"/api/conversations/{convo.id}", headers=AUTH)
+
+    assert response.status_code == 204
+    assert not scratch.exists()
 
 
 async def test_api_conversation_delete_unknown_id_returns_404(
@@ -342,3 +360,64 @@ async def test_api_conversations_search_respects_limit(
 
     assert response.status_code == 200
     assert len(response.json()) == 2
+
+
+# ---------------------------------------------------------------------------
+# Bookmark + retention.
+# ---------------------------------------------------------------------------
+
+
+async def test_api_conversations_list_includes_bookmark_fields(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+
+    response = await client.get("/api/conversations", headers=AUTH)
+
+    assert response.status_code == 200
+    body = response.json()
+    row = next(c for c in body if c["id"] == convo.id)
+    assert row["bookmarked"] is False
+    assert row["expires_at"] == 1000 + settings.conversation_ttl_days * _DAY
+
+
+async def test_api_conversation_bookmark_toggle_sets_and_clears(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+
+    # First toggle: bookmark on, expires_at cleared.
+    first = await client.post(
+        f"/api/conversations/{convo.id}/bookmark", headers=AUTH
+    )
+    assert first.status_code == 200
+    body = first.json()
+    assert body["id"] == convo.id
+    assert body["bookmarked"] is True
+    assert body["expires_at"] is None
+
+    # Second toggle: bookmark off, expires_at re-armed.
+    second = await client.post(
+        f"/api/conversations/{convo.id}/bookmark", headers=AUTH
+    )
+    assert second.status_code == 200
+    body = second.json()
+    assert body["bookmarked"] is False
+    assert body["expires_at"] is not None
+    assert body["expires_at"] >= 1000
+
+
+async def test_api_conversation_bookmark_unknown_id_returns_404(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/conversations/99999/bookmark", headers=AUTH
+    )
+    assert response.status_code == 404
+
+
+async def test_api_conversation_bookmark_requires_auth(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post("/api/conversations/1/bookmark")
+    assert response.status_code == 401
