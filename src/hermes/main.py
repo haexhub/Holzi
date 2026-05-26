@@ -1,7 +1,9 @@
 import os
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
@@ -23,6 +25,7 @@ from hermes.routes.api import router as api_router
 from hermes.routes.chat import router as chat_router
 from hermes.routes.llm import router as llm_router
 from hermes.routes.messenger import router as messenger_router
+from hermes.run_tracker import track_run
 from hermes.scheduler import ConversationSweepScheduler, ReminderScheduler
 from hermes.signal.lifecycle import rebuild_signal_worker_from_db
 from hermes.telegram.lifecycle import rebuild_telegram_worker_from_db
@@ -144,13 +147,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             model = (
                 await llm_credentials_repo.get_active_model(db)
             ) or settings.model
-            return await run_agent(
-                upstream=app.state.upstream,
-                db=db,
+            run_id = uuid.uuid4().hex
+            metrics: dict[str, Any] = {}
+            async with track_run(
+                db,
+                run_id=run_id,
                 conversation_id=conversation_id,
-                system_prompt=SIGNAL_SYSTEM_PROMPT,
+                channel="signal",
                 model=model,
-            )
+                metrics=metrics,
+            ):
+                return await run_agent(
+                    upstream=app.state.upstream,
+                    db=db,
+                    conversation_id=conversation_id,
+                    system_prompt=SIGNAL_SYSTEM_PROMPT,
+                    model=model,
+                    metrics=metrics,
+                )
 
         # Registered on app.state so the hot-reload path in
         # signal/lifecycle.py can rebuild the worker on activate/delete.
@@ -185,13 +199,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             model = (
                 await llm_credentials_repo.get_active_model(db)
             ) or settings.model
-            return await run_agent(
-                upstream=app.state.upstream,
-                db=db,
+            run_id = uuid.uuid4().hex
+            metrics: dict[str, Any] = {}
+            async with track_run(
+                db,
+                run_id=run_id,
                 conversation_id=conversation_id,
-                system_prompt=TELEGRAM_SYSTEM_PROMPT,
+                channel="telegram",
                 model=model,
-            )
+                metrics=metrics,
+            ):
+                return await run_agent(
+                    upstream=app.state.upstream,
+                    db=db,
+                    conversation_id=conversation_id,
+                    system_prompt=TELEGRAM_SYSTEM_PROMPT,
+                    model=model,
+                    metrics=metrics,
+                )
 
         # Telegram worker hot-reload depends on external_http, so this
         # has to come after the external_http create above.

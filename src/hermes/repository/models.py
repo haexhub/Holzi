@@ -79,6 +79,27 @@ class LlmCredential:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentRun:
+    """A row from `agent_runs`. `error_*` columns are populated only when
+    `status == 'error'`; `input_tokens`/`output_tokens` only when the
+    upstream provider reported a usage block (some OpenAI-compatible
+    streams omit it)."""
+
+    id: str
+    conversation_id: int
+    channel: str
+    model: str
+    started_at: int
+    finished_at: int | None
+    status: str  # 'running' | 'success' | 'cancelled' | 'error'
+    error_code: str | None
+    error_message: str | None
+    error_trace: str | None
+    input_tokens: int | None
+    output_tokens: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class MessengerAccount:
     """A row from `messenger_accounts`. `bot_token_*` ciphertext columns
     are only populated for telegram rows; signal rows leave them NULL and
