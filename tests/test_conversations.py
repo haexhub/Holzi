@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from hermes.repository import conversations
+from hermes.repository import conversations, messages
 
 
 async def test_create_returns_conversation_with_id_and_timestamps(
@@ -141,8 +141,6 @@ async def test_message_count_returns_zero_for_empty_conversation(
 async def test_message_count_counts_only_target_conversation(
     conn: AsyncEngine,
 ) -> None:
-    from hermes.repository import messages
-
     a = await conversations.create(conn, channel="signal", ts=1)
     b = await conversations.create(conn, channel="web", ts=2)
     await messages.append(conn, conversation_id=a.id, role="user", content="x", ts=10)
@@ -164,8 +162,6 @@ async def test_search_finds_by_title_substring(conn: AsyncEngine) -> None:
 
 
 async def test_search_finds_by_message_content(conn: AsyncEngine) -> None:
-    from hermes.repository import messages
-
     convo = await conversations.create(conn, channel="web", title="t", ts=1000)
     await messages.append(
         conn,
@@ -180,8 +176,6 @@ async def test_search_finds_by_message_content(conn: AsyncEngine) -> None:
 
 
 async def test_search_dedupes_title_and_message_hits(conn: AsyncEngine) -> None:
-    from hermes.repository import messages
-
     convo = await conversations.create(
         conn, channel="web", title="dentist visit", ts=1000
     )
@@ -243,3 +237,62 @@ async def test_search_strips_fts_operators(conn: AsyncEngine) -> None:
     )
     results = await conversations.search(conn, query='"payroll*"')
     assert [c.id for c in results] == [convo.id]
+
+
+async def test_search_multi_token_uses_or_semantics_for_messages(
+    conn: AsyncEngine,
+) -> None:
+    """Multi-word queries should OR across tokens on both sides — a thread
+    that mentions only ONE of the words still surfaces, matching the title
+    LIKE behaviour and how chat search elsewhere feels.
+    """
+    only_dentist = await conversations.create(
+        conn, channel="web", title="t1", ts=1000
+    )
+    only_appt = await conversations.create(conn, channel="web", title="t2", ts=2000)
+    await messages.append(
+        conn,
+        conversation_id=only_dentist.id,
+        role="user",
+        content="reschedule the dentist",
+        ts=1500,
+    )
+    await messages.append(
+        conn,
+        conversation_id=only_appt.id,
+        role="user",
+        content="set up an appointment",
+        ts=2500,
+    )
+
+    results = await conversations.search(conn, query="dentist appointment")
+    ids = {c.id for c in results}
+    assert only_dentist.id in ids
+    assert only_appt.id in ids
+
+
+async def test_search_message_prefix_match(conn: AsyncEngine) -> None:
+    """Typing a partial word like ``dent`` should find a message mentioning
+    ``dentist`` — FTS5 prefix matching on each token.
+    """
+    convo = await conversations.create(conn, channel="web", title="t", ts=1000)
+    await messages.append(
+        conn,
+        conversation_id=convo.id,
+        role="user",
+        content="reschedule the dentist",
+        ts=1500,
+    )
+
+    results = await conversations.search(conn, query="dent")
+    assert [c.id for c in results] == [convo.id]
+
+
+async def test_search_pure_operator_query_returns_empty(
+    conn: AsyncEngine,
+) -> None:
+    """A non-blank query with no word characters (e.g. ``***``) is treated
+    as "I searched, found nothing" — not as a request for the full list.
+    """
+    await conversations.create(conn, channel="web", title="hello", ts=1000)
+    assert await conversations.search(conn, query="***") == []

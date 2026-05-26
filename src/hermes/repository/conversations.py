@@ -8,10 +8,10 @@ from hermes.repository.models import Conversation
 from hermes.schema import conversations as t_conversations
 from hermes.schema import messages as t_messages
 
-# Tokens fed to FTS5 MATCH must be bare words — wrapping each in double
-# quotes makes the parser treat user input as literal phrases instead of
-# operators ("*", "AND", parentheses, quotes...) so a search box never
-# triggers a SQL error from unbalanced syntax.
+# Search input is tokenised into bare words before it reaches FTS5. The
+# regex only emits `\w+` runs, so operator characters from the user
+# ("*", "AND", quotes, parens) are dropped at the tokenisation step and
+# can't break the MATCH parser or sneak into LIKE patterns.
 _FTS_TOKEN_RE = re.compile(r"\w+", flags=re.UNICODE)
 
 
@@ -142,14 +142,20 @@ async def search(
 ) -> list[Conversation]:
     """Find conversations whose title or any message content matches ``query``.
 
-    Title hits use a case-insensitive ``LIKE`` substring scan; message hits use
-    SQLite FTS5 against ``messages_fts``. The two hit-sets are unioned at the
-    conversation level so a thread appearing in both shows up exactly once.
-    Results are sorted newest-first and capped at ``limit``.
+    Tokenises the input into ``\\w+`` runs and treats each token as a
+    prefix: title hits use case-insensitive ``LIKE %tok%`` (substring) and
+    message hits use FTS5 ``tok*`` (prefix) against ``messages_fts``. The
+    two hit-sets are unioned at the conversation level so a thread
+    appearing in both shows up exactly once. Tokens are OR-joined on both
+    sides, so multi-word queries widen the result set instead of
+    narrowing it — same recall users get from chat search elsewhere.
 
-    A blank/empty query (or one made entirely of FTS-meaningless punctuation)
-    falls back to :func:`list_all` so the search box can be "cleared" by
-    typing whitespace without producing a 400.
+    Results are sorted newest-first and capped at ``limit``. A blank/
+    empty query falls back to :func:`list_all` so the search box can be
+    "cleared" by typing whitespace; a query that is non-empty but
+    contains no word characters (e.g. ``"***"``) returns an empty list
+    instead, treating it as "I searched for something and there were no
+    matches".
     """
     stripped = query.strip()
     if not stripped:
@@ -159,10 +165,10 @@ async def search(
     if not tokens:
         return []
 
-    # One LIKE per token, ORed. Matches the FTS5 OR semantics we'd get if we
-    # ran the same tokens against the message index, and means punctuation
-    # ("*", quotes) from the user input doesn't sneak into the LIKE pattern
-    # and miss otherwise-valid titles.
+    # One LIKE per token, ORed. Mirrors the FTS5 OR semantics on the
+    # message side so the title and message search behave the same way
+    # for multi-token input — no surprising AND/OR asymmetry between
+    # "matches in the title" and "matches in a message".
     params: dict[str, object] = {"limit": limit}
     title_clauses: list[str] = []
     for i, tok in enumerate(tokens):
@@ -170,7 +176,10 @@ async def search(
         title_clauses.append(f"LOWER(c.title) LIKE :{key}")
         params[key] = f"%{tok.lower()}%"
 
-    fts_match = " ".join(f'"{t}"' for t in tokens)
+    # `tok*` is FTS5 prefix matching, so typing "dent" finds a message
+    # mentioning "dentist". Tokens are `\w+`, so no operator characters
+    # can leak through to confuse the MATCH parser.
+    fts_match = " OR ".join(f"{t}*" for t in tokens)
     params["fts_q"] = fts_match
 
     # Build the WHERE on the conversations table so SELECT produces full
