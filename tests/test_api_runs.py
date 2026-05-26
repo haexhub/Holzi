@@ -478,6 +478,35 @@ async def test_runs_repository_finalize_with_error(conn) -> None:
     assert row.error_trace == "Traceback..."
 
 
+async def test_runs_finalize_does_not_clobber_terminal_row(conn) -> None:
+    """A second finalize() must not overwrite an already-terminal row —
+    the status='running' guard makes it a no-op."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await runs.insert(
+        conn,
+        run_id="r1",
+        conversation_id=convo.id,
+        channel="web",
+        model="m",
+        started_at=1000,
+    )
+    await runs.finalize(conn, "r1", status="success", finished_at=1100)
+    # Late/duplicate finalize (e.g. a racing cancel path) must be ignored.
+    await runs.finalize(
+        conn,
+        "r1",
+        status="error",
+        finished_at=2000,
+        error_code="agent_error",
+        error_message="should not stick",
+    )
+    row = await runs.get(conn, "r1")
+    assert row is not None
+    assert row.status == "success"
+    assert row.finished_at == 1100
+    assert row.error_code is None
+
+
 async def test_runs_repository_list_filters(conn) -> None:
     c1 = await conversations.create(conn, channel="web", ts=1000)
     c2 = await conversations.create(conn, channel="signal", ts=1000)

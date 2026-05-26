@@ -97,9 +97,14 @@ async def finalize(
     if output_tokens is not None:
         values["output_tokens"] = output_tokens
     async with engine.begin() as conn:
+        # Guard on status='running' so a repeated or concurrent finalize
+        # can't overwrite an already-terminal row and clobber its history.
         await conn.execute(
             t_agent_runs.update()
-            .where(t_agent_runs.c.id == run_id)
+            .where(
+                t_agent_runs.c.id == run_id,
+                t_agent_runs.c.status == "running",
+            )
             .values(**values)
         )
 

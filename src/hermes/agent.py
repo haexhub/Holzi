@@ -107,6 +107,12 @@ async def run_agent(
             )
         else:
             body["stream"] = True
+            # OpenAI-compatible streams only emit the terminal `usage`
+            # chunk when this is set; without it metrics stays empty
+            # against a real provider (our test mock injects usage
+            # unconditionally, so this isn't caught there).
+            if metrics is not None:
+                body["stream_options"] = {"include_usage": True}
             assistant_text, tool_calls = await _request_round_stream(
                 upstream, body, on_chunk, cancel_event, metrics
             )

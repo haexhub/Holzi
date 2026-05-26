@@ -133,6 +133,47 @@ async def test_run_agent_with_on_chunk_sets_stream_true_on_upstream(
         on_chunk=on_chunk,
     )
     assert captured[0]["stream"] is True
+    # No metrics dict requested → don't ask the provider for usage.
+    assert "stream_options" not in captured[0]
+
+
+async def test_run_agent_streaming_requests_usage_when_metrics_provided(
+    conn: AsyncEngine,
+) -> None:
+    """When the caller passes a `metrics` dict, the upstream streaming
+    request must opt into usage reporting via stream_options — otherwise
+    OpenAI-compatible providers omit the terminal usage chunk."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
+
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(_sse_chunks([{"content": "x"}])),
+        )
+
+    upstream = _mock_upstream(handler)
+
+    async def on_chunk(_: str) -> None:
+        return None
+
+    metrics: dict[str, Any] = {}
+    await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=SYSTEM,
+        model=MODEL,
+        on_chunk=on_chunk,
+        metrics=metrics,
+    )
+    assert captured[0]["stream_options"] == {"include_usage": True}
 
 
 async def test_run_agent_streaming_handles_tool_call_round(
