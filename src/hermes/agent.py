@@ -63,6 +63,7 @@ async def run_agent(
     max_iterations: int = 10,
     on_chunk: OnChunk | None = None,
     cancel_event: asyncio.Event | None = None,
+    metrics: dict[str, Any] | None = None,
 ) -> str:
     """Run a single agent turn until the assistant stops requesting tool calls.
 
@@ -101,11 +102,13 @@ async def run_agent(
             body["tools"] = tools_payload
 
         if on_chunk is None:
-            assistant_text, tool_calls = await _request_round_nonstream(upstream, body)
+            assistant_text, tool_calls = await _request_round_nonstream(
+                upstream, body, metrics
+            )
         else:
             body["stream"] = True
             assistant_text, tool_calls = await _request_round_stream(
-                upstream, body, on_chunk, cancel_event
+                upstream, body, on_chunk, cancel_event, metrics
             )
 
         _raise_if_cancelled(cancel_event)
@@ -158,7 +161,9 @@ async def run_agent(
 
 
 async def _request_round_nonstream(
-    upstream: httpx.AsyncClient, body: dict[str, Any]
+    upstream: httpx.AsyncClient,
+    body: dict[str, Any],
+    metrics: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     resp = await upstream.post(CHAT_PATH, json=body)
     resp.raise_for_status()
@@ -166,6 +171,7 @@ async def _request_round_nonstream(
     msg = data["choices"][0]["message"]
     text = str(msg.get("content") or "")
     tool_calls = list(msg.get("tool_calls") or [])
+    _accumulate_usage(metrics, data.get("usage"))
     return text, tool_calls
 
 
@@ -174,6 +180,7 @@ async def _request_round_stream(
     body: dict[str, Any],
     on_chunk: OnChunk,
     cancel_event: asyncio.Event | None = None,
+    metrics: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     text_parts: list[str] = []
     # Indexed by `delta.tool_calls[i].index` because each call's fields
@@ -199,6 +206,11 @@ async def _request_round_stream(
                 obj = json.loads(payload)
             except json.JSONDecodeError:
                 continue
+            # OpenAI-style usage block arrives in a terminal chunk whose
+            # `choices` is empty and `usage` is populated (only when
+            # stream_options.include_usage=true). Capture it before the
+            # empty-choices guard skips the chunk.
+            _accumulate_usage(metrics, obj.get("usage"))
             choices = obj.get("choices") or []
             if not choices:
                 continue
@@ -230,6 +242,24 @@ async def _request_round_stream(
     text = "".join(text_parts)
     tool_calls = [tool_calls_by_idx[i] for i in sorted(tool_calls_by_idx.keys())]
     return text, tool_calls
+
+
+def _accumulate_usage(
+    sink: dict[str, Any] | None, usage: dict[str, Any] | None
+) -> None:
+    """Sum upstream token counts into `sink` across agent-loop iterations.
+
+    OpenAI calls them prompt_tokens / completion_tokens; some providers
+    use input_tokens / output_tokens. Accept either and normalise.
+    """
+    if sink is None or not isinstance(usage, dict):
+        return
+    prompt = usage.get("prompt_tokens", usage.get("input_tokens"))
+    completion = usage.get("completion_tokens", usage.get("output_tokens"))
+    if isinstance(prompt, int):
+        sink["input_tokens"] = sink.get("input_tokens", 0) + prompt
+    if isinstance(completion, int):
+        sink["output_tokens"] = sink.get("output_tokens", 0) + completion
 
 
 def _accumulate_tool_call(

@@ -147,6 +147,63 @@ llm_credentials = Table(
 # encrypted bot token (same hex-string pattern as llm_credentials so the
 # whole DB stays text-only). The partial unique index in schema.sql
 # enforces "at most one active account per provider".
+# Persistent chat-run history. One row per /api/chat (and per signal /
+# telegram worker turn) — the in-memory `app.state.chat_runs` cancel
+# registry from Plan 03 becomes a thin index over rows whose status is
+# still 'running'. Failure rows carry enough context (code + message +
+# trace) for a "Recent failures" panel and post-hoc debugging without
+# tailing container logs.
+agent_runs = Table(
+    "agent_runs",
+    metadata,
+    # run_id (uuid hex) — same id surfaced via the SSE `run` event so
+    # frontend can correlate the row with the live stream.
+    Column("id", Text, primary_key=True),
+    # CASCADE on conversation delete: a failure row is only meaningful in
+    # the context of its conversation; if the user deletes the thread the
+    # history goes with it. Bookmarked conversations preserve their runs
+    # automatically.
+    Column(
+        "conversation_id",
+        Integer,
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    # 'web' | 'signal' | 'telegram' | 'vscode' — kept as Text instead of
+    # an enum because the channel set is shared with conversations and
+    # evolves there.
+    Column("channel", Text, nullable=False),
+    Column("model", Text, nullable=False),
+    # unix epoch seconds.
+    Column("started_at", Integer, nullable=False),
+    # NULL while the run is still in flight; filled in by the finalizer.
+    Column("finished_at", Integer),
+    # 'running' | 'success' | 'cancelled' | 'error'. Enforced at the
+    # repository layer rather than via SQLite CHECK so we can evolve the
+    # enum without an awkward table rebuild.
+    Column("status", Text, nullable=False),
+    # error_* columns are NULL for non-error rows. error_code mirrors the
+    # codes used by routes/api.py SSE `error` events (upstream_timeout,
+    # upstream_unreachable, upstream_http_error, agent_error) so the
+    # frontend can map them without parsing the message.
+    Column("error_code", Text),
+    Column("error_message", Text),
+    Column("error_trace", Text),
+    # Token usage as reported by the upstream provider. NULL when the
+    # provider didn't include a `usage` block (e.g. plain OpenAI stream
+    # without stream_options.include_usage).
+    Column("input_tokens", Integer),
+    Column("output_tokens", Integer),
+)
+
+Index(
+    "agent_runs_conv_started",
+    agent_runs.c.conversation_id,
+    agent_runs.c.started_at.desc(),
+)
+Index("agent_runs_status_started", agent_runs.c.status, agent_runs.c.started_at.desc())
+
+
 messenger_accounts = Table(
     "messenger_accounts",
     metadata,
