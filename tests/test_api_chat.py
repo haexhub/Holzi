@@ -143,11 +143,13 @@ async def test_api_chat_creates_new_conversation_when_none_provided(
 
     events = _parse_sse(body)
     event_names = [name for name, _ in events]
-    assert event_names == ["session", "text", "done"]
+    assert event_names == ["session", "run", "text", "done"]
 
     session_evt = events[0][1]
-    text_evt = events[1][1]
+    run_evt = events[1][1]
+    text_evt = events[2][1]
     assert isinstance(session_evt["conversation_id"], int)
+    assert isinstance(run_evt["run_id"], str) and run_evt["run_id"]
     assert text_evt["content"] == "hello back"
 
     conv_id = session_evt["conversation_id"]
@@ -519,6 +521,151 @@ async def test_api_chat_classifies_agent_error_for_truncated_stream(
     err = dict(_parse_sse(body))["error"]
     assert err["code"] == "agent_error"
     assert err["status_code"] == 500
+
+
+async def test_api_chat_emits_run_event_with_run_id(
+    client: httpx.AsyncClient,
+) -> None:
+    """Every /api/chat stream must emit a `run` event with a non-empty run_id
+    *before* the first content delta — frontends need it to wire up Stop."""
+    _install_upstream_responses([_assistant_oneshot("hi back")])
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+    ) as response:
+        assert response.status_code == 200
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    events = _parse_sse(body)
+    names = [name for name, _ in events]
+    # `run` must precede `text` so the frontend has the run_id by the
+    # time the first chunk lands.
+    assert "run" in names
+    assert names.index("run") < names.index("text")
+    run_evt = dict(events)["run"]
+    assert isinstance(run_evt["run_id"], str)
+    assert run_evt["run_id"]
+
+
+async def test_api_chat_run_registry_is_cleaned_up_after_completion(
+    client: httpx.AsyncClient,
+) -> None:
+    """The registry on app.state must not retain run_ids past the terminal
+    SSE event — otherwise long-running deployments leak entries."""
+    _install_upstream_responses([_assistant_oneshot("ok")])
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+    ) as response:
+        assert response.status_code == 200
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    events = dict(_parse_sse(body))
+    run_id = events["run"]["run_id"]
+
+    chat_runs = app.state.chat_runs
+    assert run_id not in chat_runs
+
+
+async def test_api_chat_cancel_unknown_run_returns_404(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/chat/runs/does-not-exist/cancel", headers=AUTH
+    )
+    assert response.status_code == 404
+
+
+async def test_api_chat_cancel_requires_auth(client: httpx.AsyncClient) -> None:
+    response = await client.post("/api/chat/runs/anything/cancel")
+    assert response.status_code == 401
+
+
+async def test_api_chat_emits_cancelled_terminal_when_event_set_during_run(
+    client: httpx.AsyncClient,
+) -> None:
+    """Cancelling an active run emits `cancelled` as the single terminal
+    SSE event (NOT followed by `done`) and clears the registry.
+
+    The mock upstream simulates the user clicking Stop by setting the
+    cancel event for every in-flight run as soon as the agent makes
+    its upstream call. The agent observes the event at its "after
+    upstream" check and raises ChatRunCancelled, which the SSE layer
+    turns into the terminal `cancelled` event. httpx's ASGITransport
+    buffers the full response body before returning, so wiring the
+    cancel through a real HTTP POST mid-flight isn't testable — the
+    endpoint's own behaviour is exercised by the dedicated cancel
+    endpoint test below.
+    """
+    cancelled_runs: list[str] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        for run_id, evt in list(app.state.chat_runs.items()):
+            cancelled_runs.append(run_id)
+            evt.set()
+        body = _to_sse_stream(_assistant_oneshot("partial"))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(body),
+        )
+
+    app.state.upstream = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://fake-proxy",
+    )
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+    ) as response:
+        assert response.status_code == 200
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    events = _parse_sse(body)
+    names = [name for name, _ in events]
+    assert "run" in names
+    assert "cancelled" in names, f"got events: {names}"
+    cancelled_idx = names.index("cancelled")
+    # `cancelled` is terminal — nothing after it.
+    assert names[cancelled_idx + 1 :] == [], f"events after cancel: {names}"
+    # Registry cleared.
+    assert cancelled_runs, "upstream handler never saw a registered run"
+    for run_id in cancelled_runs:
+        assert run_id not in app.state.chat_runs
+    # No fake completed assistant message in the conversation.
+    session_evt = dict(events).get("session")
+    assert session_evt is not None
+    msgs = await messages.list_by_conversation(
+        app.state.db, session_evt["conversation_id"]
+    )
+    assert [(m.role, m.content) for m in msgs] == [("user", "hi")]
+
+
+async def test_api_chat_cancel_endpoint_sets_event_and_returns_204(
+    client: httpx.AsyncClient,
+) -> None:
+    """Direct test of POST /api/chat/runs/{id}/cancel: registered runs
+    get their cancel event flipped and the endpoint returns 204. The
+    streaming-side handling is covered by the cancellation flow test
+    above; this one isolates the endpoint behaviour from SSE timing."""
+    import asyncio
+
+    evt = asyncio.Event()
+    app.state.chat_runs["unit-test-run"] = evt
+    try:
+        resp = await client.post(
+            "/api/chat/runs/unit-test-run/cancel", headers=AUTH
+        )
+        assert resp.status_code == 204
+        assert evt.is_set()
+    finally:
+        app.state.chat_runs.pop("unit-test-run", None)
 
 
 async def test_api_chat_cross_channel_send_filters_web_target(

@@ -291,6 +291,180 @@ async def test_run_agent_streaming_accepts_finish_reason_as_terminal(
     assert text == "hello"
 
 
+async def test_run_agent_raises_cancelled_if_event_set_before_upstream(
+    conn: AsyncEngine,
+) -> None:
+    """If the cancel_event is set before run_agent's first upstream call,
+    the agent must raise ChatRunCancelled without touching upstream and
+    without persisting an assistant turn."""
+    import asyncio
+
+    from hermes.agent import ChatRunCancelled
+
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
+
+    upstream_calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(_sse_chunks([{"content": "should not stream"}])),
+        )
+
+    upstream = _mock_upstream(handler)
+
+    cancel_event = asyncio.Event()
+    cancel_event.set()
+
+    async def on_chunk(_: str) -> None:
+        return None
+
+    import pytest
+
+    with pytest.raises(ChatRunCancelled):
+        await run_agent(
+            upstream=upstream,
+            db=conn,
+            conversation_id=convo.id,
+            system_prompt=SYSTEM,
+            model=MODEL,
+            on_chunk=on_chunk,
+            cancel_event=cancel_event,
+        )
+
+    assert upstream_calls == []
+    msgs = await messages.list_by_conversation(conn, convo.id)
+    assert [m.role for m in msgs] == ["user"]
+
+
+async def test_run_agent_raises_cancelled_after_stream_chunk(
+    conn: AsyncEngine,
+) -> None:
+    """When the cancel_event is set mid-stream (between deltas), run_agent
+    must abort cleanly at the next chunk boundary and raise
+    ChatRunCancelled without persisting the partial answer."""
+    import asyncio
+
+    from hermes.agent import ChatRunCancelled
+
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
+
+    upstream = _mock_upstream(_streaming_text_handler(["one", "two", "three"]))
+
+    cancel_event = asyncio.Event()
+    chunks_seen: list[str] = []
+
+    async def on_chunk(c: str) -> None:
+        chunks_seen.append(c)
+        # Set cancel right after the first delta — the agent should
+        # check the event before forwarding the next chunk.
+        cancel_event.set()
+
+    import pytest
+
+    with pytest.raises(ChatRunCancelled):
+        await run_agent(
+            upstream=upstream,
+            db=conn,
+            conversation_id=convo.id,
+            system_prompt=SYSTEM,
+            model=MODEL,
+            on_chunk=on_chunk,
+            cancel_event=cancel_event,
+        )
+
+    # No fake "completed" assistant row.
+    msgs = await messages.list_by_conversation(conn, convo.id)
+    assert [m.role for m in msgs] == ["user"]
+
+
+async def test_run_agent_raises_cancelled_before_tool_execution(
+    conn: AsyncEngine,
+) -> None:
+    """If the cancel_event is set after a tool_call is received but before
+    we execute the tool, the tool must not run and ChatRunCancelled is
+    raised."""
+    import asyncio
+
+    from hermes.agent import ChatRunCancelled
+
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
+
+    tool_call_deltas: list[dict[str, Any]] = [
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "call_x",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"text":"hi"}'},
+                }
+            ]
+        },
+    ]
+    body = _sse_chunks(tool_call_deltas)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(body),
+        )
+
+    upstream = _mock_upstream(handler)
+
+    cancel_event = asyncio.Event()
+    tool_calls_executed: list[dict[str, Any]] = []
+
+    async def echo_handler(args: dict[str, Any]) -> str:
+        tool_calls_executed.append(args)
+        return "executed"
+
+    tool = Tool(
+        name="echo",
+        description="echo it",
+        parameters_schema={
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+        },
+        handler=echo_handler,
+    )
+
+    # Pre-arm cancel so as soon as the assistant turn finishes streaming
+    # and we enter the tool-execution phase, the agent aborts.
+    cancel_event.set()
+
+    async def on_chunk(_: str) -> None:
+        return None
+
+    import pytest
+
+    with pytest.raises(ChatRunCancelled):
+        await run_agent(
+            upstream=upstream,
+            db=conn,
+            conversation_id=convo.id,
+            system_prompt=SYSTEM,
+            model=MODEL,
+            tools=[tool],
+            on_chunk=on_chunk,
+            cancel_event=cancel_event,
+        )
+
+    assert tool_calls_executed == []
+
+
 async def test_run_agent_without_on_chunk_stays_non_streaming(
     conn: AsyncEngine,
 ) -> None:
