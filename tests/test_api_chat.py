@@ -154,6 +154,7 @@ async def test_api_chat_creates_new_conversation_when_none_provided(
     convo = await conversations.get(app.state.db, conv_id)
     assert convo is not None
     assert convo.channel == "web"
+    assert convo.title == "hi"
     msgs = await messages.list_by_conversation(app.state.db, conv_id)
     assert [(m.role, m.content) for m in msgs] == [
         ("user", "hi"),
