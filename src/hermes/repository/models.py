@@ -26,6 +26,20 @@ class Message:
 
 
 @dataclass(frozen=True, slots=True)
+class Attachment:
+    id: int
+    conversation_id: int
+    # None while the upload is staged; set to the user message id at send.
+    message_id: int | None
+    filename: str
+    content_type: str
+    size: int
+    # Opaque basename inside the conversation's attachments scratch dir.
+    storage_path: str
+    created_at: int
+
+
+@dataclass(frozen=True, slots=True)
 class Note:
     id: int
     key: str

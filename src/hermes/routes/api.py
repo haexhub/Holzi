@@ -6,11 +6,12 @@ from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes import attachments as attachments_mod
 from hermes.agent import ApprovalDecision, ChatRunCancelled, run_agent
 from hermes.config import conversation_scratch_root, settings
 from hermes.events import (
@@ -37,6 +38,7 @@ from hermes.events import (
 )
 from hermes.logging import logger
 from hermes.repository import (
+    attachments,
     conversations,
     messages,
     notes,
@@ -95,6 +97,9 @@ def _derive_conversation_title(message: str, *, max_len: int = 60) -> str:
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     conversation_id: int | None = None
+    # Ids of attachments previously uploaded to this conversation (Plan 11).
+    # Each must belong to `conversation_id` and still be unlinked, else 400.
+    attachment_ids: list[int] = Field(default_factory=list)
 
 
 def _classify_chat_error(exc: BaseException) -> tuple[str, int, str]:
@@ -152,6 +157,15 @@ async def api_chat(request: Request) -> Response:
 
     db: AsyncEngine = request.app.state.db
 
+    # Attachments are uploaded to an existing conversation, so they can't be
+    # paired with the implicit "create a new conversation" path — reject
+    # before we'd create an empty thread that the 400 below would orphan.
+    if payload.conversation_id is None and payload.attachment_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="attachment_ids require an existing conversation_id",
+        )
+
     if payload.conversation_id is None:
         convo = await conversations.create(
             db,
@@ -172,9 +186,34 @@ async def api_chat(request: Request) -> Response:
             )
         convo = existing
 
-    await messages.append(
+    # Validate attachment ownership before persisting anything: every id
+    # must reference an unlinked upload belonging to this conversation.
+    if payload.attachment_ids:
+        for aid in payload.attachment_ids:
+            att = await attachments.get(db, aid)
+            if (
+                att is None
+                or att.conversation_id != convo.id
+                or att.message_id is not None
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "attachment_ids must reference unsent uploads "
+                        "in this conversation"
+                    ),
+                )
+
+    user_msg = await messages.append(
         db, conversation_id=convo.id, role="user", content=payload.message
     )
+    if payload.attachment_ids:
+        await attachments.link_to_message(
+            db,
+            attachment_ids=payload.attachment_ids,
+            message_id=user_msg.id,
+            conversation_id=convo.id,
+        )
 
     return await _stream_web_agent_run(request, convo)
 
@@ -576,6 +615,18 @@ class ToolCallView(BaseModel):
     error: str | None = None
 
 
+class AttachmentResponse(BaseModel):
+    id: int
+    conversation_id: int
+    # Null while staged (uploaded, not yet sent); set once the message it
+    # belongs to has been sent.
+    message_id: int | None = None
+    filename: str
+    content_type: str
+    size: int
+    created_at: int
+
+
 class MessageResponse(BaseModel):
     id: int
     role: Literal["user", "assistant", "tool"]
@@ -587,6 +638,36 @@ class MessageResponse(BaseModel):
     # any (persisted in meta_json by run_agent). Null otherwise — including for
     # every user/tool turn — so the reasoning card only renders where relevant.
     reasoning: str | None = None
+    # Files attached to a user turn (Plan 11). Empty for assistant/tool turns
+    # and for user turns sent without attachments.
+    attachments: list[AttachmentResponse] = Field(default_factory=list)
+
+
+def _attachment_to_dict(a: Any) -> dict[str, Any]:
+    return {
+        "id": a.id,
+        "conversation_id": a.conversation_id,
+        "message_id": a.message_id,
+        "filename": a.filename,
+        "content_type": a.content_type,
+        "size": a.size,
+        "created_at": a.created_at,
+    }
+
+
+async def _unlink_attachment_files_after(
+    db: AsyncEngine, conv_id: int, *, after_id: int
+) -> None:
+    """Delete the on-disk blobs of attachments linked to messages after
+    `after_id`. Their DB rows are removed by the messages CASCADE when the
+    caller trims those turns; this reclaims the files so they don't leak in
+    the scratch dir until the whole conversation is deleted."""
+    leaked = await attachments.list_after_message(
+        db, conversation_id=conv_id, after_message_id=after_id
+    )
+    for att in leaked:
+        with contextlib.suppress(OSError):
+            attachments_mod.file_path(att).unlink(missing_ok=True)
 
 
 def _tool_call_view_from_message(m: Any) -> ToolCallView | None:
@@ -630,7 +711,9 @@ def _reasoning_from_message(m: Any) -> str | None:
     return reasoning if isinstance(reasoning, str) and reasoning else None
 
 
-def _message_to_dict(m: Any) -> dict[str, Any]:
+def _message_to_dict(
+    m: Any, atts: list[Any] | None = None
+) -> dict[str, Any]:
     view = _tool_call_view_from_message(m)
     return {
         "id": m.id,
@@ -639,6 +722,7 @@ def _message_to_dict(m: Any) -> dict[str, Any]:
         "ts": m.ts,
         "tool_call": view.model_dump() if view is not None else None,
         "reasoning": _reasoning_from_message(m),
+        "attachments": [_attachment_to_dict(a) for a in (atts or [])],
     }
 
 
@@ -649,6 +733,35 @@ class ConversationDetailResponse(BaseModel):
 
 class ConversationUpdateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=120)
+
+
+class ConversationCreateRequest(BaseModel):
+    # Optional seed text (typically the first message) used to derive a
+    # title, mirroring what /api/chat does when it auto-creates. The
+    # conversation itself is created empty — the message is sent separately.
+    message: str | None = None
+
+
+@router.post(
+    "/conversations",
+    response_model=ConversationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def api_create_conversation(
+    request: Request, body: ConversationCreateRequest
+) -> dict[str, Any]:
+    """Create an empty web conversation. The web UI needs this to attach
+    files to the very first message: uploads are tied to a conversation id
+    at upload time (Plan 11), so the conversation must exist before the
+    first send."""
+    db: AsyncEngine = request.app.state.db
+    title = (
+        _derive_conversation_title(body.message)
+        if body.message and body.message.strip()
+        else None
+    )
+    convo = await conversations.create(db, channel=WEB_CHANNEL, title=title)
+    return _conversation_to_dict(convo)
 
 
 @router.get("/conversations", response_model=list[ConversationSummaryResponse])
@@ -683,10 +796,70 @@ async def api_get_conversation(
     if convo is None:
         raise HTTPException(status_code=404, detail="conversation not found")
     msgs = await messages.list_by_conversation(db, conv_id, limit=limit)
+    atts_by_message: dict[int, list[Any]] = {}
+    for att in await attachments.list_by_conversation(db, conv_id):
+        if att.message_id is not None:
+            atts_by_message.setdefault(att.message_id, []).append(att)
     return {
         "conversation": _conversation_to_dict(convo),
-        "messages": [_message_to_dict(m) for m in msgs],
+        "messages": [
+            _message_to_dict(m, atts_by_message.get(m.id)) for m in msgs
+        ],
     }
+
+
+@router.post(
+    "/conversations/{conv_id}/attachments",
+    response_model=AttachmentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def api_upload_attachment(
+    request: Request,
+    conv_id: int,
+    file: UploadFile = File(...),  # noqa: B008 — FastAPI dependency default
+) -> dict[str, Any]:
+    db: AsyncEngine = request.app.state.db
+    convo = await conversations.get(db, conv_id)
+    if convo is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+
+    content_type = file.content_type or "application/octet-stream"
+    if not attachments_mod.is_allowed(content_type):
+        raise HTTPException(
+            status_code=415,
+            detail=f"unsupported file type: {content_type}",
+        )
+
+    # Read in chunks so an oversized body is rejected without buffering the
+    # whole thing in memory (Starlette already spools to disk past 1 MB).
+    data = bytearray()
+    while chunk := await file.read(1024 * 1024):
+        data.extend(chunk)
+        if len(data) > attachments_mod.MAX_ATTACHMENT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "file exceeds the "
+                    f"{attachments_mod.MAX_ATTACHMENT_BYTES} byte limit"
+                ),
+            )
+
+    # On-disk name is an opaque token, so the user-supplied filename can
+    # never influence the path (no traversal possible).
+    token = uuid.uuid4().hex
+    target_dir = attachments_mod.attachment_dir(conv_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / token).write_bytes(bytes(data))
+
+    att = await attachments.create(
+        db,
+        conversation_id=conv_id,
+        filename=attachments_mod.safe_display_filename(file.filename),
+        content_type=content_type,
+        size=len(data),
+        storage_path=token,
+    )
+    return _attachment_to_dict(att)
 
 
 @router.patch("/conversations/{conv_id}", response_model=ConversationResponse)
@@ -820,6 +993,9 @@ async def api_edit_and_regenerate(
         raise HTTPException(status_code=404, detail="message not found")
     # Drop everything after the edited turn so run_agent regenerates from the
     # corrected context (simplest persistence strategy — no superseded_at).
+    # Unlink the on-disk files of any attachments on those later turns first:
+    # delete_after's CASCADE reclaims the rows but not the scratch-dir blobs.
+    await _unlink_attachment_files_after(db, conv_id, after_id=message_id)
     await messages.delete_after(db, conv_id, after_id=message_id)
 
     return await _stream_web_agent_run(request, convo)

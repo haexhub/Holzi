@@ -64,6 +64,43 @@ messages = Table(
 Index("msg_conv_ts", messages.c.conversation_id, messages.c.ts)
 
 
+attachments = Table(
+    "attachments",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    # CASCADE on conversation delete: an attachment only lives inside its
+    # conversation's scratch dir, which is rmtree'd on delete (Plan 01b).
+    # The DB row goes with it so no orphan metadata survives.
+    Column(
+        "conversation_id",
+        Integer,
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    # NULL while the upload is staged (uploaded, not yet sent). Set to the
+    # user message id when /api/chat links the attachment at send time.
+    Column(
+        "message_id",
+        Integer,
+        ForeignKey("messages.id", ondelete="CASCADE"),
+    ),
+    # Sanitised original filename — display only; the on-disk name is an
+    # opaque token (storage_path) so user input can never drive the path.
+    Column("filename", Text, nullable=False),
+    Column("content_type", Text, nullable=False),
+    # Size in bytes.
+    Column("size", Integer, nullable=False),
+    # Opaque basename inside {scratch}/conversations/{id}/attachments/. The
+    # absolute path is reconstructed from config so a relocated data_dir
+    # (backup/restore) doesn't strand the files.
+    Column("storage_path", Text, nullable=False),
+    Column("created_at", Integer, nullable=False),
+)
+
+Index("attachments_conversation", attachments.c.conversation_id)
+Index("attachments_message", attachments.c.message_id)
+
+
 notes = Table(
     "notes",
     metadata,

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.config import settings
 from hermes.repository.models import Conversation
+from hermes.schema import attachments as t_attachments
 from hermes.schema import conversations as t_conversations
 from hermes.schema import messages as t_messages
 
@@ -301,6 +302,14 @@ async def delete(
         if existing.first() is None:
             return False
         # Be explicit instead of relying on SQLite FK cascade settings.
+        # Attachments first (they reference messages), then messages, then
+        # the conversation row. The on-disk files go with the scratch dir
+        # rmtree below.
+        await conn.execute(
+            t_attachments.delete().where(
+                t_attachments.c.conversation_id == conversation_id
+            )
+        )
         await conn.execute(
             t_messages.delete().where(t_messages.c.conversation_id == conversation_id)
         )
