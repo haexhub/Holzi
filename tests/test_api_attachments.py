@@ -199,6 +199,18 @@ async def test_chat_inlines_text_attachment_into_upstream_request(
     assert "summarise" in user_turn["content"]
 
 
+async def test_chat_rejects_attachment_ids_without_conversation(
+    client: httpx.AsyncClient,
+) -> None:
+    # attachment_ids can't pair with the implicit new-conversation path.
+    resp = await client.post(
+        "/api/chat",
+        headers=AUTH,
+        json={"message": "hi", "attachment_ids": [1]},
+    )
+    assert resp.status_code == 400
+
+
 async def test_chat_rejects_attachment_from_other_conversation(
     client: httpx.AsyncClient,
 ) -> None:

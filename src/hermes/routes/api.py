@@ -157,6 +157,15 @@ async def api_chat(request: Request) -> Response:
 
     db: AsyncEngine = request.app.state.db
 
+    # Attachments are uploaded to an existing conversation, so they can't be
+    # paired with the implicit "create a new conversation" path — reject
+    # before we'd create an empty thread that the 400 below would orphan.
+    if payload.conversation_id is None and payload.attachment_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="attachment_ids require an existing conversation_id",
+        )
+
     if payload.conversation_id is None:
         convo = await conversations.create(
             db,
