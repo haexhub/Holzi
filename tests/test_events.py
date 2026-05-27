@@ -1,6 +1,8 @@
 import json
 
 from hermes.events import (
+    ApprovalRequiredData,
+    ApprovalRequiredEvent,
     ChatStreamEnvelope,
     SessionData,
     SessionEvent,
@@ -40,6 +42,41 @@ def test_tool_result_event_carries_status_and_result() -> None:
     assert dumped["data"]["status"] == "success"
     assert dumped["data"]["result"] == "ok"
     assert dumped["data"]["error"] is None
+
+
+def test_approval_required_event_carries_payload() -> None:
+    evt = ApprovalRequiredEvent(
+        data=ApprovalRequiredData(
+            approval_id="a1",
+            call_id="c1",
+            name="cross_channel_send",
+            arguments={"channel": "signal", "message": "hi"},
+            reason="sends a real message",
+        )
+    )
+    dumped = evt.model_dump()
+    assert dumped["event"] == "approval_required"
+    assert dumped["version"] == 1
+    assert dumped["data"]["approval_id"] == "a1"
+    assert dumped["data"]["call_id"] == "c1"
+    assert dumped["data"]["reason"] == "sends a real message"
+
+
+def test_approval_required_event_round_trips_via_envelope() -> None:
+    raw = {
+        "event": "approval_required",
+        "version": 1,
+        "data": {
+            "approval_id": "a1",
+            "call_id": "c1",
+            "name": "cross_channel_send",
+            "arguments": {"channel": "signal"},
+            "reason": "risky",
+        },
+    }
+    parsed = ChatStreamEnvelope.model_validate(raw)
+    assert isinstance(parsed.root, ApprovalRequiredEvent)
+    assert parsed.root.data.approval_id == "a1"
 
 
 def test_envelope_round_trips_discriminated_union() -> None:

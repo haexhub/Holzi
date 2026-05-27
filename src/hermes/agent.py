@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -16,6 +16,22 @@ OnChunk = Callable[[str], Awaitable[None]]
 OnToolCall = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 # (call_id, status["success"|"error"], result_or_error_text)
 OnToolResult = Callable[[str, str, str], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalDecision:
+    """The user's verdict on a paused tool call. ``reason`` is an optional
+    free-text note (shown to the LLM on deny so it can adapt)."""
+
+    decision: Literal["allow_once", "deny"]
+    reason: str | None = None
+
+
+# (call_id, tool_name, parsed_arguments, risk_reason) -> decision. Called before
+# a `requires_approval` tool runs; the web layer emits an `approval_required`
+# SSE event and blocks on the user's POST. When no callback is supplied (Signal
+# / MCP), the gate is skipped and the tool runs normally.
+OnApproval = Callable[[str, str, dict[str, Any], str], Awaitable[ApprovalDecision]]
 
 
 class ChatRunCancelled(Exception):
@@ -49,6 +65,11 @@ class Tool:
     description: str
     parameters_schema: dict[str, Any]
     handler: Callable[[dict[str, Any]], Awaitable[str]]
+    # When true, run_agent pauses before executing this tool and asks the
+    # caller's `on_approval` callback for a decision. `risk_reason` is the
+    # human-readable explanation shown on the approval card.
+    requires_approval: bool = False
+    risk_reason: str | None = None
 
 
 def _raise_if_cancelled(cancel_event: asyncio.Event | None) -> None:
@@ -68,6 +89,7 @@ async def run_agent(
     on_chunk: OnChunk | None = None,
     on_tool_call: OnToolCall | None = None,
     on_tool_result: OnToolResult | None = None,
+    on_approval: OnApproval | None = None,
     cancel_event: asyncio.Event | None = None,
     metrics: dict[str, Any] | None = None,
 ) -> str:
@@ -152,12 +174,40 @@ async def run_agent(
             _raise_if_cancelled(cancel_event)
             name = call["function"]["name"]
             args, arg_error = _parse_tool_arguments(call)
-            if on_tool_call is not None:
-                await on_tool_call(call["id"], name, args)
-            status, result = await _execute_tool_call(call, tool_lookup, args, arg_error)
-            _raise_if_cancelled(cancel_event)
-            if on_tool_result is not None:
-                await on_tool_result(call["id"], status, result)
+            tool = tool_lookup.get(name)
+
+            # Approval gate: a requires_approval tool pauses here until the
+            # caller's on_approval callback returns a decision. Skipped when
+            # no callback is wired (Signal/MCP) or the arguments were already
+            # malformed (let the normal error path handle that). On deny we
+            # never run the tool — a denied result is fed back to the LLM.
+            denied_reason: str | None = None
+            denied = False
+            if (
+                on_approval is not None
+                and tool is not None
+                and tool.requires_approval
+                and arg_error is None
+            ):
+                decision = await on_approval(
+                    call["id"], name, args, tool.risk_reason or ""
+                )
+                _raise_if_cancelled(cancel_event)
+                if decision.decision == "deny":
+                    denied = True
+                    denied_reason = decision.reason
+
+            if denied:
+                status, result = "error", _denied_tool_result(denied_reason)
+            else:
+                if on_tool_call is not None:
+                    await on_tool_call(call["id"], name, args)
+                status, result = await _execute_tool_call(
+                    call, tool_lookup, args, arg_error
+                )
+                _raise_if_cancelled(cancel_event)
+                if on_tool_result is not None:
+                    await on_tool_result(call["id"], status, result)
             request_messages.append(
                 {
                     "role": "tool",
@@ -361,6 +411,15 @@ def _parse_tool_arguments(call: dict[str, Any]) -> tuple[dict[str, Any], str | N
             return {}, f"invalid arguments shape ({type(parsed).__name__})"
         return parsed, None
     return {}, f"invalid arguments shape ({type(raw).__name__})"
+
+
+def _denied_tool_result(reason: str | None) -> str:
+    """The tool-result text fed back to the LLM when the user denies an
+    approval. Mirrors the `error: ...` shape `_execute_tool_call` uses so the
+    LLM treats it as a recoverable tool failure."""
+    if reason:
+        return f"error: denied by user: {reason}"
+    return "error: denied by user"
 
 
 async def _execute_tool_call(

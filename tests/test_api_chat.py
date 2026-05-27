@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any
 
@@ -5,6 +6,7 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 
+from hermes.agent import ApprovalDecision
 from hermes.main import app
 from hermes.repository import conversations, messages
 
@@ -697,6 +699,9 @@ async def test_api_chat_cross_channel_send_filters_web_target(
     }
     seen = _install_upstream_responses([first_resp, _assistant_oneshot("done")])
 
+    # cross_channel_send is approval-gated (Plan 09); allow it so the agent
+    # reaches the recursion guard this test is about.
+    resolver = asyncio.create_task(_resolve_first_pending_approval("allow_once"))
     async with client.stream(
         "POST", "/api/chat", headers=AUTH, json={"message": "loop me"}
     ) as response:
@@ -704,6 +709,7 @@ async def test_api_chat_cross_channel_send_filters_web_target(
         async for chunk in response.aiter_bytes():
             body += chunk
         assert response.status_code == 200
+    await resolver
 
     # The tool result that came back to the LLM in the second iteration
     # should contain an error mentioning the current channel.
@@ -1182,3 +1188,177 @@ async def test_conversation_detail_exposes_tool_call_metadata(
     assert tc["error"] is None
     # Non-tool messages carry a null tool_call.
     assert all(m.get("tool_call") is None for m in msgs if m["role"] != "tool")
+
+
+# ---------------------------------------------------------------------------
+# Approvals (Plan 09)
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_first_pending_approval(decision: str) -> str:
+    """Wait for an approval future to appear on app.state.approvals and
+    resolve it directly.
+
+    httpx's ASGITransport buffers the whole SSE body before returning, so a
+    real mid-stream POST /api/approvals isn't testable (same limitation the
+    cancel-flow test documents). Resolving the future from a concurrent task
+    exercises the emit→pause→resume path end-to-end; the endpoint itself is
+    covered by the dedicated unit tests below.
+    """
+    for _ in range(500):
+        for approval_id, future in list(app.state.approvals.items()):
+            if not future.done():
+                future.set_result(ApprovalDecision(decision=decision))  # type: ignore[arg-type]
+                return approval_id
+        await asyncio.sleep(0.01)
+    raise AssertionError("no approval became pending")
+
+
+async def test_api_chat_emits_approval_required_and_resumes_on_allow(
+    client: httpx.AsyncClient,
+) -> None:
+    """A risky tool emits `approval_required`; on allow the agent runs it and
+    the turn finishes with the normal tool_call/tool_result/text/done tail."""
+    _install_upstream_responses(
+        [
+            _tool_call_first_response(
+                "cross_channel_send", {"channel": "signal", "message": "hi"}
+            ),
+            _assistant_oneshot("done"),
+        ]
+    )
+
+    resolver = asyncio.create_task(_resolve_first_pending_approval("allow_once"))
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "ping me"}
+    ) as response:
+        assert response.status_code == 200
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+    await resolver
+
+    events = _parse_sse(body)
+    names = [name for name, _ in events]
+    assert "approval_required" in names
+    # Approval precedes the tool call it gates.
+    assert names.index("approval_required") < names.index("tool_call")
+    assert names[-1] == "done"
+
+    approval = next(d for n, d in events if n == "approval_required")
+    assert approval["call_id"] == "call_evt"
+    assert approval["name"] == "cross_channel_send"
+    assert approval["arguments"] == {"channel": "signal", "message": "hi"}
+    assert approval["approval_id"]
+    assert approval["reason"]
+
+    # Registry drained once the decision landed.
+    assert approval["approval_id"] not in app.state.approvals
+
+
+async def test_api_chat_deny_skips_tool_and_feeds_denied_result(
+    client: httpx.AsyncClient,
+) -> None:
+    """On deny the gated tool never runs; the LLM's next round sees a denied
+    tool result and no tool_call event is emitted for it."""
+    seen = _install_upstream_responses(
+        [
+            _tool_call_first_response(
+                "cross_channel_send", {"channel": "signal", "message": "hi"}
+            ),
+            _assistant_oneshot("ok, won't send"),
+        ]
+    )
+
+    resolver = asyncio.create_task(_resolve_first_pending_approval("deny"))
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "ping me"}
+    ) as response:
+        assert response.status_code == 200
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+    await resolver
+
+    events = _parse_sse(body)
+    names = [name for name, _ in events]
+    assert "approval_required" in names
+    # Denied: nothing executed, so no tool_call event was streamed.
+    assert "tool_call" not in names
+
+    # The second upstream round received a denied tool result.
+    second_req = seen[1]
+    tool_msgs = [m for m in second_req["messages"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert "deni" in tool_msgs[0]["content"].lower()
+
+
+async def test_approval_endpoint_resolves_future_and_returns_204(
+    client: httpx.AsyncClient,
+) -> None:
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[ApprovalDecision] = loop.create_future()
+    app.state.approvals["unit-approval"] = future
+    try:
+        resp = await client.post(
+            "/api/approvals/unit-approval",
+            headers=AUTH,
+            json={"decision": "allow_once"},
+        )
+        assert resp.status_code == 204
+        assert future.done()
+        assert future.result().decision == "allow_once"
+    finally:
+        app.state.approvals.pop("unit-approval", None)
+
+
+async def test_approval_endpoint_unknown_id_returns_404(
+    client: httpx.AsyncClient,
+) -> None:
+    resp = await client.post(
+        "/api/approvals/nope", headers=AUTH, json={"decision": "allow_once"}
+    )
+    assert resp.status_code == 404
+
+
+async def test_approval_endpoint_already_resolved_returns_409(
+    client: httpx.AsyncClient,
+) -> None:
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[ApprovalDecision] = loop.create_future()
+    future.set_result(ApprovalDecision(decision="allow_once"))
+    app.state.approvals["done-approval"] = future
+    try:
+        resp = await client.post(
+            "/api/approvals/done-approval",
+            headers=AUTH,
+            json={"decision": "deny"},
+        )
+        assert resp.status_code == 409
+    finally:
+        app.state.approvals.pop("done-approval", None)
+
+
+async def test_approval_endpoint_requires_auth(client: httpx.AsyncClient) -> None:
+    resp = await client.post(
+        "/api/approvals/anything", json={"decision": "allow_once"}
+    )
+    assert resp.status_code == 401
+
+
+async def test_approval_endpoint_rejects_invalid_decision(
+    client: httpx.AsyncClient,
+) -> None:
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[ApprovalDecision] = loop.create_future()
+    app.state.approvals["bad-approval"] = future
+    try:
+        resp = await client.post(
+            "/api/approvals/bad-approval",
+            headers=AUTH,
+            json={"decision": "maybe"},
+        )
+        assert resp.status_code == 422
+        assert not future.done()
+    finally:
+        app.state.approvals.pop("bad-approval", None)

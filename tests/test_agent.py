@@ -5,7 +5,7 @@ import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from hermes.agent import Tool, run_agent
+from hermes.agent import ApprovalDecision, Tool, run_agent
 from hermes.repository import conversations, messages
 
 DEFAULT_SYSTEM = "You are Hermes."
@@ -288,3 +288,192 @@ async def test_run_agent_accepts_object_tool_arguments(
     )
     assert text == "done"
     assert seen == [{"text": "hello"}]
+
+
+def _risky_tool(handler: Any, *, reason: str = "does something risky") -> Tool:
+    return Tool(
+        name="risky",
+        description="a risky tool",
+        parameters_schema={"type": "object", "properties": {}},
+        handler=handler,
+        requires_approval=True,
+        risk_reason=reason,
+    )
+
+
+async def test_run_agent_gates_risky_tool_and_executes_on_allow(
+    conn: AsyncEngine,
+) -> None:
+    """A requires_approval tool calls on_approval first; on allow_once it runs
+    normally and emits the usual tool_call/tool_result callbacks."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="do it", ts=1001
+    )
+
+    tool_call = {
+        "id": "call_risky",
+        "type": "function",
+        "function": {"name": "risky", "arguments": json.dumps({"x": 1})},
+    }
+    upstream, _ = _make_upstream(
+        [
+            _assistant_response("", tool_calls=[tool_call]),
+            _assistant_response("all done"),
+        ]
+    )
+
+    ran: list[dict[str, Any]] = []
+
+    async def handler(args: dict[str, Any]) -> str:
+        ran.append(args)
+        return "executed"
+
+    approval_calls: list[tuple[str, str, dict[str, Any], str]] = []
+
+    async def on_approval(
+        call_id: str, name: str, args: dict[str, Any], reason: str
+    ) -> ApprovalDecision:
+        approval_calls.append((call_id, name, args, reason))
+        return ApprovalDecision(decision="allow_once")
+
+    tool_calls_seen: list[str] = []
+    tool_results_seen: list[tuple[str, str]] = []
+
+    async def on_tool_call(call_id: str, _name: str, _args: dict[str, Any]) -> None:
+        tool_calls_seen.append(call_id)
+
+    async def on_tool_result(call_id: str, status: str, _content: str) -> None:
+        tool_results_seen.append((call_id, status))
+
+    text = await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=DEFAULT_SYSTEM,
+        model=MODEL,
+        tools=[_risky_tool(handler)],
+        on_approval=on_approval,
+        on_tool_call=on_tool_call,
+        on_tool_result=on_tool_result,
+    )
+
+    assert text == "all done"
+    # The tool actually ran exactly once.
+    assert ran == [{"x": 1}]
+    # on_approval was consulted with the call id, name, args and risk reason.
+    assert approval_calls == [("call_risky", "risky", {"x": 1}, "does something risky")]
+    # Allow path still surfaces the normal tool_call + success result.
+    assert tool_calls_seen == ["call_risky"]
+    assert tool_results_seen == [("call_risky", "success")]
+
+
+async def test_run_agent_denies_risky_tool_without_executing(
+    conn: AsyncEngine,
+) -> None:
+    """On deny the tool never runs; a denied result is fed back to the LLM and
+    persisted as an error tool turn. No tool_call callback fires (nothing ran)."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="do it", ts=1001
+    )
+
+    tool_call = {
+        "id": "call_risky",
+        "type": "function",
+        "function": {"name": "risky", "arguments": "{}"},
+    }
+    upstream, requests_seen = _make_upstream(
+        [
+            _assistant_response("", tool_calls=[tool_call]),
+            _assistant_response("ok, skipped"),
+        ]
+    )
+
+    ran = False
+
+    async def handler(_: dict[str, Any]) -> str:
+        nonlocal ran
+        ran = True
+        return "executed"
+
+    async def on_approval(*_: Any) -> ApprovalDecision:
+        return ApprovalDecision(decision="deny", reason="not now")
+
+    tool_calls_seen: list[str] = []
+
+    async def on_tool_call(call_id: str, _name: str, _args: dict[str, Any]) -> None:
+        tool_calls_seen.append(call_id)
+
+    text = await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=DEFAULT_SYSTEM,
+        model=MODEL,
+        tools=[_risky_tool(handler)],
+        on_approval=on_approval,
+        on_tool_call=on_tool_call,
+    )
+
+    assert text == "ok, skipped"
+    assert ran is False
+    # No tool_call callback for a denied (never-executed) action.
+    assert tool_calls_seen == []
+
+    # The LLM saw a denied tool result mentioning the reason in the 2nd round.
+    second = requests_seen[1]
+    tool_msgs = [m for m in second["messages"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert "deni" in tool_msgs[0]["content"].lower()
+    assert "not now" in tool_msgs[0]["content"]
+
+    # Persisted as an error tool turn.
+    msgs = await messages.list_by_conversation(conn, convo.id)
+    tool_rows = [m for m in msgs if m.role == "tool"]
+    assert len(tool_rows) == 1
+    meta = json.loads(tool_rows[0].meta_json)
+    assert meta["status"] == "error"
+
+
+async def test_run_agent_ignores_approval_flag_without_callback(
+    conn: AsyncEngine,
+) -> None:
+    """Channels without an approval UI (Signal/MCP pass no on_approval) execute
+    a requires_approval tool normally — the gate only engages when a callback
+    is supplied."""
+    convo = await conversations.create(conn, channel="signal", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="do it", ts=1001
+    )
+
+    tool_call = {
+        "id": "call_risky",
+        "type": "function",
+        "function": {"name": "risky", "arguments": "{}"},
+    }
+    upstream, _ = _make_upstream(
+        [
+            _assistant_response("", tool_calls=[tool_call]),
+            _assistant_response("done"),
+        ]
+    )
+
+    ran = False
+
+    async def handler(_: dict[str, Any]) -> str:
+        nonlocal ran
+        ran = True
+        return "executed"
+
+    text = await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=DEFAULT_SYSTEM,
+        model=MODEL,
+        tools=[_risky_tool(handler)],
+    )
+
+    assert text == "done"
+    assert ran is True

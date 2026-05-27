@@ -92,4 +92,11 @@ def _cross_channel_send(
             "required": ["channel", "message"],
         },
         handler=handler,
+        # Outward-facing: delivers a real message to the linked Signal account.
+        # Pause for explicit approval so the agent can't silently message out.
+        requires_approval=True,
+        risk_reason=(
+            "Sends a message to another channel (delivers a real Signal "
+            "message to your linked account)."
+        ),
     )

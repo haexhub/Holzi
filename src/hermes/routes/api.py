@@ -11,9 +11,11 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from hermes.agent import ChatRunCancelled, run_agent
+from hermes.agent import ApprovalDecision, ChatRunCancelled, run_agent
 from hermes.config import conversation_scratch_root, settings
 from hermes.events import (
+    ApprovalRequiredData,
+    ApprovalRequiredEvent,
     CancelledEvent,
     ChatStreamEnvelope,
     DoneEvent,
@@ -54,6 +56,11 @@ WEB_SYSTEM_PROMPT = (
 )
 
 WEB_CHANNEL = "web"
+
+# Approvals can take minutes; idle proxies (Traefik, mobile carriers) close
+# silent SSE connections. Emit a comment heartbeat at this cadence whenever no
+# real event is flowing so the connection stays warm while we wait.
+SSE_HEARTBEAT_SECONDS = 15.0
 
 # Negative LIMIT disables LIMIT in SQLite — refuse non-positive values at the
 # API boundary so an authenticated client can't trigger an unbounded scan.
@@ -196,6 +203,13 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
     cancel_event = asyncio.Event()
     chat_runs[run_id] = cancel_event
 
+    # approval_id → Future the agent task awaits while a risky tool is paused.
+    # POST /api/approvals/{id} resolves it. Single-worker invariant (same as
+    # chat_runs) makes this in-process registry correct.
+    approvals: dict[str, asyncio.Future[ApprovalDecision]] = (
+        request.app.state.approvals
+    )
+
     # Active credential overrides settings.model; resolve once before the
     # SSE generator so the model id we persist in agent_runs matches what
     # the upstream actually saw.
@@ -236,6 +250,35 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
             )
             await queue.put(ToolResultEvent(data=data))
 
+        async def on_approval(
+            call_id: str, name: str, args: dict[str, Any], reason: str
+        ) -> ApprovalDecision:
+            # Register a future, surface the card, then block the agent task
+            # until POST /api/approvals/{id} resolves it. The SSE generator
+            # keeps the connection alive with heartbeats meanwhile.
+            approval_id = uuid.uuid4().hex
+            future: asyncio.Future[ApprovalDecision] = (
+                asyncio.get_running_loop().create_future()
+            )
+            approvals[approval_id] = future
+            await queue.put(
+                ApprovalRequiredEvent(
+                    data=ApprovalRequiredData(
+                        approval_id=approval_id,
+                        call_id=call_id,
+                        name=name,
+                        arguments=args,
+                        reason=reason,
+                    )
+                )
+            )
+            try:
+                return await future
+            finally:
+                # Drop the entry however we leave (resolved, run cancelled,
+                # client disconnect) so a later decision can't hit a stale id.
+                approvals.pop(approval_id, None)
+
         async def run_task() -> None:
             try:
                 async with track_run(
@@ -256,6 +299,7 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
                         on_chunk=on_chunk,
                         on_tool_call=on_tool_call,
                         on_tool_result=on_tool_result,
+                        on_approval=on_approval,
                         cancel_event=cancel_event,
                         metrics=metrics,
                     )
@@ -265,7 +309,17 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
         task = asyncio.create_task(run_task())
         try:
             while True:
-                item = await queue.get()
+                try:
+                    item = await asyncio.wait_for(
+                        queue.get(), timeout=SSE_HEARTBEAT_SECONDS
+                    )
+                except TimeoutError:
+                    # No event for a while (typically: an approval is pending).
+                    # Emit an SSE comment so proxies keep the connection open.
+                    # Comment lines carry no event/data, so every client (and
+                    # our own parser) ignores them.
+                    yield b": ping\n\n"
+                    continue
                 if item is None:
                     break
                 yield to_sse(item)
@@ -333,6 +387,51 @@ async def api_chat_cancel_run(request: Request, run_id: str) -> Response:
     if event is None:
         raise HTTPException(status_code=404, detail="unknown run_id")
     event.set()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/approvals/{approval_id} — resolve a paused, approval-gated tool.
+# ---------------------------------------------------------------------------
+
+
+class ApprovalDecisionRequest(BaseModel):
+    decision: Literal["allow_once", "deny"]
+    # Optional note shown to the LLM on deny so it can adapt its next turn.
+    reason: str | None = None
+
+
+@router.post(
+    "/approvals/{approval_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        404: {"description": "Unknown approval_id"},
+        409: {"description": "Approval already resolved"},
+    },
+)
+async def api_resolve_approval(
+    request: Request, approval_id: str, body: ApprovalDecisionRequest
+) -> Response:
+    """Deliver the user's decision for a paused tool call.
+
+    Resolves the `asyncio.Future` the agent task is awaiting; the agent then
+    either runs the tool (`allow_once`) or feeds a denied result back to the
+    LLM (`deny`). Unknown ids → 404; an id whose decision already landed →
+    409 (the UI disables the buttons after one click, so this only fires on a
+    genuine double-submit / stale tab). Single-worker invariant makes the
+    in-process registry safe.
+    """
+    approvals: dict[str, asyncio.Future[ApprovalDecision]] = (
+        request.app.state.approvals
+    )
+    future = approvals.get(approval_id)
+    if future is None:
+        raise HTTPException(status_code=404, detail="unknown approval_id")
+    if future.done():
+        raise HTTPException(status_code=409, detail="approval already resolved")
+    future.set_result(
+        ApprovalDecision(decision=body.decision, reason=body.reason)
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

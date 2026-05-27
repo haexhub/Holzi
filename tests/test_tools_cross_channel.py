@@ -41,6 +41,16 @@ async def test_cross_channel_send_unsupported_channel_returns_error(
     assert "error" in result.lower()
 
 
+async def test_cross_channel_send_requires_approval(
+    conn: AsyncEngine,
+) -> None:
+    """Outward-facing send is gated behind an approval card (Plan 09)."""
+    tools = build_cross_channel_tools(conn, _make_signal_client(), SELF_NUMBER)
+    tool = _by_name(tools, "cross_channel_send")
+    assert tool.requires_approval is True
+    assert tool.risk_reason
+
+
 async def test_cross_channel_send_signal_not_configured_returns_error(
     conn: AsyncEngine,
 ) -> None:
