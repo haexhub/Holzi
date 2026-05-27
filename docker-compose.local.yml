@@ -44,6 +44,14 @@
 # stays on `hermes-local` and is never attached to `hermes-sandbox`, so a
 # sandbox has no network path to the agent's DB, secrets, or other services.
 # The agent reaches sandboxes solely through the control socket (exec API).
+#
+# Tradeoff, stated honestly: mounting the Podman control socket into the agent
+# is itself agent->host container-control authority — anyone who reaches it can
+# create containers or re-attach a sandbox to hermes-local, which defeats the
+# network isolation above. Rootless Podman bounds the blast radius to the
+# unprivileged host user (no root daemon, unlike the Docker socket), which is
+# the v1 accepted posture; tightening this (socket proxy / scoped API) is a
+# hardening follow-up, not part of 11b-a.
 networks:
   hermes-local:
     name: hermes-local

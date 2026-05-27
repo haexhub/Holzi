@@ -6,8 +6,10 @@ rootless Podman socket available::
     HERMES_SANDBOX_SOCKET=unix://$XDG_RUNTIME_DIR/podman/podman.sock \\
         uv run pytest -m integration
 
-These assert the safety-critical properties against a real engine: streamed
-exec, resource limits, and that a killed sandbox does not take down the caller.
+These smoke-test the real engine: streamed exec round-trips and a killed
+workspace is recoverable without breaking the manager. They are intentionally
+light — deeper assertions on limits/network enforcement live in the manual
+verification step until a CI Podman runner exists.
 """
 
 import os

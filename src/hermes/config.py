@@ -41,7 +41,8 @@ class Settings(BaseSettings):
     # the agent boots without a sandbox manager (tests, sandbox-less deploys);
     # any tool that needs a sandbox fails loudly rather than running in-process.
     sandbox_socket: str = ""
-    sandbox_image: str = "hermes-sandbox:latest"
+    # Matches `make sandbox-image` / the compose default tag.
+    sandbox_image: str = "hermes-sandbox:dev"
     # Dedicated, locked-down network. Sandboxes attach here and nowhere else —
     # never the agent's `internal` network (DB, secrets, other services).
     sandbox_network: str = "hermes-sandbox"

@@ -102,9 +102,13 @@ async def test_workspace_spec_validation():
     mgr, _ = make_manager()
     ws = await mgr.get_workspace("ws-1")
     assert ws.spec.workspace_id == "ws-1"
+    # A named volume is what lets a workspace survive a restart.
+    assert ws.spec.volume == "hermes-ws-ws-1"
     async with mgr.ephemeral() as eph:
         assert eph.kind is SandboxKind.ephemeral
         assert eph.spec.workspace_id is None
+        # Ephemeral sandboxes intentionally have no persistent volume.
+        assert eph.spec.volume is None
 
 
 # --- ephemeral cleanup -------------------------------------------------------
@@ -224,3 +228,35 @@ async def test_shutdown_removes_all_workspaces():
     assert backend.live_count() == 2
     await mgr.shutdown()
     assert backend.live_count() == 0
+
+
+# --- Docker stream demux (pure, no Podman) -----------------------------------
+
+
+def _frame(stream_type: int, payload: bytes) -> bytes:
+    import struct
+
+    return struct.pack(">BxxxI", stream_type, len(payload)) + payload
+
+
+def test_drain_frames_demuxes_stdout_and_stderr():
+    from hermes.sandbox.podman import _drain_frames
+
+    buffer = bytearray(_frame(1, b"out") + _frame(2, b"err"))
+    events = _drain_frames(buffer)
+    assert events == [ExecOutput("stdout", b"out"), ExecOutput("stderr", b"err")]
+    assert len(buffer) == 0
+
+
+def test_drain_frames_keeps_partial_frame_for_next_chunk():
+    """The highest-risk real-Podman path: a frame split across two read chunks."""
+    from hermes.sandbox.podman import _drain_frames
+
+    frame = _frame(1, b"hello")
+    buffer = bytearray(frame[:3])  # header not even complete yet
+    assert _drain_frames(buffer) == []
+    buffer.extend(frame[3:6])  # header complete, payload partial
+    assert _drain_frames(buffer) == []
+    buffer.extend(frame[6:])  # remainder arrives
+    assert _drain_frames(buffer) == [ExecOutput("stdout", b"hello")]
+    assert len(buffer) == 0

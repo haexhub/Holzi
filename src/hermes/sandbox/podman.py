@@ -50,10 +50,13 @@ def _socket_path(socket_url: str) -> str:
 class PodmanSandboxBackend:
     def __init__(self, socket_url: str) -> None:
         # base_url host is ignored for UDS transport but required by httpx.
+        # Finite default timeout on lifecycle calls so a wedged socket can't
+        # block the single asyncio worker forever; only the exec *stream*
+        # overrides read=None (long-running output is expected there).
         self._client = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(uds=_socket_path(socket_url)),
             base_url="http://podman",
-            timeout=httpx.Timeout(30.0, read=None),
+            timeout=httpx.Timeout(30.0),
         )
 
     async def aclose(self) -> None:
@@ -74,9 +77,15 @@ class PodmanSandboxBackend:
             "Image": spec.image,
             # Idle entrypoint so the persistent container stays up for exec.
             "Cmd": ["sleep", "infinity"],
+            "WorkingDir": "/workspace",
             "HostConfig": host_config,
             "NetworkingConfig": {"EndpointsConfig": {spec.network: {}}},
         }
+        # Workspace sandboxes bind a named volume at /workspace so files survive
+        # a restart (the crash/OOM recovery path); ephemeral ones intentionally
+        # have no volume and lose their writable layer on removal.
+        if spec.volume:
+            host_config["Binds"] = [f"{spec.volume}:/workspace"]
         created = await self._post("/containers/create", json=body)
         cid = created["Id"]
         await self._post(f"/containers/{cid}/start")
@@ -133,7 +142,11 @@ class PodmanSandboxBackend:
 
         buffer = bytearray()
         async with self._client.stream(
-            "POST", f"/exec/{exec_id}/start", json={"Detach": False, "Tty": False}
+            "POST",
+            f"/exec/{exec_id}/start",
+            json={"Detach": False, "Tty": False},
+            # Output may take arbitrarily long; only the stream gets no read cap.
+            timeout=httpx.Timeout(30.0, read=None),
         ) as stream:
             if stream.status_code == 409:
                 raise SandboxNotRunning(f"sandbox {handle.id} is not running")
@@ -144,7 +157,10 @@ class PodmanSandboxBackend:
                     yield event
 
         inspect = await self._post_get(f"/exec/{exec_id}/json")
-        yield ExecExit(exit_code=inspect.get("ExitCode", -1) or 0)
+        # Distinguish a genuine 0 from "not yet reaped / unknown" — `None or 0`
+        # would silently report a failed command as success.
+        exit_code = inspect.get("ExitCode")
+        yield ExecExit(exit_code=exit_code if exit_code is not None else -1)
 
     # --- http helpers ------------------------------------------------------
 

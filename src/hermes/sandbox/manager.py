@@ -10,6 +10,7 @@ the isolated network — never the agent's.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 
@@ -44,6 +45,9 @@ class SandboxManager:
         self._limits = default_limits
         # workspace_id -> handle of the persistent sandbox for that workspace.
         self._workspaces: dict[str, SandboxHandle] = {}
+        # Serialises lazy create/restart so two concurrent awaits for the same
+        # workspace can't spawn (and leak) two containers.
+        self._lock = asyncio.Lock()
 
     # --- spec construction (the isolation/limits chokepoint) ---------------
 
@@ -72,16 +76,26 @@ class SandboxManager:
         existing = self._workspaces.get(workspace_id)
         if existing is not None:
             return existing
-        handle = await self._backend.create(self._workspace_spec(workspace_id))
-        self._workspaces[workspace_id] = handle
-        logger.info("sandbox_workspace_started", workspace_id=workspace_id, sandbox_id=handle.id)
-        return handle
+        async with self._lock:
+            # Re-check under the lock: another awaiter may have created it.
+            existing = self._workspaces.get(workspace_id)
+            if existing is not None:
+                return existing
+            handle = await self._backend.create(self._workspace_spec(workspace_id))
+            self._workspaces[workspace_id] = handle
+            logger.info(
+                "sandbox_workspace_started",
+                workspace_id=workspace_id,
+                sandbox_id=handle.id,
+            )
+            return handle
 
     async def restart_workspace(self, workspace_id: str) -> SandboxHandle:
         """Tear down the (possibly dead) workspace sandbox and start a fresh one."""
-        existing = self._workspaces.pop(workspace_id, None)
-        if existing is not None:
-            await self._safe_remove(existing)
+        async with self._lock:
+            existing = self._workspaces.pop(workspace_id, None)
+            if existing is not None:
+                await self._safe_remove(existing)
         logger.info("sandbox_workspace_restarting", workspace_id=workspace_id)
         return await self.get_workspace(workspace_id)
 
