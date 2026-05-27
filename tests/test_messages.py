@@ -168,6 +168,7 @@ async def test_delete_after_keeps_fts_index_in_sync(
     await messages.delete_after(conn, convo_id, after_id=user.id)
 
     assert await messages.fts_search(conn, query="zorblax") == []
+    assert len(await messages.fts_search(conn, query="keep")) == 1
 
 
 async def test_delete_after_is_scoped_to_conversation(conn: AsyncEngine) -> None:
