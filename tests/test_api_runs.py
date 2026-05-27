@@ -95,8 +95,10 @@ def _parse_sse(body: bytes) -> list[tuple[str, dict[str, Any]]]:
             elif line.startswith(b"data: "):
                 data_lines.append(line[len(b"data: ") :].decode())
         if event:
-            data = json.loads("\n".join(data_lines)) if data_lines else {}
-            events.append((event, data))
+            envelope = json.loads("\n".join(data_lines)) if data_lines else {}
+            # Every block carries the shared {event, version, data} envelope;
+            # unwrap to the inner payload so existing assertions keep working.
+            events.append((event, envelope.get("data", {})))
     return events
 
 

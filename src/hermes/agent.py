@@ -12,6 +12,10 @@ from hermes.repository import messages
 CHAT_PATH = "/v1/chat/completions"
 
 OnChunk = Callable[[str], Awaitable[None]]
+# (call_id, tool_name, parsed_arguments)
+OnToolCall = Callable[[str, str, dict[str, Any]], Awaitable[None]]
+# (call_id, status["success"|"error"], result_or_error_text)
+OnToolResult = Callable[[str, str, str], Awaitable[None]]
 
 
 class ChatRunCancelled(Exception):
@@ -62,6 +66,8 @@ async def run_agent(
     tools: list[Tool] | None = None,
     max_iterations: int = 10,
     on_chunk: OnChunk | None = None,
+    on_tool_call: OnToolCall | None = None,
+    on_tool_result: OnToolResult | None = None,
     cancel_event: asyncio.Event | None = None,
     metrics: dict[str, Any] | None = None,
 ) -> str:
@@ -144,8 +150,14 @@ async def run_agent(
 
         for call in tool_calls:
             _raise_if_cancelled(cancel_event)
-            result = await _execute_tool_call(call, tool_lookup)
+            name = call["function"]["name"]
+            args, arg_error = _parse_tool_arguments(call)
+            if on_tool_call is not None:
+                await on_tool_call(call["id"], name, args)
+            status, result = await _execute_tool_call(call, tool_lookup, args, arg_error)
             _raise_if_cancelled(cancel_event)
+            if on_tool_result is not None:
+                await on_tool_result(call["id"], status, result)
             request_messages.append(
                 {
                     "role": "tool",
@@ -159,7 +171,12 @@ async def run_agent(
                 role="tool",
                 content=result,
                 meta_json=json.dumps(
-                    {"tool_call_id": call["id"], "name": call["function"]["name"]}
+                    {
+                        "tool_call_id": call["id"],
+                        "name": name,
+                        "arguments": args,
+                        "status": status,
+                    }
                 ),
             )
 
@@ -325,26 +342,41 @@ def _format_tools(tools: list[Tool]) -> list[dict[str, Any]]:
     ]
 
 
-async def _execute_tool_call(call: dict[str, Any], lookup: dict[str, Tool]) -> str:
+def _parse_tool_arguments(call: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Decode a tool call's `arguments` into a dict. Returns `(args, error)`
+    where `error` is a human message when the arguments are malformed (and
+    `args` is then empty). Surfaced both to the on_tool_call callback / card
+    and, on error, fed back to the LLM as the tool result."""
+    raw = call["function"].get("arguments")
+    if raw is None or raw == "":
+        return {}, None
+    if isinstance(raw, dict):
+        return raw, None
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw), None
+        except json.JSONDecodeError as exc:
+            return {}, f"invalid arguments json ({exc})"
+    return {}, f"invalid arguments shape ({type(raw).__name__})"
+
+
+async def _execute_tool_call(
+    call: dict[str, Any],
+    lookup: dict[str, Tool],
+    args: dict[str, Any],
+    arg_error: str | None,
+) -> tuple[str, str]:
+    """Run a tool and return `(status, content)`. `status` is "success" or
+    "error"; `content` is the tool output (success) or an `error: ...` string
+    (which is still fed back to the LLM so it can recover)."""
     name = call["function"]["name"]
     tool = lookup.get(name)
     if tool is None:
-        return f"error: unknown tool {name!r}"
-
-    raw = call["function"].get("arguments")
-    if raw is None or raw == "":
-        args: dict[str, Any] = {}
-    elif isinstance(raw, dict):
-        args = raw
-    elif isinstance(raw, str):
-        try:
-            args = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            return f"error: invalid arguments json ({exc})"
-    else:
-        return f"error: invalid arguments shape ({type(raw).__name__})"
+        return "error", f"error: unknown tool {name!r}"
+    if arg_error is not None:
+        return "error", f"error: {arg_error}"
 
     try:
-        return await tool.handler(args)
+        return "success", await tool.handler(args)
     except Exception as exc:  # noqa: BLE001 — surface to LLM, don't crash the loop
-        return f"error: {exc}"
+        return "error", f"error: {exc}"

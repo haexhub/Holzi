@@ -103,7 +103,17 @@ async def client():
 
 
 def _parse_sse(body: bytes) -> list[tuple[str, dict[str, Any]]]:
-    """Parse a series of `event: name\\ndata: {...}\\n\\n` blocks."""
+    """Parse a series of `event: name\\ndata: {...}\\n\\n` blocks.
+
+    Every block carries the shared envelope `{event, version, data}`; this
+    helper unwraps it and returns `(event_name, data_payload)` so tests assert
+    against the inner payload. `_parse_sse_envelopes` exposes the raw envelope
+    for tests that check the envelope contract itself."""
+    return [(name, env.get("data", {})) for name, env in _parse_sse_envelopes(body)]
+
+
+def _parse_sse_envelopes(body: bytes) -> list[tuple[str, dict[str, Any]]]:
+    """Parse SSE blocks into `(sse_event_line, full_envelope)` pairs."""
     events: list[tuple[str, dict[str, Any]]] = []
     for block in body.split(b"\n\n"):
         if not block.strip():
@@ -296,20 +306,7 @@ async def test_api_chat_streams_text_chunks_incrementally(
         async for chunk in response.aiter_bytes():
             out += chunk
 
-    text_events: list[str] = []
-    for block in out.split(b"\n\n"):
-        if not block.strip():
-            continue
-        event = ""
-        data_lines: list[str] = []
-        for line in block.split(b"\n"):
-            line_s = line.strip().decode()
-            if line_s.startswith("event:"):
-                event = line_s[len("event:") :].strip()
-            elif line_s.startswith("data:"):
-                data_lines.append(line_s[len("data:") :].strip())
-        if event == "text":
-            text_events.append(json.loads("\n".join(data_lines))["content"])
+    text_events = [d["content"] for name, d in _parse_sse(out) if name == "text"]
 
     assert text_events == ["Hello", " ", "world"]
 
@@ -1065,3 +1062,123 @@ async def test_edit_rejects_empty_content(
 async def test_edit_requires_auth(client: httpx.AsyncClient) -> None:
     response = await client.post(_edit_url(1, 1), json={"content": "x"})
     assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Event envelope + tool call/result events (Plan 08)
+# ---------------------------------------------------------------------------
+
+
+def _tool_call_first_response(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": "x",
+        "model": "claude-opus-4-7",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_evt",
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(arguments),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+    }
+
+
+async def test_api_chat_wraps_every_event_in_versioned_envelope(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream_responses([_assistant_oneshot("hi there")])
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+    ) as response:
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    envelopes = _parse_sse_envelopes(body)
+    assert [name for name, _ in envelopes] == ["session", "run", "text", "done"]
+    for sse_event_line, env in envelopes:
+        # SSE event line mirrors the envelope's `event` field.
+        assert env["event"] == sse_event_line
+        assert env["version"] == 1
+        assert "data" in env
+
+
+async def test_api_chat_emits_tool_call_and_result_events(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream_responses(
+        [
+            _tool_call_first_response("save_note", {"key": "k1", "content": "hello"}),
+            _assistant_oneshot("saved it"),
+        ]
+    )
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "save a note"}
+    ) as response:
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    events = _parse_sse(body)
+    names = [name for name, _ in events]
+    assert names == ["session", "run", "tool_call", "tool_result", "text", "done"]
+
+    tool_call = next(d for n, d in events if n == "tool_call")
+    assert tool_call["call_id"] == "call_evt"
+    assert tool_call["name"] == "save_note"
+    assert tool_call["arguments"] == {"key": "k1", "content": "hello"}
+    assert tool_call["status"] == "running"
+
+    tool_result = next(d for n, d in events if n == "tool_result")
+    assert tool_result["call_id"] == "call_evt"
+    assert tool_result["status"] == "success"
+    assert tool_result["result"]
+
+
+async def test_conversation_detail_exposes_tool_call_metadata(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream_responses(
+        [
+            _tool_call_first_response("save_note", {"key": "k2", "content": "x"}),
+            _assistant_oneshot("done"),
+        ]
+    )
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "go"}
+    ) as response:
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+    conv_id = _parse_sse(body)[0][1]["conversation_id"]
+
+    detail = await client.get(f"/api/conversations/{conv_id}", headers=AUTH)
+    assert detail.status_code == 200
+    msgs = detail.json()["messages"]
+    tool_msgs = [m for m in msgs if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    tc = tool_msgs[0]["tool_call"]
+    assert tc["call_id"] == "call_evt"
+    assert tc["name"] == "save_note"
+    assert tc["arguments"] == {"key": "k2", "content": "x"}
+    assert tc["status"] == "success"
+    assert tc["result"]
+    assert tc["error"] is None
+    # Non-tool messages carry a null tool_call.
+    assert all(m.get("tool_call") is None for m in msgs if m["role"] != "tool")
