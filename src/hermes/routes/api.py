@@ -578,7 +578,11 @@ async def api_edit_and_regenerate(
             status_code=400, detail="only user messages can be edited"
         )
 
-    await messages.update_content(db, message_id, content=body.content)
+    updated = await messages.update_content(db, message_id, content=body.content)
+    if updated is None:
+        # Lost-the-race between the get() above and the update — the message
+        # was deleted concurrently. Don't trim/regenerate on a phantom edit.
+        raise HTTPException(status_code=404, detail="message not found")
     # Drop everything after the edited turn so run_agent regenerates from the
     # corrected context (simplest persistence strategy — no superseded_at).
     await messages.delete_after(db, conv_id, after_id=message_id)
