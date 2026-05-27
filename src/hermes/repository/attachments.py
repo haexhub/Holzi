@@ -86,6 +86,27 @@ async def list_by_message(
     return [_row_to_attachment(r) for r in rows]
 
 
+async def list_after_message(
+    engine: AsyncEngine,
+    *,
+    conversation_id: int,
+    after_message_id: int,
+) -> list[Attachment]:
+    """Attachments linked to messages that come after `after_message_id` in
+    the conversation. Used to delete their on-disk files before an
+    edit-and-regenerate trims those messages (the rows go via FK CASCADE,
+    but the files need an explicit unlink)."""
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            select(t_attachments).where(
+                t_attachments.c.conversation_id == conversation_id,
+                t_attachments.c.message_id > after_message_id,
+            )
+        )
+        rows = result.all()
+    return [_row_to_attachment(r) for r in rows]
+
+
 async def link_to_message(
     engine: AsyncEngine,
     *,

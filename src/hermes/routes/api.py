@@ -655,6 +655,21 @@ def _attachment_to_dict(a: Any) -> dict[str, Any]:
     }
 
 
+async def _unlink_attachment_files_after(
+    db: AsyncEngine, conv_id: int, *, after_id: int
+) -> None:
+    """Delete the on-disk blobs of attachments linked to messages after
+    `after_id`. Their DB rows are removed by the messages CASCADE when the
+    caller trims those turns; this reclaims the files so they don't leak in
+    the scratch dir until the whole conversation is deleted."""
+    leaked = await attachments.list_after_message(
+        db, conversation_id=conv_id, after_message_id=after_id
+    )
+    for att in leaked:
+        with contextlib.suppress(OSError):
+            attachments_mod.file_path(att).unlink(missing_ok=True)
+
+
 def _tool_call_view_from_message(m: Any) -> ToolCallView | None:
     """Build a ToolCallView from a persisted tool message. Tolerates the
     pre-Plan-08 meta_json shape (`{tool_call_id, name}` with no arguments /
@@ -978,6 +993,9 @@ async def api_edit_and_regenerate(
         raise HTTPException(status_code=404, detail="message not found")
     # Drop everything after the edited turn so run_agent regenerates from the
     # corrected context (simplest persistence strategy — no superseded_at).
+    # Unlink the on-disk files of any attachments on those later turns first:
+    # delete_after's CASCADE reclaims the rows but not the scratch-dir blobs.
+    await _unlink_attachment_files_after(db, conv_id, after_id=message_id)
     await messages.delete_after(db, conv_id, after_id=message_id)
 
     return await _stream_web_agent_run(request, convo)

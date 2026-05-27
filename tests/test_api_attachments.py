@@ -199,6 +199,55 @@ async def test_chat_inlines_text_attachment_into_upstream_request(
     assert "summarise" in user_turn["content"]
 
 
+async def test_edit_and_regenerate_unlinks_later_attachment_files(
+    client: httpx.AsyncClient,
+) -> None:
+    # Two user turns, each with an attachment. Editing the first must drop
+    # the second turn AND remove its on-disk file (not just the DB row).
+    _install_upstream_responses(
+        [_assistant_oneshot("a1"), _assistant_oneshot("a2"), _assistant_oneshot("a3")]
+    )
+    conv_id = await _new_web_conversation()
+
+    async def send(text: str) -> int:
+        up = await _upload(client, conv_id, data=text.encode())
+        att_id = up.json()["id"]
+        async with client.stream(
+            "POST",
+            "/api/chat",
+            headers=AUTH,
+            json={"message": text, "conversation_id": conv_id, "attachment_ids": [att_id]},
+        ) as r:
+            async for _ in r.aiter_bytes():
+                pass
+        return att_id
+
+    await send("first")
+    second_att_id = await send("second")
+
+    second = await attachments.get(app.state.db, second_att_id)
+    assert second is not None
+    second_path = attachments_mod.file_path(second)
+    assert second_path.exists()
+
+    # Edit the first user message → drops the second turn and its attachment.
+    detail = await client.get(f"/api/conversations/{conv_id}", headers=AUTH)
+    first_user_id = next(
+        m["id"] for m in detail.json()["messages"] if m["role"] == "user"
+    )
+    async with client.stream(
+        "POST",
+        f"/api/conversations/{conv_id}/messages/{first_user_id}/edit-and-regenerate",
+        headers=AUTH,
+        json={"content": "first edited"},
+    ) as r:
+        async for _ in r.aiter_bytes():
+            pass
+
+    assert await attachments.get(app.state.db, second_att_id) is None
+    assert not second_path.exists()
+
+
 async def test_chat_rejects_attachment_ids_without_conversation(
     client: httpx.AsyncClient,
 ) -> None:
