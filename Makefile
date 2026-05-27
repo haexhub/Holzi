@@ -7,7 +7,7 @@ COMPOSE := docker compose -p hermes
 
 COMPOSE_LOCAL := docker compose -p hermes-local -f docker-compose.local.yml
 
-.PHONY: help install dev lint typecheck test up up-traefik up-local up-local-full down down-local logs logs-local ps ps-local clean token
+.PHONY: help install dev lint typecheck test up up-traefik up-local up-local-full frontend-reinstall down down-local logs logs-local ps ps-local clean token
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} \
@@ -39,6 +39,9 @@ up-local: ## Local dev-stack on *.localhost (backend only, no frontend)
 
 up-local-full: ## Local dev-stack + holzi-frontend (Nuxt dev with HMR)
 	$(COMPOSE_LOCAL) --profile frontend up -d --build
+
+frontend-reinstall: ## Recreate holzi-frontend with fresh node_modules (run after package.json/lockfile changes)
+	$(COMPOSE_LOCAL) --profile frontend up -d --force-recreate --renew-anon-volumes holzi-frontend
 
 down: ## docker compose down
 	$(COMPOSE) down
