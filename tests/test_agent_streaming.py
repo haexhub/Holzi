@@ -684,3 +684,74 @@ async def test_run_agent_streaming_marks_tool_error_status(
     tool_msg = next(m for m in msgs if m.role == "tool")
     meta = json.loads(tool_msg.meta_json)
     assert meta["status"] == "error"
+
+
+async def test_run_agent_streaming_rejects_non_object_tool_arguments(
+    conn: AsyncEngine,
+) -> None:
+    """Valid JSON that isn't an object (e.g. a bare number) must produce a
+    clean tool error, not flow a non-dict into the handler/persistence."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="go", ts=1001
+    )
+
+    tool_call_deltas: list[dict[str, Any]] = [
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "call_bad",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": "123"},
+                }
+            ]
+        },
+    ]
+    handler, _ = _two_round_handler(tool_call_deltas, ["recovered"])
+    upstream = _mock_upstream(handler)
+
+    called = False
+
+    async def echo_handler(args: dict[str, Any]) -> str:
+        nonlocal called
+        called = True
+        return "ok"
+
+    tool = Tool(
+        name="echo",
+        description="echo",
+        parameters_schema={"type": "object", "properties": {}},
+        handler=echo_handler,
+    )
+
+    results: list[tuple[str, str, str]] = []
+
+    async def on_tool_result(call_id: str, status: str, content: str) -> None:
+        results.append((call_id, status, content))
+
+    async def on_chunk(_: str) -> None:
+        return None
+
+    await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=SYSTEM,
+        model=MODEL,
+        tools=[tool],
+        on_chunk=on_chunk,
+        on_tool_result=on_tool_result,
+    )
+
+    # Handler never ran; the malformed arguments became a clean error result.
+    assert called is False
+    assert len(results) == 1
+    assert results[0][1] == "error"
+    assert "shape" in results[0][2]
+
+    msgs = await messages.list_by_conversation(conn, convo.id)
+    tool_msg = next(m for m in msgs if m.role == "tool")
+    meta = json.loads(tool_msg.meta_json)
+    assert meta["status"] == "error"
+    assert meta["arguments"] == {}

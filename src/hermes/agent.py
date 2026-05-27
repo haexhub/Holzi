@@ -354,9 +354,12 @@ def _parse_tool_arguments(call: dict[str, Any]) -> tuple[dict[str, Any], str | N
         return raw, None
     if isinstance(raw, str):
         try:
-            return json.loads(raw), None
+            parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
             return {}, f"invalid arguments json ({exc})"
+        if not isinstance(parsed, dict):
+            return {}, f"invalid arguments shape ({type(parsed).__name__})"
+        return parsed, None
     return {}, f"invalid arguments shape ({type(raw).__name__})"
 
 

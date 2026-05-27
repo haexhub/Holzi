@@ -476,7 +476,8 @@ def _tool_call_view_from_message(m: Any) -> ToolCallView | None:
     meta: dict[str, Any] = {}
     if m.meta_json:
         try:
-            meta = json.loads(m.meta_json)
+            decoded = json.loads(m.meta_json)
+            meta = decoded if isinstance(decoded, dict) else {}
         except json.JSONDecodeError:
             meta = {}
     status = meta.get("status", "success")
