@@ -711,6 +711,35 @@ class ConversationUpdateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=120)
 
 
+class ConversationCreateRequest(BaseModel):
+    # Optional seed text (typically the first message) used to derive a
+    # title, mirroring what /api/chat does when it auto-creates. The
+    # conversation itself is created empty — the message is sent separately.
+    message: str | None = None
+
+
+@router.post(
+    "/conversations",
+    response_model=ConversationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def api_create_conversation(
+    request: Request, body: ConversationCreateRequest
+) -> dict[str, Any]:
+    """Create an empty web conversation. The web UI needs this to attach
+    files to the very first message: uploads are tied to a conversation id
+    at upload time (Plan 11), so the conversation must exist before the
+    first send."""
+    db: AsyncEngine = request.app.state.db
+    title = (
+        _derive_conversation_title(body.message)
+        if body.message and body.message.strip()
+        else None
+    )
+    convo = await conversations.create(db, channel=WEB_CHANNEL, title=title)
+    return _conversation_to_dict(convo)
+
+
 @router.get("/conversations", response_model=list[ConversationSummaryResponse])
 async def api_list_conversations(
     request: Request,

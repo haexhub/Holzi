@@ -112,6 +112,30 @@ async def test_upload_sanitizes_traversal_filename(
     assert ".." not in att.storage_path
 
 
+async def test_create_empty_conversation_with_derived_title(
+    client: httpx.AsyncClient,
+) -> None:
+    resp = await client.post(
+        "/api/conversations",
+        headers=AUTH,
+        json={"message": "please read the attached log"},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["channel"] == "web"
+    assert body["title"] == "please read the attached log"
+    # Created empty: detail has no messages yet.
+    detail = await client.get(
+        f"/api/conversations/{body['id']}", headers=AUTH
+    )
+    assert detail.json()["messages"] == []
+
+
+async def test_create_conversation_requires_auth(client: httpx.AsyncClient) -> None:
+    resp = await client.post("/api/conversations", json={})
+    assert resp.status_code == 401
+
+
 async def test_chat_links_attachments_and_detail_includes_metadata(
     client: httpx.AsyncClient,
 ) -> None:
