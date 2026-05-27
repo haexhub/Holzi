@@ -188,3 +188,45 @@ async def test_delete_after_is_scoped_to_conversation(conn: AsyncEngine) -> None
     assert deleted == 1
     b_msgs = await messages.list_by_conversation(conn, convo_b.id)
     assert [m.content for m in b_msgs] == ["b-reply"]
+
+
+async def test_get_returns_message_by_id(conn: AsyncEngine, convo_id: int) -> None:
+    msg = await messages.append(
+        conn, conversation_id=convo_id, role="user", content="find me", ts=10
+    )
+    found = await messages.get(conn, msg.id)
+    assert found is not None
+    assert found.id == msg.id
+    assert (found.role, found.content, found.ts) == ("user", "find me", 10)
+
+
+async def test_get_returns_none_for_unknown_id(conn: AsyncEngine) -> None:
+    assert await messages.get(conn, 99999) is None
+
+
+async def test_update_content_replaces_text_and_keeps_position(
+    conn: AsyncEngine, convo_id: int
+) -> None:
+    msg = await messages.append(
+        conn, conversation_id=convo_id, role="user", content="old text", ts=10
+    )
+    updated = await messages.update_content(conn, msg.id, content="new text")
+    assert updated is not None
+    assert updated.content == "new text"
+    # Role and timestamp are preserved so the edited turn stays in place.
+    assert (updated.role, updated.ts) == ("user", 10)
+
+
+async def test_update_content_keeps_fts_index_in_sync(
+    conn: AsyncEngine, convo_id: int
+) -> None:
+    msg = await messages.append(
+        conn, conversation_id=convo_id, role="user", content="zorblax", ts=10
+    )
+    await messages.update_content(conn, msg.id, content="quuxified")
+    assert await messages.fts_search(conn, query="zorblax") == []
+    assert len(await messages.fts_search(conn, query="quuxified")) == 1
+
+
+async def test_update_content_returns_none_for_unknown_id(conn: AsyncEngine) -> None:
+    assert await messages.update_content(conn, 99999, content="x") is None
