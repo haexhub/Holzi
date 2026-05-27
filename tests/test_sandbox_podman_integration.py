@@ -23,7 +23,8 @@ pytestmark = pytest.mark.integration
 
 SOCKET = os.environ.get("HERMES_SANDBOX_SOCKET", "")
 IMAGE = os.environ.get("HERMES_SANDBOX_IMAGE", "hermes-sandbox:dev")
-NETWORK = os.environ.get("HERMES_SANDBOX_NETWORK", "hermes-sandbox")
+# "none" = no networking (the isolation guarantee for 11b-a).
+NETWORK = os.environ.get("HERMES_SANDBOX_NETWORK", "none")
 
 requires_podman = pytest.mark.skipif(
     not SOCKET, reason="HERMES_SANDBOX_SOCKET not set"
@@ -54,6 +55,28 @@ async def test_ephemeral_exec_streams_real_output():
                     code = ev.exit_code
             assert b"hello" in out
             assert code == 0
+    finally:
+        await backend.aclose()
+
+
+@requires_podman
+async def test_sandbox_has_no_network_access():
+    """The isolation guarantee: with NetworkMode none a sandbox cannot reach
+    anything off-host (the agent, its DB/secrets, other sandboxes). A TCP
+    connect attempt from inside the sandbox must fail."""
+    mgr, backend = _manager()
+    try:
+        async with mgr.ephemeral() as handle:
+            code = None
+            async for ev in mgr.exec(
+                handle,
+                ["bash", "-c", "timeout 4 bash -c 'echo > /dev/tcp/1.1.1.1/53'"],
+            ):
+                if isinstance(ev, ExecExit):
+                    code = ev.exit_code
+            assert code is not None and code != 0, (
+                "sandbox reached the network — isolation broken"
+            )
     finally:
         await backend.aclose()
 

@@ -43,9 +43,13 @@ class Settings(BaseSettings):
     sandbox_socket: str = ""
     # Matches `make sandbox-image` / the compose default tag.
     sandbox_image: str = "hermes-sandbox:dev"
-    # Dedicated, locked-down network. Sandboxes attach here and nowhere else —
-    # never the agent's `internal` network (DB, secrets, other services).
-    sandbox_network: str = "hermes-sandbox"
+    # Sandbox network. Default "none" = no networking at all: the agent drives
+    # sandboxes over the Podman control socket (exec), not the network, so a
+    # 11b-a sandbox needs no network and thus cannot reach the agent's DB,
+    # secrets, or other sandboxes. (Separate Podman networks are NOT isolated
+    # from each other by default — verified — so "own network" isn't enough.)
+    # Controlled egress for git/builds is a deliberate later addition (13/16).
+    sandbox_network: str = "none"
     # Mandatory per-container caps. No "unlimited" path exists.
     # CPU + memory are hard caps (the host's rootless cgroup v2 must delegate
     # the cpu + memory controllers — `Delegate=cpu cpuset memory pids`).

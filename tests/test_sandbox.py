@@ -18,7 +18,9 @@ from hermes.sandbox import (
 )
 from hermes.sandbox.fake import FakeSandboxBackend
 
-SANDBOX_NETWORK = "hermes-sandbox"
+# "none" = no networking: the agent drives sandboxes over the control socket,
+# so a sandbox needs no network and cannot reach the agent or other sandboxes.
+SANDBOX_NETWORK = "none"
 LIMITS = ResourceLimits(cpus=1.0, memory_mb=512, disk_mb=1024)
 
 
@@ -74,13 +76,15 @@ async def test_resource_limits_reject_unlimited():
 
 
 async def test_sandbox_attached_only_to_isolated_network():
-    """Every sandbox lands on the dedicated network, never the agent's."""
+    """Every sandbox lands on exactly the configured isolation network (default
+    "none" = no networking), never the agent's."""
     mgr, backend = make_manager()
     ws = await mgr.get_workspace("ws-1")
     assert ws.spec.network == SANDBOX_NETWORK
     async with mgr.ephemeral() as eph:
         assert eph.spec.network == SANDBOX_NETWORK
-    # The fake records what each container was attached to.
+    # The fake records what each container was attached to — only the
+    # configured network, nothing else.
     assert backend.networks_of(ws.id) == {SANDBOX_NETWORK}
 
 

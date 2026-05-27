@@ -68,10 +68,16 @@ class PodmanSandboxBackend:
     # --- lifecycle ---------------------------------------------------------
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        # "none"/"" = no networking. The agent drives the sandbox over the
+        # control socket (exec), so a sandbox needs no network — and with none
+        # it provably cannot reach the agent, its DB/secrets, or other
+        # sandboxes. Separate Podman networks are NOT isolated from each other
+        # by default, so attaching to an "own" network would not be enough.
+        no_network = spec.network in ("none", "")
         host_config: dict[str, object] = {
             "NanoCpus": int(spec.limits.cpus * 1_000_000_000),
             "Memory": spec.limits.memory_mb * 1024 * 1024,
-            "NetworkMode": spec.network,
+            "NetworkMode": "none" if no_network else spec.network,
         }
         # Disk quota only when explicitly enabled on XFS+pquota storage —
         # otherwise the overlay driver rejects it and the create fails.
@@ -83,8 +89,9 @@ class PodmanSandboxBackend:
             "Cmd": ["sleep", "infinity"],
             "WorkingDir": "/workspace",
             "HostConfig": host_config,
-            "NetworkingConfig": {"EndpointsConfig": {spec.network: {}}},
         }
+        if not no_network:
+            body["NetworkingConfig"] = {"EndpointsConfig": {spec.network: {}}}
         # Workspace sandboxes bind a named volume at /workspace so files survive
         # a restart (the crash/OOM recovery path); ephemeral ones intentionally
         # have no volume and lose their writable layer on removal.
