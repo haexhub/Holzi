@@ -307,19 +307,27 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
                 await queue.put(None)
 
         task = asyncio.create_task(run_task())
+        # Persist the pending queue.get() across heartbeat timeouts instead of
+        # re-issuing it: `asyncio.wait_for(queue.get(), ...)` would cancel the
+        # getter on timeout and can drop an item that arrived concurrently.
+        # `asyncio.wait` leaves the getter intact, so no event is lost.
+        get_item: asyncio.Task[BaseModel | None] | None = None
         try:
             while True:
-                try:
-                    item = await asyncio.wait_for(
-                        queue.get(), timeout=SSE_HEARTBEAT_SECONDS
-                    )
-                except TimeoutError:
+                if get_item is None:
+                    get_item = asyncio.ensure_future(queue.get())
+                done, _ = await asyncio.wait(
+                    {get_item}, timeout=SSE_HEARTBEAT_SECONDS
+                )
+                if not done:
                     # No event for a while (typically: an approval is pending).
                     # Emit an SSE comment so proxies keep the connection open.
                     # Comment lines carry no event/data, so every client (and
                     # our own parser) ignores them.
                     yield b": ping\n\n"
                     continue
+                item = get_item.result()
+                get_item = None
                 if item is None:
                     break
                 yield to_sse(item)
@@ -357,6 +365,11 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            # Drop the dangling getter on disconnect/error so it doesn't leak.
+            if get_item is not None and not get_item.done():
+                get_item.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await get_item
             # Unregister regardless of how we exited (done / error /
             # cancelled / client-disconnect). Leaving stale entries would
             # let a future cancel hit the wrong run after run_id reuse.
