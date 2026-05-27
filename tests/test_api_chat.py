@@ -1056,7 +1056,8 @@ async def test_edit_rejects_empty_content(
     response = await client.post(
         _edit_url(convo.id, user.id), headers=AUTH, json={"content": ""}
     )
-    assert response.status_code == 400
+    # Empty content fails the declared-body validation → FastAPI 422.
+    assert response.status_code == 422
     msgs = await messages.list_by_conversation(app.state.db, convo.id)
     assert [m.content for m in msgs] == ["ask"]
 

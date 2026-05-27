@@ -543,7 +543,7 @@ class EditMessageRequest(BaseModel):
 
 @router.post("/conversations/{conv_id}/messages/{message_id}/edit-and-regenerate")
 async def api_edit_and_regenerate(
-    request: Request, conv_id: int, message_id: int
+    request: Request, conv_id: int, message_id: int, body: EditMessageRequest
 ) -> Response:
     """Edit a user message and regenerate the conversation from that point.
 
@@ -551,16 +551,11 @@ async def api_edit_and_regenerate(
     delete-then-rerun mechanic as /retry, keyed on the edited message id rather
     than the last user message), then re-runs the web agent over the surviving
     context and streams with the same SSE semantics as /api/chat.
-    """
-    try:
-        body = await request.json()
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
-    try:
-        payload = EditMessageRequest.model_validate(body)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    Unlike /api/chat, the body is a declared model so the request schema lands
+    in the OpenAPI doc (and the generated frontend types). Empty/missing
+    content therefore fails FastAPI validation with a 422.
+    """
     db: AsyncEngine = request.app.state.db
 
     convo = await conversations.get(db, conv_id)
@@ -583,7 +578,7 @@ async def api_edit_and_regenerate(
             status_code=400, detail="only user messages can be edited"
         )
 
-    await messages.update_content(db, message_id, content=payload.content)
+    await messages.update_content(db, message_id, content=body.content)
     # Drop everything after the edited turn so run_agent regenerates from the
     # corrected context (simplest persistence strategy — no superseded_at).
     await messages.delete_after(db, conv_id, after_id=message_id)
