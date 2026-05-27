@@ -7,7 +7,9 @@ from typing import Any, Literal
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from hermes.repository import messages
+from hermes import attachments as attachments_mod
+from hermes.repository import attachments, messages
+from hermes.repository.models import Attachment
 
 CHAT_PATH = "/v1/chat/completions"
 
@@ -120,9 +122,18 @@ async def run_agent(
     those side effects.
     """
     history = await messages.list_by_conversation(db, conversation_id)
+    # Attachments are linked to user messages at send time (Plan 11). Group
+    # them by message id so each user turn inlines its own files into the
+    # context without persisting that bulk into the stored message content.
+    atts_by_message: dict[int, list[Attachment]] = {}
+    for att in await attachments.list_by_conversation(db, conversation_id):
+        if att.message_id is not None:
+            atts_by_message.setdefault(att.message_id, []).append(att)
     request_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     for m in history:
-        request_messages.append(_history_row_to_request_message(m))
+        request_messages.append(
+            _history_row_to_request_message(m, atts_by_message.get(m.id))
+        )
 
     tools_payload = _format_tools(tools) if tools else None
     tool_lookup = {t.name: t for t in tools} if tools else {}
@@ -386,7 +397,34 @@ def _accumulate_tool_call(
         target_fn["arguments"] = target_fn.get("arguments", "") + fn_delta["arguments"]
 
 
-def _history_row_to_request_message(m: Any) -> dict[str, Any]:
+def _render_attachments(atts: list[Attachment]) -> str:
+    """Build the text block appended to a user turn for its attachments.
+
+    Inlineable text files are decoded and embedded; binaries (images, PDF)
+    are listed as metadata only — Plan 11 defers provider image inputs.
+    """
+    parts: list[str] = []
+    for att in atts:
+        if attachments_mod.is_inlineable_text(att.content_type):
+            try:
+                body = attachments_mod.read_text(att)
+            except OSError:
+                parts.append(f"[Attachment {att.filename}: file unreadable]")
+                continue
+            parts.append(
+                f"--- Attachment: {att.filename} ({att.content_type}) ---\n{body}"
+            )
+        else:
+            parts.append(
+                f"[Attachment: {att.filename} ({att.content_type}, "
+                f"{att.size} bytes) — binary, not shown inline]"
+            )
+    return "\n\n".join(parts)
+
+
+def _history_row_to_request_message(
+    m: Any, atts: list[Attachment] | None = None
+) -> dict[str, Any]:
     if m.role == "tool" and m.meta_json:
         try:
             meta = json.loads(m.meta_json)
@@ -409,7 +447,11 @@ def _history_row_to_request_message(m: Any) -> dict[str, Any]:
                 "content": m.content,
                 "tool_calls": tool_calls,
             }
-    return {"role": m.role, "content": m.content}
+    content = m.content
+    if atts:
+        block = _render_attachments(atts)
+        content = f"{content}\n\n{block}" if content else block
+    return {"role": m.role, "content": content}
 
 
 def _format_tools(tools: list[Tool]) -> list[dict[str, Any]]:
