@@ -876,3 +876,192 @@ async def test_retry_unknown_conversation_returns_404(
 async def test_retry_requires_auth(client: httpx.AsyncClient) -> None:
     response = await client.post("/api/conversations/1/retry")
     assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# POST /api/conversations/{id}/messages/{message_id}/edit-and-regenerate
+# ---------------------------------------------------------------------------
+
+
+def _edit_url(conv_id: int, message_id: int) -> str:
+    return f"/api/conversations/{conv_id}/messages/{message_id}/edit-and-regenerate"
+
+
+async def test_edit_last_user_message_regenerates(
+    client: httpx.AsyncClient,
+) -> None:
+    """Editing the last user message replaces its text, drops the assistant
+    tail, and regenerates from the edited content with /api/chat SSE semantics."""
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    user = await messages.append(
+        app.state.db, conversation_id=convo.id, role="user", content="old ask", ts=1001
+    )
+    await messages.append(
+        app.state.db,
+        conversation_id=convo.id,
+        role="assistant",
+        content="old answer",
+        ts=1002,
+    )
+    seen = _install_upstream_responses([_assistant_oneshot("new answer")])
+
+    async with client.stream(
+        "POST", _edit_url(convo.id, user.id), headers=AUTH, json={"content": "new ask"}
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    events = _parse_sse(body)
+    assert [name for name, _ in events] == ["session", "run", "text", "done"]
+    assert events[0][1]["conversation_id"] == convo.id
+    assert events[2][1]["content"] == "new answer"
+
+    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    assert [(m.role, m.content) for m in msgs] == [
+        ("user", "new ask"),
+        ("assistant", "new answer"),
+    ]
+    # The regenerated run saw the edited user turn as context.
+    sent_msgs = [m for m in seen[0]["messages"] if m["role"] != "system"]
+    assert sent_msgs == [{"role": "user", "content": "new ask"}]
+
+
+async def test_edit_earlier_user_message_drops_everything_after(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    first = await messages.append(
+        app.state.db, conversation_id=convo.id, role="user", content="first", ts=1001
+    )
+    await messages.append(
+        app.state.db, conversation_id=convo.id, role="assistant", content="r1", ts=1002
+    )
+    await messages.append(
+        app.state.db, conversation_id=convo.id, role="user", content="second", ts=1003
+    )
+    await messages.append(
+        app.state.db, conversation_id=convo.id, role="assistant", content="r2", ts=1004
+    )
+    seen = _install_upstream_responses([_assistant_oneshot("regenerated")])
+
+    async with client.stream(
+        "POST", _edit_url(convo.id, first.id), headers=AUTH, json={"content": "edited first"}
+    ) as response:
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+        assert response.status_code == 200
+
+    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    assert [(m.role, m.content) for m in msgs] == [
+        ("user", "edited first"),
+        ("assistant", "regenerated"),
+    ]
+    sent_msgs = [m for m in seen[0]["messages"] if m["role"] != "system"]
+    assert sent_msgs == [{"role": "user", "content": "edited first"}]
+
+
+async def test_edit_rejects_assistant_message(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    await messages.append(
+        app.state.db, conversation_id=convo.id, role="user", content="ask", ts=1001
+    )
+    assistant = await messages.append(
+        app.state.db, conversation_id=convo.id, role="assistant", content="reply", ts=1002
+    )
+    _install_upstream_responses([_assistant_oneshot("never reached")])
+
+    response = await client.post(
+        _edit_url(convo.id, assistant.id), headers=AUTH, json={"content": "x"}
+    )
+    assert response.status_code == 400
+    # Nothing changed.
+    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    assert [(m.role, m.content) for m in msgs] == [
+        ("user", "ask"),
+        ("assistant", "reply"),
+    ]
+
+
+async def test_edit_rejects_message_from_other_conversation(
+    client: httpx.AsyncClient,
+) -> None:
+    convo_a = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo_b = await conversations.create(app.state.db, channel="web", ts=1000)
+    user_b = await messages.append(
+        app.state.db, conversation_id=convo_b.id, role="user", content="b ask", ts=1001
+    )
+    _install_upstream_responses([_assistant_oneshot("never reached")])
+
+    # message_id belongs to convo_b, but the path targets convo_a.
+    response = await client.post(
+        _edit_url(convo_a.id, user_b.id), headers=AUTH, json={"content": "x"}
+    )
+    assert response.status_code == 404
+    msgs = await messages.list_by_conversation(app.state.db, convo_b.id)
+    assert [m.content for m in msgs] == ["b ask"]
+
+
+async def test_edit_rejects_non_web_conversation(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="signal", ts=1000)
+    user = await messages.append(
+        app.state.db, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
+    _install_upstream_responses([_assistant_oneshot("never reached")])
+
+    response = await client.post(
+        _edit_url(convo.id, user.id), headers=AUTH, json={"content": "x"}
+    )
+    assert response.status_code == 400
+    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    assert [m.content for m in msgs] == ["hi"]
+
+
+async def test_edit_unknown_conversation_returns_404(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream_responses([_assistant_oneshot("never reached")])
+    response = await client.post(
+        _edit_url(99999, 1), headers=AUTH, json={"content": "x"}
+    )
+    assert response.status_code == 404
+
+
+async def test_edit_unknown_message_returns_404(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    _install_upstream_responses([_assistant_oneshot("never reached")])
+    response = await client.post(
+        _edit_url(convo.id, 99999), headers=AUTH, json={"content": "x"}
+    )
+    assert response.status_code == 404
+
+
+async def test_edit_rejects_empty_content(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    user = await messages.append(
+        app.state.db, conversation_id=convo.id, role="user", content="ask", ts=1001
+    )
+    _install_upstream_responses([_assistant_oneshot("never reached")])
+    response = await client.post(
+        _edit_url(convo.id, user.id), headers=AUTH, json={"content": ""}
+    )
+    # Empty content fails the declared-body validation → FastAPI 422.
+    assert response.status_code == 422
+    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    assert [m.content for m in msgs] == ["ask"]
+
+
+async def test_edit_requires_auth(client: httpx.AsyncClient) -> None:
+    response = await client.post(_edit_url(1, 1), json={"content": "x"})
+    assert response.status_code == 401

@@ -90,6 +90,37 @@ async def last_user_message(
     return _row_to_message(row) if row is not None else None
 
 
+async def get(engine: AsyncEngine, message_id: int) -> Message | None:
+    """Return the message with the given id, or None if it does not exist."""
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            select(t_messages).where(t_messages.c.id == message_id)
+        )
+        row = result.first()
+    return _row_to_message(row) if row is not None else None
+
+
+async def update_content(
+    engine: AsyncEngine,
+    message_id: int,
+    *,
+    content: str,
+) -> Message | None:
+    """Replace a message's content in place, keeping its role and ts so the
+    edited turn stays in chronological position. Returns the updated message,
+    or None if no such id exists. The FTS index follows via the AFTER UPDATE
+    trigger on `messages`."""
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            t_messages.update()
+            .where(t_messages.c.id == message_id)
+            .values(content=content)
+            .returning(*t_messages.c)
+        )
+        row = result.first()
+    return _row_to_message(row) if row is not None else None
+
+
 async def delete_after(
     engine: AsyncEngine,
     conversation_id: int,

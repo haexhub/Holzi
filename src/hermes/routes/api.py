@@ -537,6 +537,59 @@ async def api_retry_conversation(request: Request, conv_id: int) -> Response:
     return await _stream_web_agent_run(request, convo)
 
 
+class EditMessageRequest(BaseModel):
+    content: str = Field(min_length=1)
+
+
+@router.post("/conversations/{conv_id}/messages/{message_id}/edit-and-regenerate")
+async def api_edit_and_regenerate(
+    request: Request, conv_id: int, message_id: int, body: EditMessageRequest
+) -> Response:
+    """Edit a user message and regenerate the conversation from that point.
+
+    Replaces the message's content in place, trims every later turn (the same
+    delete-then-rerun mechanic as /retry, keyed on the edited message id rather
+    than the last user message), then re-runs the web agent over the surviving
+    context and streams with the same SSE semantics as /api/chat.
+
+    Unlike /api/chat, the body is a declared model so the request schema lands
+    in the OpenAPI doc (and the generated frontend types). Empty/missing
+    content therefore fails FastAPI validation with a 422.
+    """
+    db: AsyncEngine = request.app.state.db
+
+    convo = await conversations.get(db, conv_id)
+    if convo is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    # Same channel guard as /api/chat: edit is a web-only surface.
+    if convo.channel != WEB_CHANNEL:
+        raise HTTPException(
+            status_code=400,
+            detail="conversation_id must reference a web conversation",
+        )
+
+    target = await messages.get(db, message_id)
+    # A message outside this conversation is a 404 (not found *here*), so the
+    # path's conv_id is authoritative and clients can't edit across threads.
+    if target is None or target.conversation_id != conv_id:
+        raise HTTPException(status_code=404, detail="message not found")
+    if target.role != "user":
+        raise HTTPException(
+            status_code=400, detail="only user messages can be edited"
+        )
+
+    updated = await messages.update_content(db, message_id, content=body.content)
+    if updated is None:
+        # Lost-the-race between the get() above and the update — the message
+        # was deleted concurrently. Don't trim/regenerate on a phantom edit.
+        raise HTTPException(status_code=404, detail="message not found")
+    # Drop everything after the edited turn so run_agent regenerates from the
+    # corrected context (simplest persistence strategy — no superseded_at).
+    await messages.delete_after(db, conv_id, after_id=message_id)
+
+    return await _stream_web_agent_run(request, convo)
+
+
 # ---------------------------------------------------------------------------
 # /api/notes
 # ---------------------------------------------------------------------------
