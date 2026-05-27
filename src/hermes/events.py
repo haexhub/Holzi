@@ -75,6 +75,48 @@ class ApprovalRequiredData(BaseModel):
     reason: str
 
 
+class ReasoningData(BaseModel):
+    """An incremental chunk of the model's reasoning / "thinking" output.
+
+    Streamed like ``text`` (one event per delta, the client concatenates),
+    but kept distinct so the UI can render it in a separate, collapsible card
+    instead of mixing it into the answer. Only emitted when the provider
+    actually exposes reasoning (e.g. an OpenAI-compatible ``reasoning_content``
+    delta); a provider that emits none leaves the normal chat untouched."""
+
+    content: str
+
+
+class SubagentStartData(BaseModel):
+    """A subagent began working. ``subagent_id`` groups all events for one
+    subagent run; ``name`` is its human label and ``prompt`` the optional task
+    it was handed. Holzi does not orchestrate subagents yet — these types
+    define the wire contract so a future orchestrator only has to emit them
+    and the UI already groups + renders them."""
+
+    subagent_id: str
+    name: str
+    prompt: str | None = None
+
+
+class SubagentTextData(BaseModel):
+    """An incremental output chunk from a running subagent, grouped by
+    ``subagent_id`` (mirrors ``text`` but namespaced to a subagent)."""
+
+    subagent_id: str
+    content: str
+
+
+class SubagentDoneData(BaseModel):
+    """A subagent finished. ``result`` is set on success, ``error`` on
+    failure; ``status`` says which."""
+
+    subagent_id: str
+    status: Literal["success", "error"] = "success"
+    result: str | None = None
+    error: str | None = None
+
+
 class ErrorData(BaseModel):
     code: str
     status_code: int
@@ -124,6 +166,30 @@ class ApprovalRequiredEvent(BaseModel):
     data: ApprovalRequiredData
 
 
+class ReasoningEvent(BaseModel):
+    event: Literal["reasoning"] = "reasoning"
+    version: int = 1
+    data: ReasoningData
+
+
+class SubagentStartEvent(BaseModel):
+    event: Literal["subagent_start"] = "subagent_start"
+    version: int = 1
+    data: SubagentStartData
+
+
+class SubagentTextEvent(BaseModel):
+    event: Literal["subagent_text"] = "subagent_text"
+    version: int = 1
+    data: SubagentTextData
+
+
+class SubagentDoneEvent(BaseModel):
+    event: Literal["subagent_done"] = "subagent_done"
+    version: int = 1
+    data: SubagentDoneData
+
+
 class DoneEvent(BaseModel):
     event: Literal["done"] = "done"
     version: int = 1
@@ -149,6 +215,10 @@ ChatStreamEvent = Annotated[
     | ToolCallEvent
     | ToolResultEvent
     | ApprovalRequiredEvent
+    | ReasoningEvent
+    | SubagentStartEvent
+    | SubagentTextEvent
+    | SubagentDoneEvent
     | DoneEvent
     | CancelledEvent
     | ErrorEvent,

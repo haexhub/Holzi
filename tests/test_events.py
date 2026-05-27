@@ -4,8 +4,16 @@ from hermes.events import (
     ApprovalRequiredData,
     ApprovalRequiredEvent,
     ChatStreamEnvelope,
+    ReasoningData,
+    ReasoningEvent,
     SessionData,
     SessionEvent,
+    SubagentDoneData,
+    SubagentDoneEvent,
+    SubagentStartData,
+    SubagentStartEvent,
+    SubagentTextData,
+    SubagentTextEvent,
     ToolCallData,
     ToolCallEvent,
     ToolResultData,
@@ -88,3 +96,101 @@ def test_envelope_round_trips_discriminated_union() -> None:
     parsed = ChatStreamEnvelope.model_validate(raw)
     assert isinstance(parsed.root, ToolResultEvent)
     assert parsed.root.data.error == "boom"
+
+
+def test_reasoning_event_carries_content() -> None:
+    evt = ReasoningEvent(data=ReasoningData(content="thinking about it"))
+    dumped = evt.model_dump()
+    assert dumped["event"] == "reasoning"
+    assert dumped["version"] == 1
+    assert dumped["data"]["content"] == "thinking about it"
+
+
+def test_reasoning_event_round_trips_via_envelope() -> None:
+    raw = {
+        "event": "reasoning",
+        "version": 1,
+        "data": {"content": "step 1"},
+    }
+    parsed = ChatStreamEnvelope.model_validate(raw)
+    assert isinstance(parsed.root, ReasoningEvent)
+    assert parsed.root.data.content == "step 1"
+
+
+def test_subagent_start_event_carries_payload() -> None:
+    evt = SubagentStartEvent(
+        data=SubagentStartData(
+            subagent_id="s1", name="researcher", prompt="find the answer"
+        )
+    )
+    dumped = evt.model_dump()
+    assert dumped["event"] == "subagent_start"
+    assert dumped["data"]["subagent_id"] == "s1"
+    assert dumped["data"]["name"] == "researcher"
+    assert dumped["data"]["prompt"] == "find the answer"
+
+
+def test_subagent_start_prompt_is_optional() -> None:
+    evt = SubagentStartEvent(data=SubagentStartData(subagent_id="s1", name="worker"))
+    assert evt.model_dump()["data"]["prompt"] is None
+
+
+def test_subagent_text_event_carries_delta() -> None:
+    evt = SubagentTextEvent(
+        data=SubagentTextData(subagent_id="s1", content="partial output")
+    )
+    dumped = evt.model_dump()
+    assert dumped["event"] == "subagent_text"
+    assert dumped["data"]["subagent_id"] == "s1"
+    assert dumped["data"]["content"] == "partial output"
+
+
+def test_subagent_done_event_defaults_success() -> None:
+    evt = SubagentDoneEvent(
+        data=SubagentDoneData(subagent_id="s1", result="all done")
+    )
+    dumped = evt.model_dump()
+    assert dumped["event"] == "subagent_done"
+    assert dumped["data"]["status"] == "success"
+    assert dumped["data"]["result"] == "all done"
+    assert dumped["data"]["error"] is None
+
+
+def test_subagent_done_event_carries_error() -> None:
+    evt = SubagentDoneEvent(
+        data=SubagentDoneData(subagent_id="s1", status="error", error="boom")
+    )
+    dumped = evt.model_dump()
+    assert dumped["data"]["status"] == "error"
+    assert dumped["data"]["error"] == "boom"
+
+
+def test_subagent_events_round_trip_via_envelope() -> None:
+    for raw, cls in [
+        (
+            {
+                "event": "subagent_start",
+                "version": 1,
+                "data": {"subagent_id": "s1", "name": "researcher"},
+            },
+            SubagentStartEvent,
+        ),
+        (
+            {
+                "event": "subagent_text",
+                "version": 1,
+                "data": {"subagent_id": "s1", "content": "x"},
+            },
+            SubagentTextEvent,
+        ),
+        (
+            {
+                "event": "subagent_done",
+                "version": 1,
+                "data": {"subagent_id": "s1", "status": "success"},
+            },
+            SubagentDoneEvent,
+        ),
+    ]:
+        parsed = ChatStreamEnvelope.model_validate(raw)
+        assert isinstance(parsed.root, cls)

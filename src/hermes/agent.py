@@ -12,6 +12,10 @@ from hermes.repository import messages
 CHAT_PATH = "/v1/chat/completions"
 
 OnChunk = Callable[[str], Awaitable[None]]
+# A chunk of the model's reasoning / "thinking" output, forwarded as it
+# streams. Only called when the provider exposes reasoning (OpenAI-compatible
+# `delta.reasoning_content` / `delta.reasoning`); silent otherwise.
+OnReasoning = Callable[[str], Awaitable[None]]
 # (call_id, tool_name, parsed_arguments)
 OnToolCall = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 # (call_id, status["success"|"error"], result_or_error_text)
@@ -87,6 +91,7 @@ async def run_agent(
     tools: list[Tool] | None = None,
     max_iterations: int = 10,
     on_chunk: OnChunk | None = None,
+    on_reasoning: OnReasoning | None = None,
     on_tool_call: OnToolCall | None = None,
     on_tool_result: OnToolResult | None = None,
     on_approval: OnApproval | None = None,
@@ -129,6 +134,7 @@ async def run_agent(
         if tools_payload:
             body["tools"] = tools_payload
 
+        reasoning_text = ""
         if on_chunk is None:
             assistant_text, tool_calls = await _request_round_nonstream(
                 upstream, body, metrics
@@ -141,20 +147,30 @@ async def run_agent(
             # unconditionally, so this isn't caught there).
             if metrics is not None:
                 body["stream_options"] = {"include_usage": True}
-            assistant_text, tool_calls = await _request_round_stream(
-                upstream, body, on_chunk, cancel_event, metrics
+            assistant_text, tool_calls, reasoning_text = await _request_round_stream(
+                upstream, body, on_chunk, on_reasoning, cancel_event, metrics
             )
 
         _raise_if_cancelled(cancel_event)
 
         if not tool_calls:
+            # Persist reasoning (when the provider emitted any) on the final
+            # turn so the collapsible card can re-render on reload. No
+            # reasoning → no meta_json, leaving the row identical to before.
+            final_meta = {"reasoning": reasoning_text} if reasoning_text else None
             await messages.append(
-                db, conversation_id=conversation_id, role="assistant", content=assistant_text
+                db,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=assistant_text,
+                meta_json=json.dumps(final_meta) if final_meta else None,
             )
             return assistant_text
 
         # Assistant turn that requested tools — persist with the tool_calls
-        # in meta_json so we can replay later if needed.
+        # (and any reasoning that preceded them) in meta_json so we can replay
+        # / re-render later. Reasoning is for display only; the replay path
+        # (_history_row_to_request_message) ignores it.
         request_messages.append(
             {
                 "role": "assistant",
@@ -162,12 +178,15 @@ async def run_agent(
                 "tool_calls": tool_calls,
             }
         )
+        assistant_meta: dict[str, Any] = {"tool_calls": tool_calls}
+        if reasoning_text:
+            assistant_meta["reasoning"] = reasoning_text
         await messages.append(
             db,
             conversation_id=conversation_id,
             role="assistant",
             content=assistant_text,
-            meta_json=json.dumps({"tool_calls": tool_calls}),
+            meta_json=json.dumps(assistant_meta),
         )
 
         for call in tool_calls:
@@ -252,10 +271,13 @@ async def _request_round_stream(
     upstream: httpx.AsyncClient,
     body: dict[str, Any],
     on_chunk: OnChunk,
+    on_reasoning: OnReasoning | None = None,
     cancel_event: asyncio.Event | None = None,
     metrics: dict[str, Any] | None = None,
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]], str]:
     text_parts: list[str] = []
+    # Accumulated reasoning across the round; "" when the provider emits none.
+    reasoning_parts: list[str] = []
     # Indexed by `delta.tool_calls[i].index` because each call's fields
     # arrive split across chunks.
     tool_calls_by_idx: dict[int, dict[str, Any]] = {}
@@ -291,6 +313,18 @@ async def _request_round_stream(
                 saw_terminal_marker = True
             delta = choices[0].get("delta") or {}
 
+            # Reasoning arrives on its own delta field — `reasoning_content`
+            # (DeepSeek and most OpenAI-compatible providers) or `reasoning`
+            # (OpenRouter). Kept separate from `content` so the UI can render
+            # it in a distinct card.
+            reasoning = delta.get("reasoning_content")
+            if reasoning is None:
+                reasoning = delta.get("reasoning")
+            if reasoning:
+                reasoning_parts.append(reasoning)
+                if on_reasoning is not None:
+                    await on_reasoning(reasoning)
+
             content = delta.get("content")
             if content:
                 text_parts.append(content)
@@ -314,7 +348,7 @@ async def _request_round_stream(
 
     text = "".join(text_parts)
     tool_calls = [tool_calls_by_idx[i] for i in sorted(tool_calls_by_idx.keys())]
-    return text, tool_calls
+    return text, tool_calls, "".join(reasoning_parts)
 
 
 def _accumulate_usage(
