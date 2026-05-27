@@ -1191,6 +1191,70 @@ async def test_conversation_detail_exposes_tool_call_metadata(
 
 
 # ---------------------------------------------------------------------------
+# Reasoning (Plan 10)
+# ---------------------------------------------------------------------------
+
+
+def _install_reasoning_upstream() -> None:
+    """Install an upstream that streams two reasoning deltas then the answer."""
+
+    def _delta(delta: dict[str, Any]) -> bytes:
+        chunk = {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]}
+        return f"data: {json.dumps(chunk)}\n\n".encode()
+
+    body = (
+        _delta({"reasoning_content": "Let me "})
+        + _delta({"reasoning_content": "think."})
+        + _delta({"content": "42"})
+        + b"data: [DONE]\n\n"
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(body),
+        )
+
+    app.state.upstream = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://fake-proxy",
+    )
+
+
+async def test_api_chat_emits_reasoning_events_and_persists(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_reasoning_upstream()
+
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "what is the answer"}
+    ) as response:
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    events = _parse_sse(body)
+    names = [name for name, _ in events]
+    # Reasoning events stream before the text answer; chat still ends on done.
+    assert names == ["session", "run", "reasoning", "reasoning", "text", "done"]
+    reasoning = [d["content"] for n, d in events if n == "reasoning"]
+    assert reasoning == ["Let me ", "think."]
+    assert next(d for n, d in events if n == "text")["content"] == "42"
+
+    # Reload reconstructs the reasoning from meta_json so the card re-renders.
+    conv_id = events[0][1]["conversation_id"]
+    detail = await client.get(f"/api/conversations/{conv_id}", headers=AUTH)
+    assert detail.status_code == 200
+    msgs = detail.json()["messages"]
+    assistant = next(m for m in msgs if m["role"] == "assistant")
+    assert assistant["reasoning"] == "Let me think."
+    # A plain user turn carries no reasoning.
+    user = next(m for m in msgs if m["role"] == "user")
+    assert user["reasoning"] is None
+
+
+# ---------------------------------------------------------------------------
 # Approvals (Plan 09)
 # ---------------------------------------------------------------------------
 

@@ -21,6 +21,8 @@ from hermes.events import (
     DoneEvent,
     ErrorData,
     ErrorEvent,
+    ReasoningData,
+    ReasoningEvent,
     RunData,
     RunEvent,
     SessionData,
@@ -233,6 +235,9 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
         async def on_chunk(chunk: str) -> None:
             await queue.put(TextEvent(data=TextData(content=chunk)))
 
+        async def on_reasoning(chunk: str) -> None:
+            await queue.put(ReasoningEvent(data=ReasoningData(content=chunk)))
+
         async def on_tool_call(call_id: str, name: str, args: dict[str, Any]) -> None:
             await queue.put(
                 ToolCallEvent(
@@ -297,6 +302,7 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
                         model=model,
                         tools=tools,
                         on_chunk=on_chunk,
+                        on_reasoning=on_reasoning,
                         on_tool_call=on_tool_call,
                         on_tool_result=on_tool_result,
                         on_approval=on_approval,
@@ -577,6 +583,10 @@ class MessageResponse(BaseModel):
     ts: int
     # Populated only for tool turns; null for user/assistant messages.
     tool_call: ToolCallView | None = None
+    # The model's reasoning for an assistant turn, when the provider exposed
+    # any (persisted in meta_json by run_agent). Null otherwise — including for
+    # every user/tool turn — so the reasoning card only renders where relevant.
+    reasoning: str | None = None
 
 
 def _tool_call_view_from_message(m: Any) -> ToolCallView | None:
@@ -604,6 +614,22 @@ def _tool_call_view_from_message(m: Any) -> ToolCallView | None:
     )
 
 
+def _reasoning_from_message(m: Any) -> str | None:
+    """Pull persisted reasoning off an assistant turn's meta_json (the
+    `reasoning` key run_agent writes). Null for every other role / shape so
+    the field stays absent wherever there's nothing to show."""
+    if m.role != "assistant" or not m.meta_json:
+        return None
+    try:
+        meta = json.loads(m.meta_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(meta, dict):
+        return None
+    reasoning = meta.get("reasoning")
+    return reasoning if isinstance(reasoning, str) and reasoning else None
+
+
 def _message_to_dict(m: Any) -> dict[str, Any]:
     view = _tool_call_view_from_message(m)
     return {
@@ -612,6 +638,7 @@ def _message_to_dict(m: Any) -> dict[str, Any]:
         "content": m.content,
         "ts": m.ts,
         "tool_call": view.model_dump() if view is not None else None,
+        "reasoning": _reasoning_from_message(m),
     }
 
 

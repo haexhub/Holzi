@@ -27,7 +27,12 @@ def _sse_chunks(deltas: list[dict[str, Any]]) -> bytes:
 
 
 def _streaming_text_handler(text_chunks: list[str]):
-    body = _sse_chunks([{"content": c} for c in text_chunks])
+    return _streaming_handler([{"content": c} for c in text_chunks])
+
+
+def _streaming_handler(deltas: list[dict[str, Any]]):
+    """Stream arbitrary OpenAI-style deltas (content, reasoning_content, …)."""
+    body = _sse_chunks(deltas)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -684,6 +689,129 @@ async def test_run_agent_streaming_marks_tool_error_status(
     tool_msg = next(m for m in msgs if m.role == "tool")
     meta = json.loads(tool_msg.meta_json)
     assert meta["status"] == "error"
+
+
+async def test_run_agent_streaming_forwards_and_persists_reasoning(
+    conn: AsyncEngine,
+) -> None:
+    """Reasoning deltas (`delta.reasoning_content`) are forwarded to the
+    on_reasoning callback as they arrive and persisted on the assistant
+    message's meta_json so the card can re-render on reload."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
+
+    upstream = _mock_upstream(
+        _streaming_handler(
+            [
+                {"reasoning_content": "Let me "},
+                {"reasoning_content": "think."},
+                {"content": "Hello"},
+                {"content": " world"},
+            ]
+        )
+    )
+
+    reasoning_seen: list[str] = []
+    text_seen: list[str] = []
+
+    async def on_reasoning(c: str) -> None:
+        reasoning_seen.append(c)
+
+    async def on_chunk(c: str) -> None:
+        text_seen.append(c)
+
+    text = await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=SYSTEM,
+        model=MODEL,
+        on_chunk=on_chunk,
+        on_reasoning=on_reasoning,
+    )
+
+    assert text == "Hello world"
+    assert reasoning_seen == ["Let me ", "think."]
+    # Reasoning is not mixed into the visible answer.
+    assert text_seen == ["Hello", " world"]
+
+    msgs = await messages.list_by_conversation(conn, convo.id)
+    assistant = next(m for m in msgs if m.role == "assistant")
+    assert assistant.content == "Hello world"
+    meta = json.loads(assistant.meta_json)
+    assert meta["reasoning"] == "Let me think."
+
+
+async def test_run_agent_streaming_reasoning_field_fallback(
+    conn: AsyncEngine,
+) -> None:
+    """Some providers name the field `reasoning` rather than
+    `reasoning_content`; both are accepted."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
+
+    upstream = _mock_upstream(
+        _streaming_handler([{"reasoning": "hmm"}, {"content": "ok"}])
+    )
+
+    reasoning_seen: list[str] = []
+
+    async def on_reasoning(c: str) -> None:
+        reasoning_seen.append(c)
+
+    async def on_chunk(_: str) -> None:
+        return None
+
+    await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=SYSTEM,
+        model=MODEL,
+        on_chunk=on_chunk,
+        on_reasoning=on_reasoning,
+    )
+    assert reasoning_seen == ["hmm"]
+
+
+async def test_run_agent_streaming_without_reasoning_leaves_meta_null(
+    conn: AsyncEngine,
+) -> None:
+    """A provider that emits no reasoning must leave the assistant turn
+    exactly as before — no meta_json, no callback fired."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
+
+    upstream = _mock_upstream(_streaming_text_handler(["plain", " answer"]))
+
+    reasoning_seen: list[str] = []
+
+    async def on_reasoning(c: str) -> None:
+        reasoning_seen.append(c)
+
+    async def on_chunk(_: str) -> None:
+        return None
+
+    await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=SYSTEM,
+        model=MODEL,
+        on_chunk=on_chunk,
+        on_reasoning=on_reasoning,
+    )
+
+    assert reasoning_seen == []
+    msgs = await messages.list_by_conversation(conn, convo.id)
+    assistant = next(m for m in msgs if m.role == "assistant")
+    assert assistant.meta_json is None
 
 
 async def test_run_agent_streaming_rejects_non_object_tool_arguments(
