@@ -37,9 +37,19 @@
 #   docker compose -f docker-compose.local.yml up
 #   docker compose -f docker-compose.local.yml --profile frontend up
 
+# Sandbox runtime (Plan 11b-a): this stack is now meant to run under
+# `podman compose` (rootless). The agent spawns sandbox containers via the
+# rootless Podman control socket — no Docker daemon socket, no DinD. Sandbox
+# containers attach ONLY to `hermes-sandbox` (a separate bridge); the agent
+# stays on `hermes-local` and is never attached to `hermes-sandbox`, so a
+# sandbox has no network path to the agent's DB, secrets, or other services.
+# The agent reaches sandboxes solely through the control socket (exec API).
 networks:
   hermes-local:
     name: hermes-local
+    driver: bridge
+  hermes-sandbox:
+    name: hermes-sandbox
     driver: bridge
 
 services:
@@ -60,9 +70,18 @@ services:
       # dem sein, was die haex-claude-proxy SQLite-Resolver-Instanz liest
       # — sonst schlägt die Decryption beim Forwarding fehl.
       HERMES_SECRET_KEY: ${HERMES_SECRET_KEY}
+      # Sandbox runtime: rootless Podman control socket + isolated network.
+      HERMES_SANDBOX_SOCKET: ${HERMES_SANDBOX_SOCKET:-unix:///run/podman/podman.sock}
+      HERMES_SANDBOX_NETWORK: hermes-sandbox
+      HERMES_SANDBOX_IMAGE: ${HERMES_SANDBOX_IMAGE:-hermes-sandbox:dev}
     volumes:
       - hermes-data:/data
+      # Rootless Podman socket. Host path resolves to
+      # $XDG_RUNTIME_DIR/podman/podman.sock under `podman compose`. The agent
+      # uses it to create/exec/stop sandbox siblings.
+      - ${HERMES_PODMAN_SOCKET:-${XDG_RUNTIME_DIR}/podman/podman.sock}:/run/podman/podman.sock
     networks:
+      # Deliberately ONLY hermes-local — never hermes-sandbox.
       - hermes-local
     labels:
       - "traefik.enable=true"
@@ -193,7 +212,9 @@ services:
       # daher bewusst nicht auf 0.0.0.0 binden.
       - "127.0.0.1:${HERMES_LOCAL_DASHBOARD_PORT:-11000}:8080"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Rootless Podman socket mapped to Traefik's default docker endpoint, so
+      # label discovery works unchanged under `podman compose`.
+      - ${HERMES_PODMAN_SOCKET:-${XDG_RUNTIME_DIR}/podman/podman.sock}:/var/run/docker.sock:ro
     networks:
       - hermes-local
 

@@ -36,6 +36,19 @@ class Settings(BaseSettings):
     # (`{data_dir}/conversations/{id}/`). Defaults to the db_path's
     # parent so backups capture the DB + scratch together.
     data_dir: str | None = None
+    # --- Sandbox runtime (Plan 11b-a) ---------------------------------------
+    # Rootless Podman, Docker-API-compatible socket. When the socket is unset
+    # the agent boots without a sandbox manager (tests, sandbox-less deploys);
+    # any tool that needs a sandbox fails loudly rather than running in-process.
+    sandbox_socket: str = ""
+    sandbox_image: str = "hermes-sandbox:latest"
+    # Dedicated, locked-down network. Sandboxes attach here and nowhere else —
+    # never the agent's `internal` network (DB, secrets, other services).
+    sandbox_network: str = "hermes-sandbox"
+    # Mandatory per-container caps. No "unlimited" path exists.
+    sandbox_cpus: float = 1.0
+    sandbox_memory_mb: int = 1024
+    sandbox_disk_mb: int = 2048
 
 
 settings = Settings()  # type: ignore[call-arg]

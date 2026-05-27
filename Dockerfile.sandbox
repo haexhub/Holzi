@@ -1,0 +1,29 @@
+# Sandbox runtime image (Plan 11b-a).
+#
+# Minimal base for workspace + ephemeral sandboxes. The agent never runs
+# user/agent code, shell, or unbounded writes itself — it spawns one of these
+# containers (rootless Podman) and drives it through the Podman control socket
+# (exec). The container idles on `sleep infinity` so exec can attach; resource
+# limits and the isolated network are applied by the agent at create time, not
+# baked in here.
+#
+# 11b-a only needs the exec path. read_file/write_file/git as a richer in-
+# container API arrive in 11b-b.
+FROM debian:12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash coreutils ca-certificates git \
+ && rm -rf /var/lib/apt/lists/*
+
+# Unprivileged user — sandboxes never need root, and rootless Podman maps this
+# into an unprivileged host user namespace.
+RUN useradd --create-home --uid 1000 sandbox
+USER sandbox
+WORKDIR /workspace
+
+# Idle entrypoint; the agent overrides Cmd per exec. Keeping the container up
+# is what lets workspace sandboxes persist across exec calls.
+CMD ["sleep", "infinity"]
