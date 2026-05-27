@@ -545,3 +545,213 @@ async def test_run_agent_without_on_chunk_stays_non_streaming(
     )
     assert text == "ok"
     assert "stream" not in captured[0]
+
+
+async def test_run_agent_streaming_emits_tool_callbacks_and_persists_metadata(
+    conn: AsyncEngine,
+) -> None:
+    """A tool round fires on_tool_call before execution and on_tool_result
+    after, and persists name/arguments/status in the tool message's meta_json
+    so the conversation can be reconstructed on reload."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="echo me", ts=1001
+    )
+
+    tool_call_deltas: list[dict[str, Any]] = [
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "call_abc",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"text":"hi"}'},
+                }
+            ]
+        },
+    ]
+    handler, _ = _two_round_handler(tool_call_deltas, ["done"])
+    upstream = _mock_upstream(handler)
+
+    async def echo_handler(args: dict[str, Any]) -> str:
+        return f"echoed: {args['text']}"
+
+    tool = Tool(
+        name="echo",
+        description="echo it",
+        parameters_schema={"type": "object", "properties": {"text": {"type": "string"}}},
+        handler=echo_handler,
+    )
+
+    tool_calls_seen: list[tuple[str, str, dict[str, Any]]] = []
+    tool_results_seen: list[tuple[str, str, str]] = []
+
+    async def on_tool_call(call_id: str, name: str, args: dict[str, Any]) -> None:
+        tool_calls_seen.append((call_id, name, args))
+
+    async def on_tool_result(call_id: str, status: str, content: str) -> None:
+        tool_results_seen.append((call_id, status, content))
+
+    async def on_chunk(_: str) -> None:
+        return None
+
+    await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=SYSTEM,
+        model=MODEL,
+        tools=[tool],
+        on_chunk=on_chunk,
+        on_tool_call=on_tool_call,
+        on_tool_result=on_tool_result,
+    )
+
+    assert tool_calls_seen == [("call_abc", "echo", {"text": "hi"})]
+    assert tool_results_seen == [("call_abc", "success", "echoed: hi")]
+
+    msgs = await messages.list_by_conversation(conn, convo.id)
+    tool_msg = next(m for m in msgs if m.role == "tool")
+    meta = json.loads(tool_msg.meta_json)
+    assert meta["tool_call_id"] == "call_abc"
+    assert meta["name"] == "echo"
+    assert meta["arguments"] == {"text": "hi"}
+    assert meta["status"] == "success"
+    assert tool_msg.content == "echoed: hi"
+
+
+async def test_run_agent_streaming_marks_tool_error_status(
+    conn: AsyncEngine,
+) -> None:
+    """A tool whose handler raises is reported with status=error to the
+    callback and persisted as status=error."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="boom", ts=1001
+    )
+
+    tool_call_deltas: list[dict[str, Any]] = [
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "call_err",
+                    "type": "function",
+                    "function": {"name": "boom", "arguments": "{}"},
+                }
+            ]
+        },
+    ]
+    handler, _ = _two_round_handler(tool_call_deltas, ["recovered"])
+    upstream = _mock_upstream(handler)
+
+    async def boom_handler(_args: dict[str, Any]) -> str:
+        raise ValueError("kaboom")
+
+    tool = Tool(
+        name="boom",
+        description="explodes",
+        parameters_schema={"type": "object", "properties": {}},
+        handler=boom_handler,
+    )
+
+    tool_results_seen: list[tuple[str, str, str]] = []
+
+    async def on_tool_result(call_id: str, status: str, content: str) -> None:
+        tool_results_seen.append((call_id, status, content))
+
+    async def on_chunk(_: str) -> None:
+        return None
+
+    await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=SYSTEM,
+        model=MODEL,
+        tools=[tool],
+        on_chunk=on_chunk,
+        on_tool_result=on_tool_result,
+    )
+
+    assert len(tool_results_seen) == 1
+    call_id, status, content = tool_results_seen[0]
+    assert call_id == "call_err"
+    assert status == "error"
+    assert "kaboom" in content
+
+    msgs = await messages.list_by_conversation(conn, convo.id)
+    tool_msg = next(m for m in msgs if m.role == "tool")
+    meta = json.loads(tool_msg.meta_json)
+    assert meta["status"] == "error"
+
+
+async def test_run_agent_streaming_rejects_non_object_tool_arguments(
+    conn: AsyncEngine,
+) -> None:
+    """Valid JSON that isn't an object (e.g. a bare number) must produce a
+    clean tool error, not flow a non-dict into the handler/persistence."""
+    convo = await conversations.create(conn, channel="web", ts=1000)
+    await messages.append(
+        conn, conversation_id=convo.id, role="user", content="go", ts=1001
+    )
+
+    tool_call_deltas: list[dict[str, Any]] = [
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "call_bad",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": "123"},
+                }
+            ]
+        },
+    ]
+    handler, _ = _two_round_handler(tool_call_deltas, ["recovered"])
+    upstream = _mock_upstream(handler)
+
+    called = False
+
+    async def echo_handler(args: dict[str, Any]) -> str:
+        nonlocal called
+        called = True
+        return "ok"
+
+    tool = Tool(
+        name="echo",
+        description="echo",
+        parameters_schema={"type": "object", "properties": {}},
+        handler=echo_handler,
+    )
+
+    results: list[tuple[str, str, str]] = []
+
+    async def on_tool_result(call_id: str, status: str, content: str) -> None:
+        results.append((call_id, status, content))
+
+    async def on_chunk(_: str) -> None:
+        return None
+
+    await run_agent(
+        upstream=upstream,
+        db=conn,
+        conversation_id=convo.id,
+        system_prompt=SYSTEM,
+        model=MODEL,
+        tools=[tool],
+        on_chunk=on_chunk,
+        on_tool_result=on_tool_result,
+    )
+
+    # Handler never ran; the malformed arguments became a clean error result.
+    assert called is False
+    assert len(results) == 1
+    assert results[0][1] == "error"
+    assert "shape" in results[0][2]
+
+    msgs = await messages.list_by_conversation(conn, convo.id)
+    tool_msg = next(m for m in msgs if m.role == "tool")
+    meta = json.loads(tool_msg.meta_json)
+    assert meta["status"] == "error"
+    assert meta["arguments"] == {}

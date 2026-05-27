@@ -13,6 +13,24 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import ChatRunCancelled, run_agent
 from hermes.config import conversation_scratch_root, settings
+from hermes.events import (
+    CancelledEvent,
+    ChatStreamEnvelope,
+    DoneEvent,
+    ErrorData,
+    ErrorEvent,
+    RunData,
+    RunEvent,
+    SessionData,
+    SessionEvent,
+    TextData,
+    TextEvent,
+    ToolCallData,
+    ToolCallEvent,
+    ToolResultData,
+    ToolResultEvent,
+    to_sse,
+)
 from hermes.logging import logger
 from hermes.repository import (
     conversations,
@@ -70,10 +88,6 @@ class ChatRequest(BaseModel):
     conversation_id: int | None = None
 
 
-def _sse_event(event: str, data: dict[str, Any]) -> bytes:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
-
-
 def _classify_chat_error(exc: BaseException) -> tuple[str, int, str]:
     """Map an exception raised inside the agent loop to an error code and the
     HTTP status it would correspond to in a non-streaming world.
@@ -103,7 +117,19 @@ def _classify_chat_error(exc: BaseException) -> tuple[str, int, str]:
     return ("agent_error", 500, str(exc))
 
 
-@router.post("/chat")
+@router.post(
+    "/chat",
+    # The actual response is a StreamingResponse (text/event-stream), opaque to
+    # OpenAPI. Declaring the envelope here is documentation-only: it registers
+    # ChatStreamEnvelope (and every event subtype) as a schema component so the
+    # generated TS types include the discriminated union the frontend parses.
+    responses={
+        200: {
+            "model": ChatStreamEnvelope,
+            "description": "SSE stream of chat events (one envelope per block).",
+        }
+    },
+)
 async def api_chat(request: Request) -> Response:
     try:
         body = await request.json()
@@ -178,19 +204,37 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
     ) or settings.model
 
     async def gen() -> AsyncIterator[bytes]:
-        yield _sse_event("session", {"conversation_id": convo.id})
-        yield _sse_event("run", {"run_id": run_id})
+        yield to_sse(SessionEvent(data=SessionData(conversation_id=convo.id)))
+        yield to_sse(RunEvent(data=RunData(run_id=run_id)))
 
-        # Bridge run_agent's on_chunk callback (called from inside the agent
-        # task) to the SSE generator via an async queue. `None` is the
-        # sentinel that means "agent finished — drain and emit done/error".
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        # Bridge run_agent's callbacks (called from inside the agent task) to
+        # the SSE generator via an async queue carrying envelope events. `None`
+        # is the sentinel that means "agent finished — drain and emit
+        # done/error".
+        queue: asyncio.Queue[BaseModel | None] = asyncio.Queue()
         # Mutated by run_agent when the upstream provides usage stats —
         # surfaced into the agent_runs row by track_run's finalize step.
         metrics: dict[str, Any] = {}
 
         async def on_chunk(chunk: str) -> None:
-            await queue.put(chunk)
+            await queue.put(TextEvent(data=TextData(content=chunk)))
+
+        async def on_tool_call(call_id: str, name: str, args: dict[str, Any]) -> None:
+            await queue.put(
+                ToolCallEvent(
+                    data=ToolCallData(call_id=call_id, name=name, arguments=args)
+                )
+            )
+
+        async def on_tool_result(call_id: str, status: str, content: str) -> None:
+            # status is the literal "success" | "error" run_agent reports.
+            data = ToolResultData(
+                call_id=call_id,
+                status=status,  # type: ignore[arg-type]
+                result=content if status == "success" else None,
+                error=content if status == "error" else None,
+            )
+            await queue.put(ToolResultEvent(data=data))
 
         async def run_task() -> None:
             try:
@@ -210,6 +254,8 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
                         model=model,
                         tools=tools,
                         on_chunk=on_chunk,
+                        on_tool_call=on_tool_call,
+                        on_tool_result=on_tool_result,
                         cancel_event=cancel_event,
                         metrics=metrics,
                     )
@@ -222,17 +268,17 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
                 item = await queue.get()
                 if item is None:
                     break
-                yield _sse_event("text", {"content": item})
+                yield to_sse(item)
             # Re-raise any exception the agent task swallowed via its finally.
             await task
             await conversations.touch(db, convo.id)
-            yield _sse_event("done", {})
+            yield to_sse(DoneEvent())
         except ChatRunCancelled:
             # User-initiated cancel. `cancelled` is the single terminal
             # event for this turn — no trailing `done`. The frontend
             # renders the turn as aborted instead of appending a fake
             # assistant message.
-            yield _sse_event("cancelled", {})
+            yield to_sse(CancelledEvent())
         except Exception as exc:  # noqa: BLE001 — surface to client, don't crash worker
             code, status_code, message = _classify_chat_error(exc)
             logger.warning(
@@ -241,9 +287,10 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
                 code=code,
                 status_code=status_code,
             )
-            yield _sse_event(
-                "error",
-                {"code": code, "status_code": status_code, "message": message},
+            yield to_sse(
+                ErrorEvent(
+                    data=ErrorData(code=code, status_code=status_code, message=message)
+                )
             )
         finally:
             # `finally` runs both on the error path AND on client disconnect.
@@ -397,11 +444,63 @@ def _conversation_to_dict(c: Any) -> dict[str, Any]:
     }
 
 
+class ToolCallView(BaseModel):
+    """Structured view of a completed tool call, reconstructed from a persisted
+    `role:"tool"` message's `meta_json` + content so the frontend can render
+    the same card on reload as it showed live. `result` is set on success,
+    `error` on failure."""
+
+    call_id: str
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    status: Literal["success", "error"]
+    result: str | None = None
+    error: str | None = None
+
+
 class MessageResponse(BaseModel):
     id: int
     role: Literal["user", "assistant", "tool"]
     content: str
     ts: int
+    # Populated only for tool turns; null for user/assistant messages.
+    tool_call: ToolCallView | None = None
+
+
+def _tool_call_view_from_message(m: Any) -> ToolCallView | None:
+    """Build a ToolCallView from a persisted tool message. Tolerates the
+    pre-Plan-08 meta_json shape (`{tool_call_id, name}` with no arguments /
+    status) by defaulting status to "success" and arguments to {}."""
+    if m.role != "tool":
+        return None
+    meta: dict[str, Any] = {}
+    if m.meta_json:
+        try:
+            decoded = json.loads(m.meta_json)
+            meta = decoded if isinstance(decoded, dict) else {}
+        except json.JSONDecodeError:
+            meta = {}
+    status = meta.get("status", "success")
+    args = meta.get("arguments")
+    return ToolCallView(
+        call_id=meta.get("tool_call_id", ""),
+        name=meta.get("name", ""),
+        arguments=args if isinstance(args, dict) else {},
+        status=status if status in ("success", "error") else "success",
+        result=m.content if status != "error" else None,
+        error=m.content if status == "error" else None,
+    )
+
+
+def _message_to_dict(m: Any) -> dict[str, Any]:
+    view = _tool_call_view_from_message(m)
+    return {
+        "id": m.id,
+        "role": m.role,
+        "content": m.content,
+        "ts": m.ts,
+        "tool_call": view.model_dump() if view is not None else None,
+    }
 
 
 class ConversationDetailResponse(BaseModel):
@@ -447,10 +546,7 @@ async def api_get_conversation(
     msgs = await messages.list_by_conversation(db, conv_id, limit=limit)
     return {
         "conversation": _conversation_to_dict(convo),
-        "messages": [
-            {"id": m.id, "role": m.role, "content": m.content, "ts": m.ts}
-            for m in msgs
-        ],
+        "messages": [_message_to_dict(m) for m in msgs],
     }
 
 
