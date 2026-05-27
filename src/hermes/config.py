@@ -47,9 +47,16 @@ class Settings(BaseSettings):
     # never the agent's `internal` network (DB, secrets, other services).
     sandbox_network: str = "hermes-sandbox"
     # Mandatory per-container caps. No "unlimited" path exists.
+    # CPU + memory are hard caps (the host's rootless cgroup v2 must delegate
+    # the cpu + memory controllers — `Delegate=cpu cpuset memory pids`).
     sandbox_cpus: float = 1.0
     sandbox_memory_mb: int = 1024
     sandbox_disk_mb: int = 2048
+    # Disk quota is best-effort: overlay `StorageOpt size` only works on an
+    # XFS-backed store with pquota (ext4/btrfs reject it and the create fails).
+    # Off by default so the agent runs on any host; enable on XFS-backed
+    # production storage to actually cap sandbox disk usage.
+    sandbox_disk_quota: bool = False
 
 
 settings = Settings()  # type: ignore[call-arg]

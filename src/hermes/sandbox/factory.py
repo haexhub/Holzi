@@ -19,7 +19,9 @@ def build_sandbox_manager(
 ) -> tuple[SandboxManager, PodmanSandboxBackend] | None:
     if not settings.sandbox_socket:
         return None
-    backend = PodmanSandboxBackend(settings.sandbox_socket)
+    backend = PodmanSandboxBackend(
+        settings.sandbox_socket, disk_quota=settings.sandbox_disk_quota
+    )
     manager = SandboxManager(
         backend=backend,
         image=settings.sandbox_image,

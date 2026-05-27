@@ -48,7 +48,10 @@ def _socket_path(socket_url: str) -> str:
 
 
 class PodmanSandboxBackend:
-    def __init__(self, socket_url: str) -> None:
+    def __init__(self, socket_url: str, *, disk_quota: bool = False) -> None:
+        # Whether to apply the overlay disk quota — requires XFS+pquota, so it
+        # is opt-in; ext4/btrfs reject `StorageOpt size` and fail the create.
+        self._disk_quota = disk_quota
         # base_url host is ignored for UDS transport but required by httpx.
         # Finite default timeout on lifecycle calls so a wedged socket can't
         # block the single asyncio worker forever; only the exec *stream*
@@ -69,10 +72,11 @@ class PodmanSandboxBackend:
             "NanoCpus": int(spec.limits.cpus * 1_000_000_000),
             "Memory": spec.limits.memory_mb * 1024 * 1024,
             "NetworkMode": spec.network,
-            # Best-effort disk cap; honoured by storage drivers that support it
-            # (Podman overlay with size quotas). Documented limitation for v1.
-            "StorageOpt": {"size": f"{spec.limits.disk_mb}m"},
         }
+        # Disk quota only when explicitly enabled on XFS+pquota storage —
+        # otherwise the overlay driver rejects it and the create fails.
+        if self._disk_quota:
+            host_config["StorageOpt"] = {"size": f"{spec.limits.disk_mb}m"}
         body: dict[str, object] = {
             "Image": spec.image,
             # Idle entrypoint so the persistent container stays up for exec.
