@@ -715,3 +715,164 @@ async def test_api_chat_cross_channel_send_filters_web_target(
     assert len(tool_msgs) == 1
     assert "web" in tool_msgs[0]["content"]
     assert "error" in tool_msgs[0]["content"].lower()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/conversations/{id}/retry
+# ---------------------------------------------------------------------------
+
+
+async def test_retry_replaces_last_assistant_turn(
+    client: httpx.AsyncClient,
+) -> None:
+    """Retry drops the trailing assistant reply and regenerates it from the
+    same user message, streaming with the same SSE semantics as /api/chat."""
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    await messages.append(
+        app.state.db, conversation_id=convo.id, role="user", content="ask", ts=1001
+    )
+    await messages.append(
+        app.state.db,
+        conversation_id=convo.id,
+        role="assistant",
+        content="old answer",
+        ts=1002,
+    )
+    seen = _install_upstream_responses([_assistant_oneshot("new answer")])
+
+    async with client.stream(
+        "POST", f"/api/conversations/{convo.id}/retry", headers=AUTH
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    events = _parse_sse(body)
+    assert [name for name, _ in events] == ["session", "run", "text", "done"]
+    assert events[0][1]["conversation_id"] == convo.id
+    assert events[2][1]["content"] == "new answer"
+
+    # The old assistant turn is gone; the user message stays, new reply appended.
+    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    assert [(m.role, m.content) for m in msgs] == [
+        ("user", "ask"),
+        ("assistant", "new answer"),
+    ]
+    # The regenerated run saw only the surviving user turn as context.
+    sent_msgs = [m for m in seen[0]["messages"] if m["role"] != "system"]
+    assert sent_msgs == [{"role": "user", "content": "ask"}]
+
+
+async def test_retry_drops_tool_turns_after_last_user_message(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    await messages.append(
+        app.state.db, conversation_id=convo.id, role="user", content="ask", ts=1001
+    )
+    await messages.append(
+        app.state.db,
+        conversation_id=convo.id,
+        role="assistant",
+        content="",
+        ts=1002,
+        meta_json='{"tool_calls": [{"id": "c1", "type": "function", '
+        '"function": {"name": "save_note", "arguments": "{}"}}]}',
+    )
+    await messages.append(
+        app.state.db,
+        conversation_id=convo.id,
+        role="tool",
+        content="saved",
+        ts=1003,
+        meta_json='{"tool_call_id": "c1"}',
+    )
+    await messages.append(
+        app.state.db,
+        conversation_id=convo.id,
+        role="assistant",
+        content="done earlier",
+        ts=1004,
+    )
+    seen = _install_upstream_responses([_assistant_oneshot("regenerated")])
+
+    async with client.stream(
+        "POST", f"/api/conversations/{convo.id}/retry", headers=AUTH
+    ) as response:
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+        assert response.status_code == 200
+
+    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    assert [(m.role, m.content) for m in msgs] == [
+        ("user", "ask"),
+        ("assistant", "regenerated"),
+    ]
+    sent_msgs = [m for m in seen[0]["messages"] if m["role"] != "system"]
+    assert sent_msgs == [{"role": "user", "content": "ask"}]
+
+
+async def test_retry_rejects_conversation_without_user_message(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    await messages.append(
+        app.state.db,
+        conversation_id=convo.id,
+        role="assistant",
+        content="orphan",
+        ts=1001,
+    )
+    _install_upstream_responses([_assistant_oneshot("never reached")])
+
+    response = await client.post(
+        f"/api/conversations/{convo.id}/retry", headers=AUTH
+    )
+    assert response.status_code == 400
+    # Nothing was deleted.
+    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    assert [m.content for m in msgs] == ["orphan"]
+
+
+async def test_retry_rejects_non_web_conversation(
+    client: httpx.AsyncClient,
+) -> None:
+    convo = await conversations.create(app.state.db, channel="signal", ts=1000)
+    await messages.append(
+        app.state.db, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
+    await messages.append(
+        app.state.db,
+        conversation_id=convo.id,
+        role="assistant",
+        content="reply",
+        ts=1002,
+    )
+    _install_upstream_responses([_assistant_oneshot("never reached")])
+
+    response = await client.post(
+        f"/api/conversations/{convo.id}/retry", headers=AUTH
+    )
+    assert response.status_code == 400
+    # The signal thread is untouched.
+    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    assert [(m.role, m.content) for m in msgs] == [
+        ("user", "hi"),
+        ("assistant", "reply"),
+    ]
+
+
+async def test_retry_unknown_conversation_returns_404(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream_responses([_assistant_oneshot("never reached")])
+    response = await client.post("/api/conversations/99999/retry", headers=AUTH)
+    assert response.status_code == 404
+
+
+async def test_retry_requires_auth(client: httpx.AsyncClient) -> None:
+    response = await client.post("/api/conversations/1/retry")
+    assert response.status_code == 401

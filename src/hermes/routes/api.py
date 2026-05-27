@@ -116,7 +116,6 @@ async def api_chat(request: Request) -> Response:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     db: AsyncEngine = request.app.state.db
-    upstream: httpx.AsyncClient = request.app.state.upstream
 
     if payload.conversation_id is None:
         convo = await conversations.create(
@@ -141,6 +140,17 @@ async def api_chat(request: Request) -> Response:
     await messages.append(
         db, conversation_id=convo.id, role="user", content=payload.message
     )
+
+    return await _stream_web_agent_run(request, convo)
+
+
+async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
+    """Run the web agent over the conversation's current message history and
+    stream it as SSE. Shared by /api/chat (after appending the new user
+    message) and /api/conversations/{id}/retry (after trimming the trailing
+    assistant/tool tail) so retry is not a separate code path."""
+    db: AsyncEngine = request.app.state.db
+    upstream: httpx.AsyncClient = request.app.state.upstream
 
     tools = build_tool_catalog(
         db=db,
@@ -490,6 +500,41 @@ async def api_toggle_bookmark_conversation(
         # Lost-the-race between get() and set_bookmarked().
         raise HTTPException(status_code=404, detail="conversation not found")
     return _conversation_to_dict(updated)
+
+
+@router.post("/conversations/{conv_id}/retry")
+async def api_retry_conversation(request: Request, conv_id: int) -> Response:
+    """Regenerate the latest assistant response.
+
+    Trims every assistant/tool turn that followed the last user message,
+    then re-runs the web agent over the surviving context and streams the
+    new reply with the same SSE semantics as /api/chat.
+    """
+    db: AsyncEngine = request.app.state.db
+
+    convo = await conversations.get(db, conv_id)
+    if convo is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    # Same channel guard as /api/chat: retry is a web-only surface.
+    if convo.channel != WEB_CHANNEL:
+        raise HTTPException(
+            status_code=400,
+            detail="conversation_id must reference a web conversation",
+        )
+
+    last_user = await messages.last_user_message(db, conv_id)
+    if last_user is None:
+        raise HTTPException(
+            status_code=400,
+            detail="conversation has no user message to retry",
+        )
+
+    # Drop the assistant/tool tail so run_agent regenerates from the same
+    # context that produced the original reply (simplest persistence
+    # strategy — no superseded_at bookkeeping).
+    await messages.delete_after(db, conv_id, after_id=last_user.id)
+
+    return await _stream_web_agent_run(request, convo)
 
 
 # ---------------------------------------------------------------------------
