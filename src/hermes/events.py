@@ -61,6 +61,20 @@ class ToolResultData(BaseModel):
     error: str | None = None
 
 
+class ApprovalRequiredData(BaseModel):
+    """A risky tool call is paused awaiting the user's decision. The agent
+    blocks until a decision arrives via ``POST /api/approvals/{approval_id}``;
+    until then the stream stays open (heartbeats only). ``call_id`` ties this
+    back to the tool call that would run on approval; ``reason`` is the
+    human-readable risk explanation shown on the card."""
+
+    approval_id: str
+    call_id: str
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    reason: str
+
+
 class ErrorData(BaseModel):
     code: str
     status_code: int
@@ -104,6 +118,12 @@ class ToolResultEvent(BaseModel):
     data: ToolResultData
 
 
+class ApprovalRequiredEvent(BaseModel):
+    event: Literal["approval_required"] = "approval_required"
+    version: int = 1
+    data: ApprovalRequiredData
+
+
 class DoneEvent(BaseModel):
     event: Literal["done"] = "done"
     version: int = 1
@@ -128,6 +148,7 @@ ChatStreamEvent = Annotated[
     | TextEvent
     | ToolCallEvent
     | ToolResultEvent
+    | ApprovalRequiredEvent
     | DoneEvent
     | CancelledEvent
     | ErrorEvent,

@@ -94,6 +94,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # run_id → asyncio.Event for in-flight /api/chat turns. See
     # routes/api.py and hermes/agent.py for the contract.
     app.state.chat_runs = {}
+    # approval_id → asyncio.Future[ApprovalDecision] for tool calls paused
+    # awaiting user approval. Same single-worker invariant as chat_runs:
+    # POST /api/approvals/{id} resolves the future the agent task is awaiting.
+    app.state.approvals = {}
     app.state.encryptor = None
     app.state.oauth_driver = None
     app.state.upstream = None
