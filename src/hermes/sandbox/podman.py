@@ -39,11 +39,13 @@ from hermes.sandbox.models import (
     SandboxStatus,
 )
 
-# Slack for the tar header (512B) + padding around the single-file archive.
-# Any bytes past `FILE_SIZE_CAP + _READ_OVERHEAD_CAP` mean the payload itself
-# is over cap, so we can bail mid-stream without parsing.
-_READ_OVERHEAD_CAP = 4 * 1024
-_FILE_SIZE_CAP = FILE_SIZE_CAP  # local alias for readability
+# Slack on top of FILE_SIZE_CAP for the tar header (512B), end-of-archive
+# padding (1024B), and PAX extended headers that can be a few KB for long
+# paths. Past this, the payload itself is over cap and we bail mid-stream.
+_READ_OVERHEAD_CAP = 16 * 1024
+# Max bytes we read from a 4xx/5xx error body so a misbehaving socket can't
+# return an unbounded "detail" string and balloon agent memory.
+_ERROR_DETAIL_CAP = 4 * 1024
 
 logger = structlog.get_logger(__name__)
 
@@ -158,11 +160,15 @@ class PodmanSandboxBackend:
     async def read_file(self, handle: SandboxHandle, path: str) -> bytes:
         if not path.startswith("/"):
             raise SandboxError(f"read_file path must be absolute: {path}")
+        if path == "/":
+            # Symmetric with write_file's basename check — short-circuits the
+            # tar-parse-then-reject path with a clearer error message.
+            raise SandboxError(f"read_file path is a directory: {path}")
         # Stream the archive so we can bail before a hostile / runaway file
         # buffers gigabytes into the agent process. `_READ_OVERHEAD_CAP` covers
         # the tar header (512B) + padding for a single member; anything past
         # that means the payload itself exceeds the cap.
-        cap_with_overhead = _FILE_SIZE_CAP + _READ_OVERHEAD_CAP
+        cap_with_overhead = FILE_SIZE_CAP + _READ_OVERHEAD_CAP
         buf = bytearray()
         try:
             async with self._client.stream(
@@ -178,15 +184,20 @@ class PodmanSandboxBackend:
                 if resp.status_code == 409:
                     raise SandboxNotRunning(f"sandbox {handle.id} is not running")
                 if resp.status_code >= 400:
-                    detail = (await resp.aread()).decode("utf-8", "replace")
+                    detail = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        detail.extend(chunk)
+                        if len(detail) >= _ERROR_DETAIL_CAP:
+                            break
                     raise SandboxError(
-                        f"read_file {handle.id}:{path}: {resp.status_code} {detail}"
+                        f"read_file {handle.id}:{path}: {resp.status_code} "
+                        f"{detail[:_ERROR_DETAIL_CAP].decode('utf-8', 'replace')}"
                     )
                 async for chunk in resp.aiter_bytes():
                     buf.extend(chunk)
                     if len(buf) > cap_with_overhead:
                         raise SandboxFileTooLarge(
-                            f"{path} archive exceeds cap {_FILE_SIZE_CAP}"
+                            f"{path} archive exceeds cap {FILE_SIZE_CAP}"
                         )
         except httpx.HTTPError as exc:
             raise SandboxError(f"read_file {path}: {exc}") from exc
@@ -203,9 +214,9 @@ class PodmanSandboxBackend:
                         )
                     if not member.isfile():
                         continue
-                    if member.size > _FILE_SIZE_CAP:
+                    if member.size > FILE_SIZE_CAP:
                         raise SandboxFileTooLarge(
-                            f"{path} is {member.size} bytes, cap is {_FILE_SIZE_CAP}"
+                            f"{path} is {member.size} bytes, cap is {FILE_SIZE_CAP}"
                         )
                     extracted = tar.extractfile(member)
                     if extracted is None:
@@ -220,9 +231,9 @@ class PodmanSandboxBackend:
     ) -> None:
         if not path.startswith("/"):
             raise SandboxError(f"write_file path must be absolute: {path}")
-        if len(data) > _FILE_SIZE_CAP:
+        if len(data) > FILE_SIZE_CAP:
             raise SandboxFileTooLarge(
-                f"write to {path} is {len(data)} bytes, cap is {_FILE_SIZE_CAP}"
+                f"write to {path} is {len(data)} bytes, cap is {FILE_SIZE_CAP}"
             )
         # PUT /archive extracts a tar at `path` (which must be a directory).
         # We split into dir + basename and tar-wrap a single regular file.

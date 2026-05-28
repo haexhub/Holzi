@@ -374,11 +374,14 @@ async def test_add_crash_handler_dedupes_duplicates():
     assert len(events) == 1
 
     mgr.remove_crash_handler(handler)
-    backend.simulate_oom(handle.id)
-    # Re-fire would need a new sandbox_id; since the same id stays in
-    # `_reported_crashes`, no event fires either way — the point is the handler
-    # list is empty.
     assert mgr._crash_handlers == []  # noqa: SLF001
+    # And the removed handler really is silent: drive the watcher against a
+    # fresh workspace (so dedupe doesn't suppress the would-be event) and
+    # confirm `events` doesn't grow.
+    other = await mgr.get_workspace("ws-2")
+    backend.simulate_crash(other.id)
+    await mgr.check_health_once()
+    assert len(events) == 1
 
 
 # --- health watcher ----------------------------------------------------------
