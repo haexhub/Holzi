@@ -14,6 +14,7 @@ from hermes.sandbox import (
     SandboxKind,
     SandboxManager,
     SandboxNotRunning,
+    SandboxSpec,
     SandboxState,
 )
 from hermes.sandbox.fake import FakeSandboxBackend
@@ -250,6 +251,26 @@ def test_drain_frames_demuxes_stdout_and_stderr():
     events = _drain_frames(buffer)
     assert events == [ExecOutput("stdout", b"out"), ExecOutput("stderr", b"err")]
     assert len(buffer) == 0
+
+
+async def test_podman_backend_wraps_httpx_errors_as_sandbox_error():
+    """A transport failure must surface as SandboxError so the manager's
+    typed contract holds — raw httpx exceptions would bypass it."""
+    from hermes.sandbox import SandboxError
+    from hermes.sandbox.podman import PodmanSandboxBackend
+
+    backend = PodmanSandboxBackend("/tmp/hermes-nonexistent-podman.sock")
+    try:
+        spec = SandboxSpec(
+            kind=SandboxKind.ephemeral,
+            image="img:dev",
+            network="none",
+            limits=LIMITS,
+        )
+        with pytest.raises(SandboxError):
+            await backend.create(spec)
+    finally:
+        await backend.aclose()
 
 
 def test_drain_frames_keeps_partial_frame_for_next_chunk():

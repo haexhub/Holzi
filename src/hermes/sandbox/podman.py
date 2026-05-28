@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import struct
 from collections.abc import AsyncIterator, Mapping, Sequence
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -67,6 +67,27 @@ class PodmanSandboxBackend:
 
     # --- lifecycle ---------------------------------------------------------
 
+    # --- error-translation helpers ----------------------------------------
+    # All client calls go through these so transport/HTTP errors surface as
+    # SandboxError (the typed contract SandboxManager catches), not as raw
+    # httpx exceptions that would bypass the manager and propagate into the
+    # agent.
+
+    async def _request(
+        self, method: str, path: str, **kwargs: Any
+    ) -> httpx.Response:
+        try:
+            return await self._client.request(method, path, **kwargs)
+        except httpx.HTTPError as exc:
+            raise SandboxError(f"{method} {path} failed: {exc}") from exc
+
+    def _check(self, resp: httpx.Response, *, op: str) -> None:
+        """raise_for_status equivalent that converts to SandboxError."""
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise SandboxError(f"{op}: {resp.status_code} {resp.text}") from exc
+
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         # "none"/"" = no networking. The agent drives the sandbox over the
         # control socket (exec), so a sandbox needs no network — and with none
@@ -104,22 +125,22 @@ class PodmanSandboxBackend:
         return SandboxHandle(id=cid, kind=spec.kind, spec=spec)
 
     async def stop(self, handle: SandboxHandle) -> None:
-        resp = await self._client.post(f"/containers/{handle.id}/stop")
+        resp = await self._request("POST", f"/containers/{handle.id}/stop")
         if resp.status_code not in (204, 304, 404):
             raise SandboxError(f"stop failed: {resp.status_code} {resp.text}")
 
     async def remove(self, handle: SandboxHandle) -> None:
-        resp = await self._client.delete(
-            f"/containers/{handle.id}", params={"force": "true", "v": "true"}
+        resp = await self._request(
+            "DELETE", f"/containers/{handle.id}", params={"force": "true", "v": "true"}
         )
         if resp.status_code not in (200, 204, 404):
             raise SandboxError(f"remove failed: {resp.status_code} {resp.text}")
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
-        resp = await self._client.get(f"/containers/{handle.id}/json")
+        resp = await self._request("GET", f"/containers/{handle.id}/json")
         if resp.status_code == 404:
             return SandboxStatus(state=SandboxState.removed)
-        resp.raise_for_status()
+        self._check(resp, op=f"status {handle.id}")
         state = resp.json()["State"]
         return SandboxStatus(state=_map_state(state), exit_code=state.get("ExitCode"))
 
@@ -143,29 +164,32 @@ class PodmanSandboxBackend:
         if env:
             create_body["Env"] = [f"{k}={v}" for k, v in env.items()]
 
-        resp = await self._client.post(
-            f"/containers/{handle.id}/exec", json=create_body
+        resp = await self._request(
+            "POST", f"/containers/{handle.id}/exec", json=create_body
         )
         if resp.status_code == 404:
             raise SandboxNotRunning(f"sandbox {handle.id} is not running")
-        resp.raise_for_status()
+        self._check(resp, op=f"exec create {handle.id}")
         exec_id = resp.json()["Id"]
 
         buffer = bytearray()
-        async with self._client.stream(
-            "POST",
-            f"/exec/{exec_id}/start",
-            json={"Detach": False, "Tty": False},
-            # Output may take arbitrarily long; only the stream gets no read cap.
-            timeout=httpx.Timeout(30.0, read=None),
-        ) as stream:
-            if stream.status_code == 409:
-                raise SandboxNotRunning(f"sandbox {handle.id} is not running")
-            stream.raise_for_status()
-            async for chunk in stream.aiter_bytes():
-                buffer.extend(chunk)
-                for event in _drain_frames(buffer):
-                    yield event
+        try:
+            async with self._client.stream(
+                "POST",
+                f"/exec/{exec_id}/start",
+                json={"Detach": False, "Tty": False},
+                # Output may take arbitrarily long; only the stream gets no read cap.
+                timeout=httpx.Timeout(30.0, read=None),
+            ) as stream:
+                if stream.status_code == 409:
+                    raise SandboxNotRunning(f"sandbox {handle.id} is not running")
+                self._check(stream, op=f"exec start {exec_id}")
+                async for chunk in stream.aiter_bytes():
+                    buffer.extend(chunk)
+                    for event in _drain_frames(buffer):
+                        yield event
+        except httpx.HTTPError as exc:
+            raise SandboxError(f"exec stream {exec_id} failed: {exc}") from exc
 
         inspect = await self._post_get(f"/exec/{exec_id}/json")
         # Distinguish a genuine 0 from "not yet reaped / unknown" — `None or 0`
@@ -176,13 +200,13 @@ class PodmanSandboxBackend:
     # --- http helpers ------------------------------------------------------
 
     async def _post(self, path: str, *, json: dict | None = None) -> dict:
-        resp = await self._client.post(path, json=json)
-        resp.raise_for_status()
+        resp = await self._request("POST", path, json=json)
+        self._check(resp, op=f"POST {path}")
         return resp.json() if resp.content else {}
 
     async def _post_get(self, path: str) -> dict:
-        resp = await self._client.get(path)
-        resp.raise_for_status()
+        resp = await self._request("GET", path)
+        self._check(resp, op=f"GET {path}")
         return resp.json()
 
 
