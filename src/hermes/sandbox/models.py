@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
 
+# Per-call cap for read_file / write_file payloads. Lives here (not in
+# manager.py) so backends and the manager can import it without cycles.
+FILE_SIZE_CAP = 10 * 1024 * 1024
+
 
 class SandboxKind(StrEnum):
     """Workspace sandboxes persist per workspace; ephemeral ones are one-shot."""

@@ -11,13 +11,16 @@ from hermes.sandbox import (
     ExecExit,
     ExecOutput,
     ResourceLimits,
+    SandboxFileNotFound,
+    SandboxFileTooLarge,
     SandboxKind,
     SandboxManager,
     SandboxNotRunning,
     SandboxSpec,
     SandboxState,
+    WorkspaceCrash,
 )
-from hermes.sandbox.fake import FakeSandboxBackend
+from hermes.sandbox.fake import FAKE_FILE_SIZE_CAP, FakeSandboxBackend
 
 # "none" = no networking: the agent drives sandboxes over the control socket,
 # so a sandbox needs no network and cannot reach the agent or other sandboxes.
@@ -285,3 +288,244 @@ def test_drain_frames_keeps_partial_frame_for_next_chunk():
     buffer.extend(frame[6:])  # remainder arrives
     assert _drain_frames(buffer) == [ExecOutput("stdout", b"hello")]
     assert len(buffer) == 0
+
+
+# --- read_file / write_file -------------------------------------------------
+
+
+async def test_write_then_read_roundtrip():
+    mgr, _ = make_manager()
+    handle = await mgr.get_workspace("ws-1")
+    await mgr.write_file(handle, "/tmp/hello.txt", b"hello world")
+    data = await mgr.read_file(handle, "/tmp/hello.txt")
+    assert data == b"hello world"
+
+
+async def test_read_file_missing_raises_not_found():
+    mgr, _ = make_manager()
+    handle = await mgr.get_workspace("ws-1")
+    with pytest.raises(SandboxFileNotFound):
+        await mgr.read_file(handle, "/tmp/nope.txt")
+
+
+async def test_write_file_rejects_oversized_payload():
+    mgr, _ = make_manager()
+    handle = await mgr.get_workspace("ws-1")
+    oversized = b"x" * (FAKE_FILE_SIZE_CAP + 1)
+    with pytest.raises(SandboxFileTooLarge):
+        await mgr.write_file(handle, "/tmp/big.bin", oversized)
+
+
+async def test_read_write_on_dead_sandbox_raises_not_running():
+    mgr, backend = make_manager()
+    handle = await mgr.get_workspace("ws-1")
+    backend.simulate_crash(handle.id)
+    with pytest.raises(SandboxNotRunning):
+        await mgr.read_file(handle, "/tmp/anything")
+    with pytest.raises(SandboxNotRunning):
+        await mgr.write_file(handle, "/tmp/anything", b"data")
+
+
+async def test_manager_rejects_oversized_write_before_backend_call():
+    """Manager-side cap is defence in depth: oversized writes must fail before
+    we even ask the backend, so a runaway caller can't push GB into the wire."""
+    mgr, backend = make_manager()
+    handle = await mgr.get_workspace("ws-1")
+    oversized = b"x" * (FAKE_FILE_SIZE_CAP + 1)
+    with pytest.raises(SandboxFileTooLarge):
+        await mgr.write_file(handle, "/tmp/big.bin", oversized)
+    # Backend never received the payload — its store stays empty.
+    assert backend._containers[handle.id].files == {}  # noqa: SLF001
+
+
+# --- peek + handler hygiene --------------------------------------------------
+
+
+async def test_peek_workspace_returns_none_without_starting_sandbox():
+    """Used by the GET sandbox-status endpoint so it can report `absent`
+    without inadvertently spinning up a container."""
+    mgr, backend = make_manager()
+    assert mgr.peek_workspace("ws-never-started") is None
+    assert backend.live_count() == 0
+
+
+async def test_peek_workspace_returns_cached_handle_after_get():
+    mgr, _ = make_manager()
+    handle = await mgr.get_workspace("ws-1")
+    assert mgr.peek_workspace("ws-1") is handle
+
+
+async def test_add_crash_handler_dedupes_duplicates():
+    """Registering the same handler twice must not fire it twice — and a
+    single `remove_crash_handler` must fully unsubscribe."""
+    from hermes.sandbox import WorkspaceCrash
+
+    mgr, backend = make_manager()
+    events: list[WorkspaceCrash] = []
+
+    async def handler(crash: WorkspaceCrash) -> None:
+        events.append(crash)
+
+    mgr.add_crash_handler(handler)
+    mgr.add_crash_handler(handler)  # second add is a no-op
+    handle = await mgr.get_workspace("ws-1")
+    backend.simulate_crash(handle.id)
+    await mgr.check_health_once()
+    assert len(events) == 1
+
+    mgr.remove_crash_handler(handler)
+    assert mgr._crash_handlers == []  # noqa: SLF001
+    # And the removed handler really is silent: drive the watcher against a
+    # fresh workspace (so dedupe doesn't suppress the would-be event) and
+    # confirm `events` doesn't grow.
+    other = await mgr.get_workspace("ws-2")
+    backend.simulate_crash(other.id)
+    await mgr.check_health_once()
+    assert len(events) == 1
+
+
+# --- health watcher ----------------------------------------------------------
+
+
+async def test_health_watcher_emits_crash_event_once():
+    mgr, backend = make_manager()
+    events: list[WorkspaceCrash] = []
+
+    async def handler(crash: WorkspaceCrash) -> None:
+        events.append(crash)
+
+    mgr.add_crash_handler(handler)
+    handle = await mgr.get_workspace("ws-1")
+    backend.simulate_crash(handle.id)
+
+    await mgr.check_health_once()
+    assert len(events) == 1
+    assert events[0].workspace_id == "ws-1"
+    assert events[0].sandbox_id == handle.id
+    assert events[0].state is SandboxState.crashed
+
+    await mgr.check_health_once()
+    assert len(events) == 1
+
+
+async def test_health_watcher_skips_clean_exit():
+    mgr, backend = make_manager()
+    events: list[WorkspaceCrash] = []
+
+    async def handler(crash: WorkspaceCrash) -> None:
+        events.append(crash)
+
+    mgr.add_crash_handler(handler)
+    handle = await mgr.get_workspace("ws-1")
+    await backend.stop(handle)
+
+    await mgr.check_health_once()
+    assert events == []
+
+
+async def test_health_watcher_fires_again_after_restart():
+    mgr, backend = make_manager()
+    events: list[WorkspaceCrash] = []
+
+    async def handler(crash: WorkspaceCrash) -> None:
+        events.append(crash)
+
+    mgr.add_crash_handler(handler)
+    handle = await mgr.get_workspace("ws-1")
+    backend.simulate_crash(handle.id)
+    await mgr.check_health_once()
+    assert len(events) == 1
+
+    new_handle = await mgr.restart_workspace("ws-1")
+    backend.simulate_crash(new_handle.id)
+    await mgr.check_health_once()
+    assert len(events) == 2
+    assert events[1].sandbox_id == new_handle.id
+
+
+async def test_health_watcher_fires_for_oom():
+    mgr, backend = make_manager()
+    events: list[WorkspaceCrash] = []
+
+    async def handler(crash: WorkspaceCrash) -> None:
+        events.append(crash)
+
+    mgr.add_crash_handler(handler)
+    handle = await mgr.get_workspace("ws-1")
+    backend.simulate_oom(handle.id)
+
+    await mgr.check_health_once()
+    assert len(events) == 1
+    assert events[0].state is SandboxState.oom
+
+
+async def test_health_watcher_handler_exception_does_not_stop_loop():
+    mgr, backend = make_manager()
+    recorded: list[WorkspaceCrash] = []
+
+    async def bad_handler(crash: WorkspaceCrash) -> None:
+        raise RuntimeError("handler boom")
+
+    async def good_handler(crash: WorkspaceCrash) -> None:
+        recorded.append(crash)
+
+    mgr.add_crash_handler(bad_handler)
+    mgr.add_crash_handler(good_handler)
+    handle = await mgr.get_workspace("ws-1")
+    backend.simulate_crash(handle.id)
+
+    await mgr.check_health_once()
+    assert len(recorded) == 1
+    assert recorded[0].sandbox_id == handle.id
+
+
+async def test_health_watcher_clears_after_recovery():
+    mgr, backend = make_manager()
+    events: list[WorkspaceCrash] = []
+
+    async def handler(crash: WorkspaceCrash) -> None:
+        events.append(crash)
+
+    mgr.add_crash_handler(handler)
+    handle = await mgr.get_workspace("ws-1")
+    backend.simulate_crash(handle.id)
+    await mgr.check_health_once()
+    assert len(events) == 1
+
+    backend._containers[handle.id].state = SandboxState.running
+    await mgr.check_health_once()
+    assert len(events) == 1
+
+    backend.simulate_crash(handle.id)
+    await mgr.check_health_once()
+    assert len(events) == 2
+
+
+async def test_start_stop_health_watcher_is_idempotent():
+    mgr, _ = make_manager()
+    await mgr.start_health_watcher(interval=0.01)
+    await mgr.start_health_watcher(interval=0.01)
+    await mgr.stop_health_watcher()
+
+
+# --- restart clears reported-crash dedupe -----------------------------------
+
+
+async def test_restart_clears_crash_dedupe():
+    mgr, backend = make_manager()
+    events: list[WorkspaceCrash] = []
+
+    async def handler(crash: WorkspaceCrash) -> None:
+        events.append(crash)
+
+    mgr.add_crash_handler(handler)
+    handle = await mgr.get_workspace("ws-1")
+    backend.simulate_crash(handle.id)
+    await mgr.check_health_once()
+    assert len(events) == 1
+
+    new_handle = await mgr.restart_workspace("ws-1")
+    backend.simulate_crash(new_handle.id)
+    await mgr.check_health_once()
+    assert len(events) == 2
+    assert events[1].sandbox_id == new_handle.id

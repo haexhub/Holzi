@@ -15,3 +15,11 @@ class SandboxNotRunning(SandboxError):
     """Raised when an operation targets a sandbox that has crashed, OOM'd,
     exited, or been removed. The caller is expected to catch this and (for
     workspaces) offer a restart rather than crash the agent."""
+
+
+class SandboxFileTooLarge(SandboxError):
+    """Raised when read_file/write_file exceeds the per-call size cap."""
+
+
+class SandboxFileNotFound(SandboxError):
+    """Raised when read_file targets a path that does not exist in the sandbox."""

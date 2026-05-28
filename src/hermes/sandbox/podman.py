@@ -12,7 +12,9 @@ covered by opt-in integration tests and the manual verification in the plan.
 
 from __future__ import annotations
 
+import io
 import struct
+import tarfile
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -20,8 +22,14 @@ from urllib.parse import urlparse
 import httpx
 import structlog
 
-from hermes.sandbox.errors import SandboxError, SandboxNotRunning
+from hermes.sandbox.errors import (
+    SandboxError,
+    SandboxFileNotFound,
+    SandboxFileTooLarge,
+    SandboxNotRunning,
+)
 from hermes.sandbox.models import (
+    FILE_SIZE_CAP,
     ExecEvent,
     ExecExit,
     ExecOutput,
@@ -30,6 +38,14 @@ from hermes.sandbox.models import (
     SandboxState,
     SandboxStatus,
 )
+
+# Slack on top of FILE_SIZE_CAP for the tar header (512B), end-of-archive
+# padding (1024B), and PAX extended headers that can be a few KB for long
+# paths. Past this, the payload itself is over cap and we bail mid-stream.
+_READ_OVERHEAD_CAP = 16 * 1024
+# Max bytes we read from a 4xx/5xx error body so a misbehaving socket can't
+# return an unbounded "detail" string and balloon agent memory.
+_ERROR_DETAIL_CAP = 4 * 1024
 
 logger = structlog.get_logger(__name__)
 
@@ -135,6 +151,116 @@ class PodmanSandboxBackend:
         )
         if resp.status_code not in (200, 204, 404):
             raise SandboxError(f"remove failed: {resp.status_code} {resp.text}")
+
+    # --- file transfer ---------------------------------------------------
+    # The Docker REST API exposes /containers/{id}/archive (GET extracts a path
+    # as a tar, PUT extracts a tar into the container). One file per call is
+    # tar-wrapped here so callers can stay in plain bytes-land.
+
+    async def read_file(self, handle: SandboxHandle, path: str) -> bytes:
+        if not path.startswith("/"):
+            raise SandboxError(f"read_file path must be absolute: {path}")
+        if path == "/":
+            # Symmetric with write_file's basename check — short-circuits the
+            # tar-parse-then-reject path with a clearer error message.
+            raise SandboxError(f"read_file path is a directory: {path}")
+        # Stream the archive so we can bail before a hostile / runaway file
+        # buffers gigabytes into the agent process. `_READ_OVERHEAD_CAP` covers
+        # the tar header (512B) + padding for a single member; anything past
+        # that means the payload itself exceeds the cap.
+        cap_with_overhead = FILE_SIZE_CAP + _READ_OVERHEAD_CAP
+        buf = bytearray()
+        try:
+            async with self._client.stream(
+                "GET",
+                f"/containers/{handle.id}/archive",
+                params={"path": path},
+                timeout=httpx.Timeout(30.0, read=None),
+            ) as resp:
+                if resp.status_code == 404:
+                    raise SandboxFileNotFound(
+                        f"{path} not found in sandbox {handle.id}"
+                    )
+                if resp.status_code == 409:
+                    raise SandboxNotRunning(f"sandbox {handle.id} is not running")
+                if resp.status_code >= 400:
+                    detail = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        detail.extend(chunk)
+                        if len(detail) >= _ERROR_DETAIL_CAP:
+                            break
+                    raise SandboxError(
+                        f"read_file {handle.id}:{path}: {resp.status_code} "
+                        f"{detail[:_ERROR_DETAIL_CAP].decode('utf-8', 'replace')}"
+                    )
+                async for chunk in resp.aiter_bytes():
+                    buf.extend(chunk)
+                    if len(buf) > cap_with_overhead:
+                        raise SandboxFileTooLarge(
+                            f"{path} archive exceeds cap {FILE_SIZE_CAP}"
+                        )
+        except httpx.HTTPError as exc:
+            raise SandboxError(f"read_file {path}: {exc}") from exc
+
+        try:
+            with tarfile.open(fileobj=io.BytesIO(bytes(buf)), mode="r|") as tar:
+                for member in tar:
+                    # First non-empty member is the entry at `path`. A
+                    # directory there means the caller pointed at a folder —
+                    # silently returning some inner file would hide the bug.
+                    if member.isdir():
+                        raise SandboxError(
+                            f"{path} is a directory, not a file"
+                        )
+                    if not member.isfile():
+                        continue
+                    if member.size > FILE_SIZE_CAP:
+                        raise SandboxFileTooLarge(
+                            f"{path} is {member.size} bytes, cap is {FILE_SIZE_CAP}"
+                        )
+                    extracted = tar.extractfile(member)
+                    if extracted is None:
+                        continue
+                    return extracted.read()
+        except tarfile.TarError as exc:
+            raise SandboxError(f"read_file {path}: bad tar stream: {exc}") from exc
+        raise SandboxFileNotFound(f"{path} archive was empty")
+
+    async def write_file(
+        self, handle: SandboxHandle, path: str, data: bytes
+    ) -> None:
+        if not path.startswith("/"):
+            raise SandboxError(f"write_file path must be absolute: {path}")
+        if len(data) > FILE_SIZE_CAP:
+            raise SandboxFileTooLarge(
+                f"write to {path} is {len(data)} bytes, cap is {FILE_SIZE_CAP}"
+            )
+        # PUT /archive extracts a tar at `path` (which must be a directory).
+        # We split into dir + basename and tar-wrap a single regular file.
+        parent, _, name = path.rpartition("/")
+        if not name:
+            raise SandboxError(f"write_file path must not end with /: {path}")
+        parent = parent or "/"
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+        resp = await self._request(
+            "PUT",
+            f"/containers/{handle.id}/archive",
+            params={"path": parent},
+            content=buf.getvalue(),
+            headers={"Content-Type": "application/x-tar"},
+        )
+        if resp.status_code == 404:
+            # Parent directory missing — surface as not-found so the caller can
+            # mkdir-p via exec or write a different path.
+            raise SandboxFileNotFound(f"parent {parent} missing in sandbox {handle.id}")
+        if resp.status_code == 409:
+            raise SandboxNotRunning(f"sandbox {handle.id} is not running")
+        self._check(resp, op=f"write_file {handle.id}:{path}")
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         resp = await self._request("GET", f"/containers/{handle.id}/json")

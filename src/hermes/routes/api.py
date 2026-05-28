@@ -26,6 +26,8 @@ from hermes.events import (
     ReasoningEvent,
     RunData,
     RunEvent,
+    SandboxCrashedData,
+    SandboxCrashedEvent,
     SessionData,
     SessionEvent,
     TextData,
@@ -50,6 +52,7 @@ from hermes.repository import (
     llm_credentials as llm_credentials_repo,
 )
 from hermes.run_tracker import track_run
+from hermes.sandbox import WorkspaceCrash
 from hermes.tool_catalog import build_tool_catalog
 
 router = APIRouter(prefix="/api")
@@ -323,6 +326,27 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
                 # client disconnect) so a later decision can't hit a stale id.
                 approvals.pop(approval_id, None)
 
+        # Subscribe to sandbox crashes for the lifetime of this stream so a
+        # workspace dying mid-conversation surfaces as a `sandbox_crashed`
+        # event the UI can render with a Restart action. Surface-only: the
+        # health watcher never auto-restarts.
+        sandbox_manager = request.app.state.sandbox_manager
+
+        async def on_sandbox_crash(crash: WorkspaceCrash) -> None:
+            await queue.put(
+                SandboxCrashedEvent(
+                    data=SandboxCrashedData(
+                        workspace_id=crash.workspace_id,
+                        sandbox_id=crash.sandbox_id,
+                        state=crash.state.value,  # type: ignore[arg-type]
+                        exit_code=crash.exit_code,
+                    )
+                )
+            )
+
+        if sandbox_manager is not None:
+            sandbox_manager.add_crash_handler(on_sandbox_crash)
+
         async def run_task() -> None:
             try:
                 async with track_run(
@@ -419,6 +443,8 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
             # cancelled / client-disconnect). Leaving stale entries would
             # let a future cancel hit the wrong run after run_id reuse.
             chat_runs.pop(run_id, None)
+            if sandbox_manager is not None:
+                sandbox_manager.remove_crash_handler(on_sandbox_crash)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -1219,3 +1245,64 @@ async def api_delete_reminder(request: Request, reminder_id: int) -> Response:
     if not await reminders.delete(db, reminder_id):
         raise HTTPException(status_code=404, detail="reminder not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- workspace sandbox (Plan 11b-b) -----------------------------------------
+# These expose the SandboxManager so the UI can show liveness and offer the
+# Restart action behind the `sandbox_crashed` event. The sandbox manager is
+# only present when the agent is configured with a Podman socket; without it
+# these endpoints return 503 so the caller can fall back gracefully.
+
+
+class SandboxStatusResponse(BaseModel):
+    workspace_id: str
+    state: Literal["running", "exited", "crashed", "oom", "removed", "absent"]
+    exit_code: int | None = None
+
+
+def _require_sandbox_manager(request: Request) -> Any:
+    mgr = request.app.state.sandbox_manager
+    if mgr is None:
+        raise HTTPException(
+            status_code=503,
+            detail="sandbox runtime not configured",
+        )
+    return mgr
+
+
+@router.get(
+    "/workspaces/{workspace_id}/sandbox",
+    response_model=SandboxStatusResponse,
+)
+async def api_get_sandbox_status(
+    request: Request, workspace_id: str
+) -> dict[str, Any]:
+    mgr = _require_sandbox_manager(request)
+    handle = mgr.peek_workspace(workspace_id)
+    if handle is None:
+        # No sandbox has been spun up for this workspace yet. "absent" is
+        # distinct from "removed" (which means we *had* one and it's gone).
+        return {"workspace_id": workspace_id, "state": "absent", "exit_code": None}
+    status_value = await mgr.status(handle)
+    return {
+        "workspace_id": workspace_id,
+        "state": status_value.state.value,
+        "exit_code": status_value.exit_code,
+    }
+
+
+@router.post(
+    "/workspaces/{workspace_id}/sandbox/restart",
+    response_model=SandboxStatusResponse,
+)
+async def api_restart_sandbox(
+    request: Request, workspace_id: str
+) -> dict[str, Any]:
+    mgr = _require_sandbox_manager(request)
+    handle = await mgr.restart_workspace(workspace_id)
+    status_value = await mgr.status(handle)
+    return {
+        "workspace_id": workspace_id,
+        "state": status_value.state.value,
+        "exit_code": status_value.exit_code,
+    }
