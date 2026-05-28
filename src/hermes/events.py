@@ -117,6 +117,21 @@ class SubagentDoneData(BaseModel):
     error: str | None = None
 
 
+class SandboxCrashedData(BaseModel):
+    """A workspace sandbox died (crashed, OOM, or was removed) while the agent
+    was holding a cached handle. Surfaced by Plan 11b-b's health watcher so the
+    UI can offer a Restart action on the conversation. The agent does not
+    auto-restart — surface-only by design, to keep crash-loops from amplifying.
+    ``workspace_id`` identifies which workspace; ``state`` is one of
+    ``crashed``/``oom``/``removed``; ``exit_code`` may be ``None`` when the
+    runtime didn't report one."""
+
+    workspace_id: str
+    sandbox_id: str
+    state: Literal["crashed", "oom", "removed"]
+    exit_code: int | None = None
+
+
 class ErrorData(BaseModel):
     code: str
     status_code: int
@@ -190,6 +205,12 @@ class SubagentDoneEvent(BaseModel):
     data: SubagentDoneData
 
 
+class SandboxCrashedEvent(BaseModel):
+    event: Literal["sandbox_crashed"] = "sandbox_crashed"
+    version: int = 1
+    data: SandboxCrashedData
+
+
 class DoneEvent(BaseModel):
     event: Literal["done"] = "done"
     version: int = 1
@@ -219,6 +240,7 @@ ChatStreamEvent = Annotated[
     | SubagentStartEvent
     | SubagentTextEvent
     | SubagentDoneEvent
+    | SandboxCrashedEvent
     | DoneEvent
     | CancelledEvent
     | ErrorEvent,

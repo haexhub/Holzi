@@ -10,7 +10,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from hermes.sandbox.errors import SandboxNotRunning
+from hermes.sandbox.errors import (
+    SandboxFileNotFound,
+    SandboxFileTooLarge,
+    SandboxNotRunning,
+)
 from hermes.sandbox.models import (
     ExecEvent,
     ExecExit,
@@ -20,6 +24,10 @@ from hermes.sandbox.models import (
     SandboxStatus,
 )
 
+# Mirrors the cap PodmanSandboxBackend enforces; centralised so tests can pin
+# the boundary without reaching into the production backend.
+FAKE_FILE_SIZE_CAP = 10 * 1024 * 1024
+
 
 @dataclass
 class _Container:
@@ -28,6 +36,7 @@ class _Container:
     state: SandboxState
     networks: set[str] = field(default_factory=set)
     exit_code: int | None = None
+    files: dict[str, bytes] = field(default_factory=dict)
 
 
 class FakeSandboxBackend:
@@ -62,6 +71,33 @@ class FakeSandboxBackend:
         self._exec_script = None
         for ev in events:
             yield ev
+
+    async def read_file(self, handle: SandboxHandle, path: str) -> bytes:
+        container = self._require_running(handle)
+        if path not in container.files:
+            raise SandboxFileNotFound(f"{path} not found in sandbox {handle.id}")
+        data = container.files[path]
+        if len(data) > FAKE_FILE_SIZE_CAP:
+            raise SandboxFileTooLarge(
+                f"{path} is {len(data)} bytes, cap is {FAKE_FILE_SIZE_CAP}"
+            )
+        return data
+
+    async def write_file(
+        self, handle: SandboxHandle, path: str, data: bytes
+    ) -> None:
+        container = self._require_running(handle)
+        if len(data) > FAKE_FILE_SIZE_CAP:
+            raise SandboxFileTooLarge(
+                f"write to {path} is {len(data)} bytes, cap is {FAKE_FILE_SIZE_CAP}"
+            )
+        container.files[path] = bytes(data)
+
+    def _require_running(self, handle: SandboxHandle) -> _Container:
+        container = self._containers.get(handle.id)
+        if container is None or container.state is not SandboxState.running:
+            raise SandboxNotRunning(f"sandbox {handle.id} is not running")
+        return container
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         container = self._containers.get(handle.id)

@@ -6,8 +6,13 @@ socket; all code here is runtime-neutral behind `SandboxBackend`.
 """
 
 from hermes.sandbox.backend import SandboxBackend
-from hermes.sandbox.errors import SandboxError, SandboxNotRunning
-from hermes.sandbox.manager import SandboxManager
+from hermes.sandbox.errors import (
+    SandboxError,
+    SandboxFileNotFound,
+    SandboxFileTooLarge,
+    SandboxNotRunning,
+)
+from hermes.sandbox.manager import SandboxManager, WorkspaceCrash
 from hermes.sandbox.models import (
     ExecEvent,
     ExecExit,
@@ -27,6 +32,8 @@ __all__ = [
     "ResourceLimits",
     "SandboxBackend",
     "SandboxError",
+    "SandboxFileNotFound",
+    "SandboxFileTooLarge",
     "SandboxHandle",
     "SandboxKind",
     "SandboxManager",
@@ -34,4 +41,5 @@ __all__ = [
     "SandboxSpec",
     "SandboxState",
     "SandboxStatus",
+    "WorkspaceCrash",
 ]

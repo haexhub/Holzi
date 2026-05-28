@@ -39,6 +39,20 @@ class SandboxBackend(Protocol):
         sandbox is not in a runnable state."""
         ...
 
+    async def read_file(self, handle: SandboxHandle, path: str) -> bytes:
+        """Read `path` from the sandbox volume. Raises `SandboxFileNotFound`
+        if the path does not exist and `SandboxFileTooLarge` if the file is
+        larger than the per-call cap enforced by the backend."""
+        ...
+
+    async def write_file(
+        self, handle: SandboxHandle, path: str, data: bytes
+    ) -> None:
+        """Write `data` to `path` in the sandbox volume, creating parent
+        directories as needed. Raises `SandboxFileTooLarge` if `data` exceeds
+        the per-call cap."""
+        ...
+
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         ...
 

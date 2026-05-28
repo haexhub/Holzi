@@ -266,6 +266,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         built = build_sandbox_manager(settings)
         if built is not None:
             app.state.sandbox_manager, app.state.sandbox_backend = built
+            # Plan 11b-b: poll workspace liveness so a crash surfaces as a
+            # `sandbox_crashed` SSE event on any active chat stream. Watcher
+            # never auto-restarts — surface-only by design.
+            await app.state.sandbox_manager.start_health_watcher()
             logger.info("sandbox_manager_ready", network=settings.sandbox_network)
 
         async with mcp_session_manager(app.state.tool_catalog) as mcp_mgr:

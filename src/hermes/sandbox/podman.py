@@ -12,7 +12,9 @@ covered by opt-in integration tests and the manual verification in the plan.
 
 from __future__ import annotations
 
+import io
 import struct
+import tarfile
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -20,7 +22,12 @@ from urllib.parse import urlparse
 import httpx
 import structlog
 
-from hermes.sandbox.errors import SandboxError, SandboxNotRunning
+from hermes.sandbox.errors import (
+    SandboxError,
+    SandboxFileNotFound,
+    SandboxFileTooLarge,
+    SandboxNotRunning,
+)
 from hermes.sandbox.models import (
     ExecEvent,
     ExecExit,
@@ -30,6 +37,11 @@ from hermes.sandbox.models import (
     SandboxState,
     SandboxStatus,
 )
+
+# Per-call file size cap. Matches FILE_SIZE_CAP in manager.py — kept in sync
+# manually because the manager rejects oversized writes before they hit the
+# wire and the backend rejects oversized reads after the archive arrives.
+_FILE_SIZE_CAP = 10 * 1024 * 1024
 
 logger = structlog.get_logger(__name__)
 
@@ -135,6 +147,72 @@ class PodmanSandboxBackend:
         )
         if resp.status_code not in (200, 204, 404):
             raise SandboxError(f"remove failed: {resp.status_code} {resp.text}")
+
+    # --- file transfer ---------------------------------------------------
+    # The Docker REST API exposes /containers/{id}/archive (GET extracts a path
+    # as a tar, PUT extracts a tar into the container). One file per call is
+    # tar-wrapped here so callers can stay in plain bytes-land.
+
+    async def read_file(self, handle: SandboxHandle, path: str) -> bytes:
+        resp = await self._request(
+            "GET", f"/containers/{handle.id}/archive", params={"path": path}
+        )
+        if resp.status_code == 404:
+            raise SandboxFileNotFound(f"{path} not found in sandbox {handle.id}")
+        if resp.status_code == 409:
+            raise SandboxNotRunning(f"sandbox {handle.id} is not running")
+        self._check(resp, op=f"read_file {handle.id}:{path}")
+        # The body is a tar archive containing a single member at basename(path).
+        try:
+            with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r|") as tar:
+                for member in tar:
+                    if not member.isfile():
+                        continue
+                    if member.size > _FILE_SIZE_CAP:
+                        raise SandboxFileTooLarge(
+                            f"{path} is {member.size} bytes, cap is {_FILE_SIZE_CAP}"
+                        )
+                    extracted = tar.extractfile(member)
+                    if extracted is None:
+                        continue
+                    return extracted.read()
+        except tarfile.TarError as exc:
+            raise SandboxError(f"read_file {path}: bad tar stream: {exc}") from exc
+        raise SandboxFileNotFound(f"{path} archive was empty")
+
+    async def write_file(
+        self, handle: SandboxHandle, path: str, data: bytes
+    ) -> None:
+        if len(data) > _FILE_SIZE_CAP:
+            raise SandboxFileTooLarge(
+                f"write to {path} is {len(data)} bytes, cap is {_FILE_SIZE_CAP}"
+            )
+        # PUT /archive extracts a tar at `path` (which must be a directory).
+        # We split into dir + basename and tar-wrap a single regular file.
+        parent, _, name = path.rpartition("/")
+        if not name:
+            raise SandboxError(f"write_file path must not end with /: {path}")
+        parent = parent or "/"
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+        resp = await self._request(
+            "PUT",
+            f"/containers/{handle.id}/archive",
+            params={"path": parent},
+            content=buf.getvalue(),
+            headers={"Content-Type": "application/x-tar"},
+        )
+        if resp.status_code == 404:
+            # Parent directory missing — surface as not-found so the caller can
+            # mkdir-p via exec or write a different path.
+            raise SandboxFileNotFound(f"parent {parent} missing in sandbox {handle.id}")
+        if resp.status_code == 409:
+            raise SandboxNotRunning(f"sandbox {handle.id} is not running")
+        self._check(resp, op=f"write_file {handle.id}:{path}")
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         resp = await self._request("GET", f"/containers/{handle.id}/json")
