@@ -47,3 +47,9 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Integration tests (real Podman) are opt-in: there is no Podman daemon in CI.
+# Run them explicitly with `pytest -m integration`.
+addopts = "-m 'not integration'"
+markers = [
+    "integration: requires external services (e.g. a rootless Podman socket)",
+]

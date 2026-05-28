@@ -36,6 +36,31 @@ class Settings(BaseSettings):
     # (`{data_dir}/conversations/{id}/`). Defaults to the db_path's
     # parent so backups capture the DB + scratch together.
     data_dir: str | None = None
+    # --- Sandbox runtime (Plan 11b-a) ---------------------------------------
+    # Rootless Podman, Docker-API-compatible socket. When the socket is unset
+    # the agent boots without a sandbox manager (tests, sandbox-less deploys);
+    # any tool that needs a sandbox fails loudly rather than running in-process.
+    sandbox_socket: str = ""
+    # Matches `make sandbox-image` / the compose default tag.
+    sandbox_image: str = "hermes-sandbox:dev"
+    # Sandbox network. Default "none" = no networking at all: the agent drives
+    # sandboxes over the Podman control socket (exec), not the network, so a
+    # 11b-a sandbox needs no network and thus cannot reach the agent's DB,
+    # secrets, or other sandboxes. (Separate Podman networks are NOT isolated
+    # from each other by default — verified — so "own network" isn't enough.)
+    # Controlled egress for git/builds is a deliberate later addition (13/16).
+    sandbox_network: str = "none"
+    # Mandatory per-container caps. No "unlimited" path exists.
+    # CPU + memory are hard caps (the host's rootless cgroup v2 must delegate
+    # the cpu + memory controllers — `Delegate=cpu cpuset memory pids`).
+    sandbox_cpus: float = 1.0
+    sandbox_memory_mb: int = 1024
+    sandbox_disk_mb: int = 2048
+    # Disk quota is best-effort: overlay `StorageOpt size` only works on an
+    # XFS-backed store with pquota (ext4/btrfs reject it and the create fails).
+    # Off by default so the agent runs on any host; enable on XFS-backed
+    # production storage to actually cap sandbox disk usage.
+    sandbox_disk_quota: bool = False
 
 
 settings = Settings()  # type: ignore[call-arg]

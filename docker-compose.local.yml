@@ -37,6 +37,22 @@
 #   docker compose -f docker-compose.local.yml up
 #   docker compose -f docker-compose.local.yml --profile frontend up
 
+# Sandbox runtime (Plan 11b-a): this stack is now meant to run under
+# `podman compose` (rootless). The agent spawns sandbox containers via the
+# rootless Podman control socket — no Docker daemon socket, no DinD. Sandboxes
+# run with NO network (HERMES_SANDBOX_NETWORK=none): the agent drives them over
+# the control socket (exec), not the network, so a sandbox provably cannot
+# reach the agent's DB, secrets, or other sandboxes. (Separate Podman networks
+# are NOT isolated from each other by default — verified — so an "own network"
+# would not be enough.) Controlled egress for git/builds is a deliberate later
+# addition (Plans 13/16), not part of 11b-a.
+#
+# Tradeoff, stated honestly: mounting the Podman control socket into the agent
+# is agent->host container-control authority — anyone who reaches it can create
+# containers or attach one to hermes-local. Rootless Podman bounds the blast
+# radius to the unprivileged host user (no root daemon, unlike the Docker
+# socket), which is the v1 accepted posture; tightening this (socket proxy /
+# scoped API) is a hardening follow-up.
 networks:
   hermes-local:
     name: hermes-local
@@ -60,8 +76,17 @@ services:
       # dem sein, was die haex-claude-proxy SQLite-Resolver-Instanz liest
       # — sonst schlägt die Decryption beim Forwarding fehl.
       HERMES_SECRET_KEY: ${HERMES_SECRET_KEY}
+      # Sandbox runtime: rootless Podman control socket; sandboxes get no
+      # network (none) — isolation by absence of networking, see header.
+      HERMES_SANDBOX_SOCKET: ${HERMES_SANDBOX_SOCKET:-unix:///run/podman/podman.sock}
+      HERMES_SANDBOX_NETWORK: ${HERMES_SANDBOX_NETWORK:-none}
+      HERMES_SANDBOX_IMAGE: ${HERMES_SANDBOX_IMAGE:-hermes-sandbox:dev}
     volumes:
       - hermes-data:/data
+      # Rootless Podman socket. Host path resolves to
+      # $XDG_RUNTIME_DIR/podman/podman.sock under `podman compose`. The agent
+      # uses it to create/exec/stop sandbox siblings.
+      - ${HERMES_PODMAN_SOCKET:-${XDG_RUNTIME_DIR}/podman/podman.sock}:/run/podman/podman.sock
     networks:
       - hermes-local
     labels:
@@ -193,7 +218,9 @@ services:
       # daher bewusst nicht auf 0.0.0.0 binden.
       - "127.0.0.1:${HERMES_LOCAL_DASHBOARD_PORT:-11000}:8080"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Rootless Podman socket mapped to Traefik's default docker endpoint, so
+      # label discovery works unchanged under `podman compose`.
+      - ${HERMES_PODMAN_SOCKET:-${XDG_RUNTIME_DIR}/podman/podman.sock}:/var/run/docker.sock:ro
     networks:
       - hermes-local
 

@@ -2,12 +2,21 @@
 SHELL := /bin/bash
 
 # Pin all Compose invocations to the project so naming stays predictable
-# even when CWD differs.
-COMPOSE := docker compose -p hermes
+# even when CWD differs. Runtime is rootless Podman (Plan 11b-a): the agent
+# spawns sandbox siblings via the rootless Podman socket, so the stack itself
+# runs under `podman compose`. Override with `make COMPOSE_BIN="docker compose"`
+# if you must fall back to Docker (sandbox spawning won't work then).
+CONTAINER_BIN ?= podman
+COMPOSE_BIN ?= $(CONTAINER_BIN) compose
+COMPOSE := $(COMPOSE_BIN) -p hermes
 
-COMPOSE_LOCAL := docker compose -p hermes-local -f docker-compose.local.yml
+COMPOSE_LOCAL := $(COMPOSE_BIN) -p hermes-local -f docker-compose.local.yml
 
-.PHONY: help install dev lint typecheck test up up-traefik up-local up-local-full frontend-reinstall down down-local logs logs-local ps ps-local clean token
+# Built outside compose — sandboxes are spawned dynamically by the agent, not
+# declared as a service.
+SANDBOX_IMAGE ?= hermes-sandbox:dev
+
+.PHONY: help install dev lint typecheck test up up-traefik up-local up-local-full sandbox-image frontend-reinstall down down-local logs logs-local ps ps-local clean token
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} \
@@ -34,11 +43,14 @@ up: ## docker compose up (external Traefik on host)
 up-traefik: ## docker compose up with bundled Traefik (greenfield boxes)
 	$(COMPOSE) --profile traefik up -d
 
-up-local: ## Local dev-stack on *.localhost (backend only, no frontend)
+up-local: sandbox-image ## Local dev-stack on *.localhost (backend only, no frontend)
 	$(COMPOSE_LOCAL) up -d --build
 
-up-local-full: ## Local dev-stack + holzi-frontend (Nuxt dev with HMR)
+up-local-full: sandbox-image ## Local dev-stack + holzi-frontend (Nuxt dev with HMR)
 	$(COMPOSE_LOCAL) --profile frontend up -d --build
+
+sandbox-image: ## Build the sandbox runtime image used for workspace/ephemeral sandboxes
+	$(CONTAINER_BIN) build -t $(SANDBOX_IMAGE) -f Dockerfile.sandbox .
 
 frontend-reinstall: ## Recreate holzi-frontend with fresh node_modules (run after package.json/lockfile changes)
 	$(COMPOSE_LOCAL) --profile frontend up -d --force-recreate --renew-anon-volumes holzi-frontend

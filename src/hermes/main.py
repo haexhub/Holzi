@@ -26,6 +26,7 @@ from hermes.routes.chat import router as chat_router
 from hermes.routes.llm import router as llm_router
 from hermes.routes.messenger import router as messenger_router
 from hermes.run_tracker import track_run
+from hermes.sandbox.factory import build_sandbox_manager
 from hermes.scheduler import ConversationSweepScheduler, ReminderScheduler
 from hermes.signal.lifecycle import rebuild_signal_worker_from_db
 from hermes.telegram.lifecycle import rebuild_telegram_worker_from_db
@@ -113,6 +114,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.scheduler = None
     app.state.conversation_sweeper = None
     app.state.tool_catalog = []
+    # Sandbox runtime (Plan 11b-a). None when no sandbox socket is configured.
+    app.state.sandbox_manager = None
+    app.state.sandbox_backend = None
 
     try:
         app.state.db = await init_db(settings.db_path)
@@ -257,6 +261,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         await app.state.conversation_sweeper.start()
 
+        # Sandbox manager: present only when a Podman socket is configured.
+        # Workspace/ephemeral sandboxes are spawned lazily on first use.
+        built = build_sandbox_manager(settings)
+        if built is not None:
+            app.state.sandbox_manager, app.state.sandbox_backend = built
+            logger.info("sandbox_manager_ready", network=settings.sandbox_network)
+
         async with mcp_session_manager(app.state.tool_catalog) as mcp_mgr:
             app.state.mcp_manager = mcp_mgr
             yield
@@ -267,6 +278,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.scheduler.stop()
         if app.state.conversation_sweeper is not None:
             await app.state.conversation_sweeper.stop()
+        if app.state.sandbox_manager is not None:
+            await app.state.sandbox_manager.shutdown()
+        if app.state.sandbox_backend is not None:
+            await app.state.sandbox_backend.aclose()
         if app.state.signal_worker is not None:
             await app.state.signal_worker.stop()
         if app.state.signal_http is not None:
