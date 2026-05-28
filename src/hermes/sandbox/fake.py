@@ -16,6 +16,7 @@ from hermes.sandbox.errors import (
     SandboxNotRunning,
 )
 from hermes.sandbox.models import (
+    FILE_SIZE_CAP,
     ExecEvent,
     ExecExit,
     SandboxHandle,
@@ -24,9 +25,8 @@ from hermes.sandbox.models import (
     SandboxStatus,
 )
 
-# Mirrors the cap PodmanSandboxBackend enforces; centralised so tests can pin
-# the boundary without reaching into the production backend.
-FAKE_FILE_SIZE_CAP = 10 * 1024 * 1024
+# Re-export under the legacy name so existing tests don't need to switch import.
+FAKE_FILE_SIZE_CAP = FILE_SIZE_CAP
 
 
 @dataclass

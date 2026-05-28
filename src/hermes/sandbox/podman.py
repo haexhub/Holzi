@@ -29,6 +29,7 @@ from hermes.sandbox.errors import (
     SandboxNotRunning,
 )
 from hermes.sandbox.models import (
+    FILE_SIZE_CAP,
     ExecEvent,
     ExecExit,
     ExecOutput,
@@ -38,10 +39,11 @@ from hermes.sandbox.models import (
     SandboxStatus,
 )
 
-# Per-call file size cap. Matches FILE_SIZE_CAP in manager.py — kept in sync
-# manually because the manager rejects oversized writes before they hit the
-# wire and the backend rejects oversized reads after the archive arrives.
-_FILE_SIZE_CAP = 10 * 1024 * 1024
+# Slack for the tar header (512B) + padding around the single-file archive.
+# Any bytes past `FILE_SIZE_CAP + _READ_OVERHEAD_CAP` mean the payload itself
+# is over cap, so we can bail mid-stream without parsing.
+_READ_OVERHEAD_CAP = 4 * 1024
+_FILE_SIZE_CAP = FILE_SIZE_CAP  # local alias for readability
 
 logger = structlog.get_logger(__name__)
 
@@ -154,18 +156,51 @@ class PodmanSandboxBackend:
     # tar-wrapped here so callers can stay in plain bytes-land.
 
     async def read_file(self, handle: SandboxHandle, path: str) -> bytes:
-        resp = await self._request(
-            "GET", f"/containers/{handle.id}/archive", params={"path": path}
-        )
-        if resp.status_code == 404:
-            raise SandboxFileNotFound(f"{path} not found in sandbox {handle.id}")
-        if resp.status_code == 409:
-            raise SandboxNotRunning(f"sandbox {handle.id} is not running")
-        self._check(resp, op=f"read_file {handle.id}:{path}")
-        # The body is a tar archive containing a single member at basename(path).
+        if not path.startswith("/"):
+            raise SandboxError(f"read_file path must be absolute: {path}")
+        # Stream the archive so we can bail before a hostile / runaway file
+        # buffers gigabytes into the agent process. `_READ_OVERHEAD_CAP` covers
+        # the tar header (512B) + padding for a single member; anything past
+        # that means the payload itself exceeds the cap.
+        cap_with_overhead = _FILE_SIZE_CAP + _READ_OVERHEAD_CAP
+        buf = bytearray()
         try:
-            with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r|") as tar:
+            async with self._client.stream(
+                "GET",
+                f"/containers/{handle.id}/archive",
+                params={"path": path},
+                timeout=httpx.Timeout(30.0, read=None),
+            ) as resp:
+                if resp.status_code == 404:
+                    raise SandboxFileNotFound(
+                        f"{path} not found in sandbox {handle.id}"
+                    )
+                if resp.status_code == 409:
+                    raise SandboxNotRunning(f"sandbox {handle.id} is not running")
+                if resp.status_code >= 400:
+                    detail = (await resp.aread()).decode("utf-8", "replace")
+                    raise SandboxError(
+                        f"read_file {handle.id}:{path}: {resp.status_code} {detail}"
+                    )
+                async for chunk in resp.aiter_bytes():
+                    buf.extend(chunk)
+                    if len(buf) > cap_with_overhead:
+                        raise SandboxFileTooLarge(
+                            f"{path} archive exceeds cap {_FILE_SIZE_CAP}"
+                        )
+        except httpx.HTTPError as exc:
+            raise SandboxError(f"read_file {path}: {exc}") from exc
+
+        try:
+            with tarfile.open(fileobj=io.BytesIO(bytes(buf)), mode="r|") as tar:
                 for member in tar:
+                    # First non-empty member is the entry at `path`. A
+                    # directory there means the caller pointed at a folder —
+                    # silently returning some inner file would hide the bug.
+                    if member.isdir():
+                        raise SandboxError(
+                            f"{path} is a directory, not a file"
+                        )
                     if not member.isfile():
                         continue
                     if member.size > _FILE_SIZE_CAP:
@@ -183,6 +218,8 @@ class PodmanSandboxBackend:
     async def write_file(
         self, handle: SandboxHandle, path: str, data: bytes
     ) -> None:
+        if not path.startswith("/"):
+            raise SandboxError(f"write_file path must be absolute: {path}")
         if len(data) > _FILE_SIZE_CAP:
             raise SandboxFileTooLarge(
                 f"write to {path} is {len(data)} bytes, cap is {_FILE_SIZE_CAP}"

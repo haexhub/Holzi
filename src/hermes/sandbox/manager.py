@@ -17,8 +17,9 @@ from contextlib import asynccontextmanager
 import structlog
 
 from hermes.sandbox.backend import SandboxBackend
-from hermes.sandbox.errors import SandboxError
+from hermes.sandbox.errors import SandboxError, SandboxFileTooLarge
 from hermes.sandbox.models import (
+    FILE_SIZE_CAP,
     ExecEvent,
     ResourceLimits,
     SandboxHandle,
@@ -32,10 +33,6 @@ from hermes.sandbox.models import (
 # A clean `exited` is excluded — workspaces idle on `sleep infinity`, so a
 # zero-exit is unusual but not a crash signal that warrants an alert.
 _DEAD_STATES = frozenset({SandboxState.crashed, SandboxState.oom, SandboxState.removed})
-
-# Per-workspace size cap mirrored by the Podman backend; centralising the
-# constant means the manager rejects oversize calls before they hit the wire.
-FILE_SIZE_CAP = 10 * 1024 * 1024
 
 CrashHandler = Callable[["WorkspaceCrash"], Awaitable[None]]
 
@@ -116,6 +113,14 @@ class SandboxManager:
 
     # --- workspace lifecycle ----------------------------------------------
 
+    def peek_workspace(self, workspace_id: str) -> SandboxHandle | None:
+        """Return the cached workspace handle without starting a sandbox.
+
+        Distinct from `get_workspace`: the GET sandbox-status endpoint wants
+        "do you have a handle?" answered without side effects, so it can
+        report `absent` instead of inadvertently spinning up a container."""
+        return self._workspaces.get(workspace_id)
+
     async def get_workspace(self, workspace_id: str) -> SandboxHandle:
         """Return the workspace sandbox, starting it on first use."""
         existing = self._workspaces.get(workspace_id)
@@ -177,6 +182,13 @@ class SandboxManager:
     async def write_file(
         self, handle: SandboxHandle, path: str, data: bytes
     ) -> None:
+        # Reject before the bytes hit the wire so a runaway caller can't ship
+        # a multi-GB payload into the runtime and then have the backend bail
+        # post-allocation. Backends enforce again as defence in depth.
+        if len(data) > FILE_SIZE_CAP:
+            raise SandboxFileTooLarge(
+                f"write to {path} is {len(data)} bytes, cap is {FILE_SIZE_CAP}"
+            )
         await self._backend.write_file(handle, path, data)
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
@@ -186,8 +198,11 @@ class SandboxManager:
 
     def add_crash_handler(self, handler: CrashHandler) -> None:
         """Subscribe to workspace-crash events. Handlers run sequentially in
-        the watcher's task; they must not raise (errors are logged + dropped)."""
-        self._crash_handlers.append(handler)
+        the watcher's task and must be fast / non-blocking — a slow handler
+        delays every other workspace's poll *and* `stop_health_watcher`.
+        Registering the same handler twice is a no-op."""
+        if handler not in self._crash_handlers:
+            self._crash_handlers.append(handler)
 
     def remove_crash_handler(self, handler: CrashHandler) -> None:
         """Unsubscribe a handler. No-op if it isn't registered — callers in
@@ -267,7 +282,10 @@ class SandboxManager:
                         error=str(exc),
                     )
         else:
-            # Recovered (e.g. after a restart that bypassed restart_workspace).
+            # The same container reports `running` again (the in-place flip is
+            # rare — typically the next poll just sees a fresh handle after
+            # `restart_workspace` already cleared the entry). Clear so a later
+            # crash on this same sandbox surfaces instead of being deduped.
             current = self._reported_crashes.get(workspace_id)
             if current == handle.id:
                 self._reported_crashes.pop(workspace_id, None)

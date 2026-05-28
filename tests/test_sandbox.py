@@ -326,6 +326,61 @@ async def test_read_write_on_dead_sandbox_raises_not_running():
         await mgr.write_file(handle, "/tmp/anything", b"data")
 
 
+async def test_manager_rejects_oversized_write_before_backend_call():
+    """Manager-side cap is defence in depth: oversized writes must fail before
+    we even ask the backend, so a runaway caller can't push GB into the wire."""
+    mgr, backend = make_manager()
+    handle = await mgr.get_workspace("ws-1")
+    oversized = b"x" * (FAKE_FILE_SIZE_CAP + 1)
+    with pytest.raises(SandboxFileTooLarge):
+        await mgr.write_file(handle, "/tmp/big.bin", oversized)
+    # Backend never received the payload — its store stays empty.
+    assert backend._containers[handle.id].files == {}  # noqa: SLF001
+
+
+# --- peek + handler hygiene --------------------------------------------------
+
+
+async def test_peek_workspace_returns_none_without_starting_sandbox():
+    """Used by the GET sandbox-status endpoint so it can report `absent`
+    without inadvertently spinning up a container."""
+    mgr, backend = make_manager()
+    assert mgr.peek_workspace("ws-never-started") is None
+    assert backend.live_count() == 0
+
+
+async def test_peek_workspace_returns_cached_handle_after_get():
+    mgr, _ = make_manager()
+    handle = await mgr.get_workspace("ws-1")
+    assert mgr.peek_workspace("ws-1") is handle
+
+
+async def test_add_crash_handler_dedupes_duplicates():
+    """Registering the same handler twice must not fire it twice — and a
+    single `remove_crash_handler` must fully unsubscribe."""
+    from hermes.sandbox import WorkspaceCrash
+
+    mgr, backend = make_manager()
+    events: list[WorkspaceCrash] = []
+
+    async def handler(crash: WorkspaceCrash) -> None:
+        events.append(crash)
+
+    mgr.add_crash_handler(handler)
+    mgr.add_crash_handler(handler)  # second add is a no-op
+    handle = await mgr.get_workspace("ws-1")
+    backend.simulate_crash(handle.id)
+    await mgr.check_health_once()
+    assert len(events) == 1
+
+    mgr.remove_crash_handler(handler)
+    backend.simulate_oom(handle.id)
+    # Re-fire would need a new sandbox_id; since the same id stays in
+    # `_reported_crashes`, no event fires either way — the point is the handler
+    # list is empty.
+    assert mgr._crash_handlers == []  # noqa: SLF001
+
+
 # --- health watcher ----------------------------------------------------------
 
 

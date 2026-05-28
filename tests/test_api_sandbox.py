@@ -5,6 +5,9 @@ sandbox manager is configured. Without one (the default in tests), they must
 return 503 cleanly so the frontend can fall back to "no sandbox" instead of
 spinning on a hung promise."""
 
+import json
+from typing import Any
+
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
@@ -106,4 +109,112 @@ async def test_sandbox_restart_returns_running_status(
         assert body["state"] == SandboxState.running.value
     finally:
         await app.state.sandbox_manager.shutdown()
+        app.state.sandbox_manager = None
+
+
+# --- SSE crash-handler pairing ----------------------------------------------
+
+
+def _install_upstream_oneshot(content: str) -> None:
+    """Mirror of `test_api_chat`'s helper — pinned here so this test file
+    stays self-contained and we don't reach into another test module."""
+
+    def _to_sse(payload: dict[str, Any]) -> bytes:
+        msg = payload["choices"][0]["message"]
+        out = b""
+        if msg.get("content"):
+            chunk = {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": msg["content"]},
+                        "finish_reason": None,
+                    }
+                ]
+            }
+            out += f"data: {json.dumps(chunk)}\n\n".encode()
+        final = {
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+        }
+        out += f"data: {json.dumps(final)}\n\n".encode()
+        out += b"data: [DONE]\n\n"
+        return out
+
+    body = _to_sse(
+        {
+            "id": "chatcmpl-test",
+            "model": "claude-opus-4-7",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=httpx.ByteStream(body),
+        )
+
+    app.state.upstream = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://fake-proxy",
+    )
+
+
+async def test_chat_stream_subscribes_and_unsubscribes_crash_handler(
+    client: httpx.AsyncClient,
+) -> None:
+    """Every open chat stream registers one crash handler and removes it on
+    finish — otherwise per-request closures would accumulate forever.
+
+    ASGITransport buffers the SSE response completely, so we can't assert
+    "subscribed mid-flight" the obvious way. Instead we spy add/remove and
+    assert each is called exactly once, with the same handler, and the
+    handler list is empty after the stream concludes."""
+    mgr = SandboxManager(
+        backend=FakeSandboxBackend(),
+        image="hermes-sandbox:test",
+        network="none",
+        default_limits=ResourceLimits(cpus=1.0, memory_mb=512, disk_mb=1024),
+    )
+    app.state.sandbox_manager = mgr
+
+    added: list[Any] = []
+    removed: list[Any] = []
+    original_add = mgr.add_crash_handler
+    original_remove = mgr.remove_crash_handler
+
+    def spy_add(handler: Any) -> None:
+        added.append(handler)
+        original_add(handler)
+
+    def spy_remove(handler: Any) -> None:
+        removed.append(handler)
+        original_remove(handler)
+
+    mgr.add_crash_handler = spy_add  # type: ignore[method-assign]
+    mgr.remove_crash_handler = spy_remove  # type: ignore[method-assign]
+
+    try:
+        _install_upstream_oneshot("hi back")
+
+        async with client.stream(
+            "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
+        ) as response:
+            assert response.status_code == 200
+            async for _ in response.aiter_bytes():
+                pass
+
+        assert len(added) == 1
+        assert len(removed) == 1
+        assert added[0] is removed[0]
+        assert mgr._crash_handlers == []  # noqa: SLF001
+    finally:
+        await mgr.shutdown()
         app.state.sandbox_manager = None

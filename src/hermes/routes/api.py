@@ -1278,7 +1278,7 @@ async def api_get_sandbox_status(
     request: Request, workspace_id: str
 ) -> dict[str, Any]:
     mgr = _require_sandbox_manager(request)
-    handle = mgr._workspaces.get(workspace_id)  # noqa: SLF001 -- single owner
+    handle = mgr.peek_workspace(workspace_id)
     if handle is None:
         # No sandbox has been spun up for this workspace yet. "absent" is
         # distinct from "removed" (which means we *had* one and it's gone).
