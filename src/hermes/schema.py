@@ -1,6 +1,6 @@
 """SQLAlchemy Core table definitions.
 
-The non-virtual tables (conversations, messages, notes, reminders, todos)
+The non-virtual tables (conversations, messages, notes, agent_tasks)
 live here as `Table` objects. The FTS5 virtual tables and their
 synchronisation triggers stay in `schema.sql` and are applied via raw SQL
 in `init_db()` — SQLAlchemy doesn't natively model SQLite FTS5.
@@ -115,28 +115,54 @@ notes = Table(
 Index("notes_tags", notes.c.tags)
 
 
-reminders = Table(
-    "reminders",
+# Scheduled and one-shot agent runs (Plan 16). Two shapes:
+#   - One-shot: `schedule = NULL`, `due_at` is the firing time. After
+#     `mark_run` records the firing, `enabled` flips to 0; the row stays so
+#     the user can still see its history. `due_at` is not cleared.
+#   - Recurring: `schedule` is a 5-field cron expression interpreted in
+#     `timezone`. `due_at` carries the *materialised* next firing — computed
+#     at create time and rolled forward by `mark_run` after each tick — so
+#     the scheduler's "enabled AND due_at <= now" query stays cheap and
+#     index-friendly (no cron eval in the hot path).
+# Invariant `due_at IS NOT NULL` enforced at the repository layer rather
+# than via a DB CHECK so we can evolve the trigger shape (e.g. interval,
+# ical) without an awkward SQLite table rebuild. `last_run_id` is a loose
+# pointer at the agent_runs row the scheduler produced last (NULL until
+# the first firing); see the column comment below for why it isn't a real FK.
+agent_tasks = Table(
+    "agent_tasks",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("due_at", Integer, nullable=False),
-    Column("message", Text, nullable=False),
-    Column("channel", Text, nullable=False, server_default="signal"),
-    Column("fired_at", Integer),
+    Column("title", Text, nullable=False),
+    Column("prompt", Text, nullable=False),
+    # unix epoch seconds for one-shot; NULL for recurring.
+    Column("due_at", Integer),
+    # 5-field cron string for recurring; NULL for one-shot.
+    Column("schedule", Text),
+    # IANA tz name. Defaults to UTC so callers that don't care don't have to
+    # think about it; recurring cron evaluation honours this.
+    Column("timezone", Text, nullable=False, server_default="UTC"),
+    # 0 | 1. One-shot tasks auto-flip to 0 after their single firing; the
+    # pause/resume endpoint toggles this for recurring ones.
+    Column("enabled", Integer, nullable=False, server_default="1"),
+    Column("last_run_at", Integer),
+    # 'success' | 'cancelled' | 'error' | 'running' — mirrors agent_runs.status.
+    Column("last_status", Text),
+    # Loose reference to agent_runs.id — no FK constraint to avoid a
+    # cyclic schema with agent_runs.agent_task_id (SQLite can't add FKs
+    # via ALTER, so SQLAlchemy's use_alter degrades to "no FK at all").
+    # The scheduler clears this field when the underlying run row is
+    # gone; a stale id is harmless (the UI falls back to "no run yet").
+    Column("last_run_id", Text),
     Column("created_at", Integer, nullable=False),
+    Column("updated_at", Integer, nullable=False),
 )
 
-# Partial index ("WHERE fired_at IS NULL") — kept in schema.sql since
-# SQLAlchemy 2.0 partial-index DDL is awkward across dialects.
-
-todos = Table(
-    "todos",
-    metadata,
-    Column("id", Integer, primary_key=True),
-    Column("content", Text, nullable=False),
-    Column("tags", Text),
-    Column("done_at", Integer),
-    Column("created_at", Integer, nullable=False),
+# Hot-path for the scheduler tick: every poll we ask "what's enabled and due?".
+Index(
+    "agent_tasks_enabled_due",
+    agent_tasks.c.enabled,
+    agent_tasks.c.due_at,
 )
 
 
@@ -231,6 +257,14 @@ agent_runs = Table(
     # without stream_options.include_usage).
     Column("input_tokens", Integer),
     Column("output_tokens", Integer),
+    # Set when this run was triggered by an `agent_tasks` row (scheduled or
+    # run-now). NULL for plain /api/chat or signal/telegram-driven runs. SET
+    # NULL on delete: a deleted task shouldn't drag its run history with it.
+    Column(
+        "agent_task_id",
+        Integer,
+        ForeignKey("agent_tasks.id", ondelete="SET NULL"),
+    ),
 )
 
 Index(

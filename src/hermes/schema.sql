@@ -1,9 +1,8 @@
 -- SQLite-specific schema that SQLAlchemy doesn't model directly:
--- FTS5 virtual tables, their content-sync triggers, and the partial
--- index on pending reminders. The regular tables live in `schema.py`
--- and are created via `metadata.create_all()` in `init_db()`. Statements
--- here run after the metadata create and use `CREATE ... IF NOT EXISTS`
--- so re-running on an existing DB is a no-op.
+-- FTS5 virtual tables and their content-sync triggers. The regular
+-- tables live in `schema.py` and are created via `metadata.create_all()`
+-- in `init_db()`. Statements here run after the metadata create and use
+-- `CREATE ... IF NOT EXISTS` so re-running on an existing DB is a no-op.
 
 -- ---------------------------------------------------------------------------
 -- messages FTS5 + sync triggers.
@@ -52,12 +51,6 @@ CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
   INSERT INTO notes_fts(rowid, key, content, tags)
     VALUES (new.id, new.key, new.content, new.tags);
 END;
-
--- ---------------------------------------------------------------------------
--- Partial index on pending reminders (scheduler hot-path).
--- ---------------------------------------------------------------------------
-CREATE INDEX IF NOT EXISTS reminders_due_pending
-  ON reminders(due_at) WHERE fired_at IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- llm_credentials: at most one active row + a stable read-view used by

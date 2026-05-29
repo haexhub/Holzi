@@ -57,12 +57,15 @@ async def track_run(
     channel: str,
     model: str,
     metrics: dict[str, Any] | None = None,
+    agent_task_id: int | None = None,
 ) -> AsyncIterator[None]:
     """Insert a 'running' row, finalise it once the context exits.
 
     `metrics` is the dict the caller will hand to `run_agent`'s
     `metrics=` parameter. We read `input_tokens` / `output_tokens` out of
-    it on exit if the agent populated them.
+    it on exit if the agent populated them. `agent_task_id` is set by the
+    scheduler so the run row can be linked back to the originating task
+    (Plan 16).
 
     Re-raises whatever exception the wrapped code raised — this is a
     pure side-effect helper, never a swallower.
@@ -75,6 +78,7 @@ async def track_run(
         channel=channel,
         model=model,
         started_at=started_at,
+        agent_task_id=agent_task_id,
     )
     structlog.contextvars.bind_contextvars(
         run_id=run_id, conversation_id=conversation_id, channel=channel

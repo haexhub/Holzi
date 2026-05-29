@@ -11,8 +11,8 @@ Schema lives in two places:
 - `schema.py` — SQLAlchemy Core `Table` definitions for the regular
   tables. Applied via `metadata.create_all()`.
 - `schema.sql` — SQLite-specific bits SQLAlchemy doesn't model: FTS5
-  virtual tables, sync triggers, the partial reminders index. Applied
-  as raw SQL after the metadata create.
+  virtual tables and their sync triggers. Applied as raw SQL after the
+  metadata create.
 """
 from importlib.resources import files
 
@@ -58,7 +58,7 @@ async def init_db(path: str) -> AsyncEngine:
         # plus check_same_thread=False keeps a single shared in-memory DB
         # alive for the lifetime of the engine. **Warning**: StaticPool
         # serialises every operation through one connection, so any
-        # concurrent caller (e.g. the reminder scheduler running in
+        # concurrent caller (e.g. the agent-task scheduler running in
         # parallel with a request) will race on transaction state. Use
         # file-based paths for anything beyond toy/scripts; the test
         # suite explicitly switches to tmp_path SQLite files for this
@@ -127,6 +127,22 @@ async def _apply_lightweight_migrations(conn) -> None:
                 "WHERE expires_at IS NULL AND bookmarked = 0"
             ),
             {"window": settings.conversation_ttl_days * 86_400},
+        )
+
+    # Plan 16: agent_tasks replaces reminders + todos. Drop the legacy tables
+    # on upgrade so re-running metadata.create_all() doesn't recreate them
+    # via leftover SQLAlchemy references in old code paths. The data was
+    # bot-internal scratch state (Signal pings + the agent's todo list) —
+    # acceptable loss in exchange for one canonical scheduled-task concept.
+    await conn.execute(text("DROP INDEX IF EXISTS reminders_due_pending"))
+    await conn.execute(text("DROP TABLE IF EXISTS reminders"))
+    await conn.execute(text("DROP TABLE IF EXISTS todos"))
+
+    cols = await conn.execute(text("PRAGMA table_info(agent_runs)"))
+    existing = {row[1] for row in cols.all()}
+    if "agent_task_id" not in existing:
+        await conn.execute(
+            text("ALTER TABLE agent_runs ADD COLUMN agent_task_id INTEGER")
         )
 
 
