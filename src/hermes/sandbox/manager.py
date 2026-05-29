@@ -20,6 +20,7 @@ from hermes.sandbox.backend import SandboxBackend
 from hermes.sandbox.errors import SandboxError, SandboxFileTooLarge
 from hermes.sandbox.models import (
     FILE_SIZE_CAP,
+    DirEntry,
     ExecEvent,
     ResourceLimits,
     SandboxHandle,
@@ -190,6 +191,11 @@ class SandboxManager:
                 f"write to {path} is {len(data)} bytes, cap is {FILE_SIZE_CAP}"
             )
         await self._backend.write_file(handle, path, data)
+
+    async def list_dir(
+        self, handle: SandboxHandle, path: str
+    ) -> list[DirEntry]:
+        return await self._backend.list_dir(handle, path)
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         return await self._backend.status(handle)

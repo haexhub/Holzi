@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     # Off by default so the agent runs on any host; enable on XFS-backed
     # production storage to actually cap sandbox disk usage.
     sandbox_disk_quota: bool = False
+    # --- Workspace browser (Plan 12) ---------------------------------------
+    # Comma-separated workspace ids the read-only browser exposes. Empty by
+    # default — the API still answers but reports an empty root list, which
+    # the frontend renders as "no workspaces configured". Each id is a
+    # SandboxManager workspace key; tree/file reads spin the sandbox up on
+    # first use via the existing `get_workspace` semantics.
+    workspace_roots: str = ""
 
 
 settings = Settings()  # type: ignore[call-arg]

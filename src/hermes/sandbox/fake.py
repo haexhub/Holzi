@@ -11,12 +11,14 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from hermes.sandbox.errors import (
+    SandboxError,
     SandboxFileNotFound,
     SandboxFileTooLarge,
     SandboxNotRunning,
 )
 from hermes.sandbox.models import (
     FILE_SIZE_CAP,
+    DirEntry,
     ExecEvent,
     ExecExit,
     SandboxHandle,
@@ -92,6 +94,67 @@ class FakeSandboxBackend:
                 f"write to {path} is {len(data)} bytes, cap is {FAKE_FILE_SIZE_CAP}"
             )
         container.files[path] = bytes(data)
+
+    async def list_dir(
+        self, handle: SandboxHandle, path: str
+    ) -> list[DirEntry]:
+        container = self._require_running(handle)
+        # Directories don't exist as first-class entries in the fake — they
+        # are inferred from the `files` map. Normalise the query path to
+        # `/...` with no trailing slash so prefix matching is unambiguous.
+        if not path.startswith("/"):
+            raise SandboxError(f"list_dir path must be absolute: {path}")
+        normalised = path.rstrip("/") or "/"
+        prefix = "/" if normalised == "/" else normalised + "/"
+
+        # A path is treated as an existing directory if any stored file lives
+        # under it. The exact path being a file is rejected — the Podman
+        # backend rejects this case too and the API layer relies on it.
+        if normalised in container.files:
+            raise SandboxError(f"{path} is not a directory")
+        has_children = any(
+            stored.startswith(prefix) for stored in container.files
+        )
+        if not has_children:
+            # `/workspace` is always present in a real workspace sandbox (it's
+            # the mounted volume), even when nothing has been written yet —
+            # mirror that so the API contract for an empty workspace is
+            # "200 with empty entries", not "404".
+            if normalised == "/workspace":
+                return []
+            raise SandboxFileNotFound(
+                f"{path} not found in sandbox {handle.id}"
+            )
+
+        # Collect the *next* segment after the prefix for every stored file:
+        # if the file lives directly under `path`, it's a file entry; if
+        # there's anything deeper, the next segment is a directory.
+        files: dict[str, int] = {}
+        dirs: set[str] = set()
+        for stored, data in container.files.items():
+            if not stored.startswith(prefix):
+                continue
+            rest = stored[len(prefix) :]
+            if not rest:
+                continue
+            head, sep, _ = rest.partition("/")
+            if sep:
+                dirs.add(head)
+            else:
+                files[head] = len(data)
+        # A name listed as both a dir and a file in the fake's flat map is
+        # impossible in real POSIX — collapse to dir so the test double
+        # mirrors what the Podman backend would observe.
+        entries: list[DirEntry] = []
+        for name in sorted(dirs):
+            entries.append(DirEntry(name=name, entry_type="dir", size=0))
+        for name in sorted(files):
+            if name in dirs:
+                continue
+            entries.append(
+                DirEntry(name=name, entry_type="file", size=files[name])
+            )
+        return entries
 
     def _require_running(self, handle: SandboxHandle) -> _Container:
         container = self._containers.get(handle.id)

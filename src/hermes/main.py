@@ -25,6 +25,7 @@ from hermes.routes.api import router as api_router
 from hermes.routes.chat import router as chat_router
 from hermes.routes.llm import router as llm_router
 from hermes.routes.messenger import router as messenger_router
+from hermes.routes.workspace import router as workspace_router
 from hermes.run_tracker import track_run
 from hermes.sandbox.factory import build_sandbox_manager
 from hermes.scheduler import ConversationSweepScheduler, ReminderScheduler
@@ -307,6 +308,7 @@ app.include_router(chat_router)
 app.include_router(api_router)
 app.include_router(llm_router)
 app.include_router(messenger_router)
+app.include_router(workspace_router)
 
 
 @app.get("/healthz")

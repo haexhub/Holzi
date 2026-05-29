@@ -30,6 +30,7 @@ from hermes.sandbox.errors import (
 )
 from hermes.sandbox.models import (
     FILE_SIZE_CAP,
+    DirEntry,
     ExecEvent,
     ExecExit,
     ExecOutput,
@@ -261,6 +262,78 @@ class PodmanSandboxBackend:
         if resp.status_code == 409:
             raise SandboxNotRunning(f"sandbox {handle.id} is not running")
         self._check(resp, op=f"write_file {handle.id}:{path}")
+
+    # --- directory listing ------------------------------------------------
+    # `find -mindepth 1 -maxdepth 1 -printf` is the most portable way to get
+    # type + size + basename for each child in a single round-trip. The
+    # `[ -d "$path" ]` guard ahead of it distinguishes "missing directory"
+    # (find prints to stderr and returns 1) from "path is a regular file"
+    # (find would happily list the file itself without the guard).
+
+    async def list_dir(
+        self, handle: SandboxHandle, path: str
+    ) -> list[DirEntry]:
+        if not path.startswith("/"):
+            raise SandboxError(f"list_dir path must be absolute: {path}")
+        # `printf` format is `<type>\t<size>\t<basename>` per entry. `%y`
+        # collapses to a single character (`f`/`d`/`l`/…), which we map to
+        # the public entry_type below.
+        script = (
+            'if [ ! -e "$1" ]; then exit 44; fi; '
+            'if [ ! -d "$1" ]; then exit 45; fi; '
+            'find "$1" -mindepth 1 -maxdepth 1 -printf "%y\\t%s\\t%f\\n"'
+        )
+        stdout = bytearray()
+        stderr = bytearray()
+        exit_code: int | None = None
+        async for event in self.exec(handle, ["sh", "-c", script, "_", path]):
+            if isinstance(event, ExecOutput):
+                if event.stream == "stdout":
+                    stdout.extend(event.data)
+                else:
+                    stderr.extend(event.data)
+            elif isinstance(event, ExecExit):
+                exit_code = event.exit_code
+        if exit_code is None:
+            raise SandboxError(f"list_dir {path}: exec ended without exit")
+        if exit_code == 44:
+            raise SandboxFileNotFound(
+                f"{path} not found in sandbox {handle.id}"
+            )
+        if exit_code == 45:
+            raise SandboxError(f"{path} is not a directory")
+        if exit_code != 0:
+            raise SandboxError(
+                f"list_dir {path} failed: exit {exit_code} "
+                f"{bytes(stderr).decode('utf-8', 'replace')}"
+            )
+        entries: list[DirEntry] = []
+        for raw_line in bytes(stdout).splitlines():
+            line = raw_line.decode("utf-8", "replace")
+            if not line:
+                continue
+            parts = line.split("\t", 2)
+            if len(parts) != 3:
+                # A pathological filename containing a literal newline would
+                # split awkwardly here — drop the malformed line rather than
+                # surfacing a half-parsed entry the UI would misrender.
+                continue
+            type_code, size_str, name = parts
+            try:
+                size = int(size_str)
+            except ValueError:
+                continue
+            entry_type: Literal["file", "dir", "other"]
+            if type_code == "f":
+                entry_type = "file"
+            elif type_code == "d":
+                entry_type = "dir"
+            else:
+                entry_type = "other"
+            entries.append(
+                DirEntry(name=name, entry_type=entry_type, size=size)
+            )
+        return entries
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         resp = await self._request("GET", f"/containers/{handle.id}/json")
