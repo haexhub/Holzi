@@ -358,7 +358,7 @@ async def test_api_chat_passes_tool_catalog_to_agent(
     names = {t["function"]["name"] for t in tools}
     assert "recall_memory" in names
     assert "save_note" in names
-    assert "todo_add" in names
+    assert "task_create" in names
 
 
 async def test_api_chat_uses_active_credential_model(

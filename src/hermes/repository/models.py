@@ -49,22 +49,27 @@ class Note:
 
 
 @dataclass(frozen=True, slots=True)
-class Reminder:
-    id: int
-    due_at: int
-    message: str
-    channel: str
-    fired_at: int | None
-    created_at: int
+class AgentTask:
+    """A scheduled or one-shot job that runs `prompt` through the agent loop.
 
+    Exactly one of `due_at` / `schedule` is set: `due_at` is unix epoch
+    seconds for a one-shot, `schedule` is a 5-field cron expression
+    interpreted in `timezone` for a recurring task. `last_run_*` are
+    populated by the scheduler after each firing.
+    """
 
-@dataclass(frozen=True, slots=True)
-class Todo:
     id: int
-    content: str
-    tags: str | None
-    done_at: int | None
+    title: str
+    prompt: str
+    due_at: int | None
+    schedule: str | None
+    timezone: str
+    enabled: bool
+    last_run_at: int | None
+    last_status: str | None
+    last_run_id: str | None
     created_at: int
+    updated_at: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +116,9 @@ class AgentRun:
     error_trace: str | None
     input_tokens: int | None
     output_tokens: int | None
+    # Set when the scheduler triggered this run from an `agent_tasks` row
+    # (Plan 16). NULL for plain /api/chat or messenger-driven runs.
+    agent_task_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

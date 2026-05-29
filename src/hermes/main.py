@@ -28,7 +28,7 @@ from hermes.routes.messenger import router as messenger_router
 from hermes.routes.workspace import router as workspace_router
 from hermes.run_tracker import track_run
 from hermes.sandbox.factory import build_sandbox_manager
-from hermes.scheduler import ConversationSweepScheduler, ReminderScheduler
+from hermes.scheduler import AgentTaskScheduler, ConversationSweepScheduler
 from hermes.signal.lifecycle import rebuild_signal_worker_from_db
 from hermes.telegram.lifecycle import rebuild_telegram_worker_from_db
 from hermes.tool_catalog import build_tool_catalog
@@ -246,10 +246,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             current_channel=None,
         )
 
-        app.state.scheduler = ReminderScheduler(
+        # Plan 16: scheduler drives `agent_tasks` (replaces the old reminder
+        # scheduler). Pull the live upstream + tool catalog through closures
+        # so a credential rebuild during the process lifetime doesn't strand
+        # the scheduler on a stale client.
+        app.state.scheduler = AgentTaskScheduler(
             app.state.db,
-            app.state.signal_client,
-            app.state.signal_self_number,
+            upstream_provider=lambda: app.state.upstream,
+            tool_factory=lambda: build_tool_catalog(
+                db=app.state.db,
+                signal_client=app.state.signal_client,
+                signal_self_number=app.state.signal_self_number,
+                external_http=app.state.external_http,
+                brave_api_key=app.state.brave_api_key,
+                current_channel="task",
+            ),
+            fallback_model=settings.model,
         )
         await app.state.scheduler.start()
 

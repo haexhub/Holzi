@@ -19,6 +19,7 @@ dependencies = [
     "mcp>=1.0",
     "trafilatura>=1.12",
     "cryptography>=48.0.0",
+    "croniter>=2.0",
 ]
 
 [project.optional-dependencies]

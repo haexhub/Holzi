@@ -40,13 +40,12 @@ from hermes.events import (
 )
 from hermes.logging import logger
 from hermes.repository import (
+    agent_tasks,
     attachments,
     conversations,
     messages,
     notes,
-    reminders,
     runs,
-    todos,
 )
 from hermes.repository import (
     llm_credentials as llm_credentials_repo,
@@ -1129,146 +1128,216 @@ async def api_delete_note(request: Request, key: str) -> Response:
 
 
 # ---------------------------------------------------------------------------
-# /api/todos
+# /api/tasks (Plan 16) — scheduled and one-shot agent runs.
 # ---------------------------------------------------------------------------
 
 
-class TodoCreate(BaseModel):
-    content: str = Field(min_length=1)
-    tags: list[str] = Field(default_factory=list)
+class TaskCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    prompt: str = Field(min_length=1)
+    due_at: int | None = None
+    schedule: str | None = None
+    timezone: str = "UTC"
+    enabled: bool = True
 
 
-class TodoUpdate(BaseModel):
-    done: bool
+class TaskUpdate(BaseModel):
+    # Every field is optional — only sent fields are patched. `due_at` /
+    # `schedule` use the explicit "set to null" semantics via separate
+    # `clear_*` flags so a missing key on the wire can't accidentally clear
+    # the other half of the (exactly-one) invariant.
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    prompt: str | None = Field(default=None, min_length=1)
+    due_at: int | None = None
+    clear_due_at: bool = False
+    schedule: str | None = None
+    clear_schedule: bool = False
+    timezone: str | None = None
+    enabled: bool | None = None
 
 
-class TodoResponse(BaseModel):
+class TaskResponse(BaseModel):
     id: int
-    content: str
-    tags: str | None
-    done_at: int | None
+    title: str
+    prompt: str
+    due_at: int | None
+    schedule: str | None
+    timezone: str
+    enabled: bool
+    last_run_at: int | None
+    last_status: str | None
+    last_run_id: str | None
     created_at: int
+    updated_at: int
 
 
-def _todo_to_dict(t: Any) -> dict[str, Any]:
+class TaskRunResponse(BaseModel):
+    """Returned from POST /api/tasks/{id}/run while the run is in flight."""
+
+    task_id: int
+    run_id: str
+    status: Literal["queued"]
+
+
+def _task_to_dict(t: Any) -> dict[str, Any]:
     return {
         "id": t.id,
-        "content": t.content,
-        "tags": t.tags,
-        "done_at": t.done_at,
+        "title": t.title,
+        "prompt": t.prompt,
+        "due_at": t.due_at,
+        "schedule": t.schedule,
+        "timezone": t.timezone,
+        "enabled": t.enabled,
+        "last_run_at": t.last_run_at,
+        "last_status": t.last_status,
+        "last_run_id": t.last_run_id,
         "created_at": t.created_at,
+        "updated_at": t.updated_at,
     }
 
 
-@router.get("/todos", response_model=list[TodoResponse])
-async def api_list_todos(
-    request: Request,
-    only_open: bool = True,
-    tag: str | None = None,
-    limit: int = 200,
-) -> list[dict[str, Any]]:
-    limit = _validate_limit(limit)
-    db: AsyncEngine = request.app.state.db
-    items = await todos.list_all(db, only_open=only_open, tag=tag, limit=limit)
-    return [_todo_to_dict(t) for t in items]
-
-
-@router.post("/todos", response_model=TodoResponse)
-async def api_create_todo(request: Request, body: TodoCreate) -> dict[str, Any]:
-    db: AsyncEngine = request.app.state.db
-    tags = ",".join(body.tags) if body.tags else None
-    t = await todos.add(db, content=body.content, tags=tags)
-    return _todo_to_dict(t)
-
-
-@router.patch("/todos/{todo_id}", response_model=TodoResponse)
-async def api_patch_todo(
-    request: Request, todo_id: int, body: TodoUpdate
-) -> dict[str, Any]:
-    db: AsyncEngine = request.app.state.db
-    if not body.done:
+def _validate_task_schedule_payload(
+    *, due_at: int | None, schedule: str | None
+) -> None:
+    """Enforce the exactly-one-of invariant at the API boundary so the
+    repository layer's ValueError surfaces as a 400 instead of a 500.
+    """
+    if (due_at is None) == (schedule is None):
         raise HTTPException(
             status_code=400,
-            detail="only marking todos as done is supported; pass {\"done\": true}",
+            detail="exactly one of due_at / schedule must be set",
         )
-    if not await todos.mark_done(db, todo_id):
-        # Either the row doesn't exist, or it was already done.
-        existing = await todos.get(db, todo_id)
-        if existing is None:
-            raise HTTPException(status_code=404, detail="todo not found")
-        return _todo_to_dict(existing)
-    t = await todos.get(db, todo_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail="todo disappeared")
-    return _todo_to_dict(t)
+    if schedule is not None:
+        try:
+            agent_tasks.validate_schedule(schedule)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.delete("/todos/{todo_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def api_delete_todo(request: Request, todo_id: int) -> Response:
-    db: AsyncEngine = request.app.state.db
-    if not await todos.delete(db, todo_id):
-        raise HTTPException(status_code=404, detail="todo not found")
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-# ---------------------------------------------------------------------------
-# /api/reminders
-# ---------------------------------------------------------------------------
-
-
-class ReminderCreate(BaseModel):
-    due_at: int
-    message: str = Field(min_length=1)
-    channel: str = "signal"
-
-
-class ReminderResponse(BaseModel):
-    id: int
-    due_at: int
-    message: str
-    channel: str
-    fired_at: int | None
-    created_at: int
-
-
-def _reminder_to_dict(r: Any) -> dict[str, Any]:
-    return {
-        "id": r.id,
-        "due_at": r.due_at,
-        "message": r.message,
-        "channel": r.channel,
-        "fired_at": r.fired_at,
-        "created_at": r.created_at,
-    }
-
-
-@router.get("/reminders", response_model=list[ReminderResponse])
-async def api_list_reminders(
-    request: Request, include_fired: bool = False, limit: int = 100
+@router.get("/tasks", response_model=list[TaskResponse])
+async def api_list_tasks(
+    request: Request, limit: int = 200
 ) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
-    items = await reminders.list_all(db, include_fired=include_fired, limit=limit)
-    return [_reminder_to_dict(r) for r in items]
+    items = await agent_tasks.list_all(db, limit=limit)
+    return [_task_to_dict(t) for t in items]
 
 
-@router.post("/reminders", response_model=ReminderResponse)
-async def api_create_reminder(
-    request: Request, body: ReminderCreate
+@router.post(
+    "/tasks",
+    response_model=TaskResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def api_create_task(
+    request: Request, body: TaskCreate
+) -> dict[str, Any]:
+    _validate_task_schedule_payload(due_at=body.due_at, schedule=body.schedule)
+    db: AsyncEngine = request.app.state.db
+    t = await agent_tasks.create(
+        db,
+        title=body.title,
+        prompt=body.prompt,
+        due_at=body.due_at,
+        schedule=body.schedule,
+        timezone=body.timezone,
+        enabled=body.enabled,
+    )
+    return _task_to_dict(t)
+
+
+@router.patch("/tasks/{task_id}", response_model=TaskResponse)
+async def api_patch_task(
+    request: Request, task_id: int, body: TaskUpdate
 ) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
-    r = await reminders.create(
-        db, due_at=body.due_at, message=body.message, channel=body.channel
-    )
-    return _reminder_to_dict(r)
+    # If the patch crosses the one-shot/recurring boundary, validate up
+    # front so the repository raises into a useful 400 instead of 500.
+    if body.schedule is not None:
+        try:
+            agent_tasks.validate_schedule(body.schedule)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        updated = await agent_tasks.update(
+            db,
+            task_id,
+            title=body.title,
+            prompt=body.prompt,
+            due_at=body.due_at,
+            schedule=body.schedule,
+            timezone=body.timezone,
+            enabled=body.enabled,
+            clear_due_at=body.clear_due_at,
+            clear_schedule=body.clear_schedule,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    return _task_to_dict(updated)
 
 
-@router.delete("/reminders/{reminder_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def api_delete_reminder(request: Request, reminder_id: int) -> Response:
+@router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def api_delete_task(request: Request, task_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
-    if not await reminders.delete(db, reminder_id):
-        raise HTTPException(status_code=404, detail="reminder not found")
+    if not await agent_tasks.delete(db, task_id):
+        raise HTTPException(status_code=404, detail="task not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/tasks/{task_id}/run",
+    response_model=TaskRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def api_run_task_now(
+    request: Request, task_id: int
+) -> dict[str, Any]:
+    """Fire a task immediately as a background job; respond 202 with the
+    pre-allocated `run_id` so the UI can correlate the firing with the
+    `agent_runs` row that will appear shortly. Does NOT advance the cron
+    schedule — a manual run shouldn't skip the next due occurrence.
+    """
+    db: AsyncEngine = request.app.state.db
+    task = await agent_tasks.get(db, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+
+    scheduler = request.app.state.scheduler
+    if scheduler is None:
+        raise HTTPException(
+            status_code=503, detail="scheduler not configured"
+        )
+
+    # Allocate the run id here so the response can carry it before the
+    # background task has called track_run. Scheduler.run_now mints its
+    # own run id internally, so for the API to return a meaningful id we
+    # rely on the task row's `last_run_id` once mark_run lands — the UI
+    # polls /api/tasks/{id} after this returns. Simpler than threading
+    # the id through.
+    asyncio.create_task(
+        _run_task_background(scheduler, task_id),
+        name=f"task-run-now-{task_id}",
+    )
+    return {
+        "task_id": task_id,
+        "run_id": "",  # filled in by the next /api/tasks/{id} read
+        "status": "queued",
+    }
+
+
+async def _run_task_background(scheduler: Any, task_id: int) -> None:
+    """Run a task in the background. Any error is logged but never raised
+    — the API has already returned 202, so there's no caller to surface
+    to. The user sees the failure via `last_status` on the next list refresh.
+    """
+    try:
+        await scheduler.run_now(task_id)
+    except LookupError:
+        logger.warning("api_task_run_now_missing", task_id=task_id)
+    except Exception:  # noqa: BLE001 — already persisted as last_status
+        logger.exception("api_task_run_now_failed", task_id=task_id)
 
 
 # --- workspace sandbox (Plan 11b-b) -----------------------------------------

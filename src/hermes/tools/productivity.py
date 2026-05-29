@@ -1,198 +1,146 @@
+"""Agent-facing tools for managing `agent_tasks` (Plan 16).
+
+Replaces the old `reminder_*` / `todo_*` tools. A task is either one-shot
+(`due_at` set) or recurring (`schedule` set). The agent decides which to
+use when the user asks "remind me tomorrow at 9" (one-shot) vs "send me
+a weekly summary every Monday morning" (recurring).
+"""
 import json
-import time
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import Tool
-from hermes.repository import reminders, todos
+from hermes.repository import agent_tasks
 
 
 def build_productivity_tools(db: AsyncEngine) -> list[Tool]:
     return [
-        _reminder_set(db),
-        _reminder_list(db),
-        _todo_add(db),
-        _todo_list(db),
-        _todo_done(db),
+        _task_create(db),
+        _task_list(db),
+        _task_delete(db),
     ]
 
 
-# ---------------------------------------------------------------------------
-def _reminder_set(db: AsyncEngine) -> Tool:
+def _task_to_dict(t: Any) -> dict[str, Any]:
+    return {
+        "id": t.id,
+        "title": t.title,
+        "prompt": t.prompt,
+        "due_at": t.due_at,
+        "schedule": t.schedule,
+        "timezone": t.timezone,
+        "enabled": t.enabled,
+        "last_run_at": t.last_run_at,
+        "last_status": t.last_status,
+    }
+
+
+def _task_create(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
-        message = str(args["message"])
-        channel = str(args.get("channel", "signal"))
+        title = str(args.get("title", "")).strip()
+        prompt = str(args.get("prompt", "")).strip()
+        if not title or not prompt:
+            return json.dumps({"error": "title and prompt are required"})
 
-        when_arg = args.get("due_at")
-        if when_arg is None:
-            return json.dumps({"error": "due_at (unix seconds) is required"})
-        try:
-            due_at = int(when_arg)
-        except (TypeError, ValueError):
-            return json.dumps({"error": "due_at must be an integer unix timestamp"})
+        due_at_arg = args.get("due_at")
+        schedule_arg = args.get("schedule")
+        if (due_at_arg is None) == (schedule_arg is None):
+            return json.dumps(
+                {"error": "exactly one of due_at / schedule must be set"}
+            )
 
-        r = await reminders.create(db, due_at=due_at, message=message, channel=channel)
-        return json.dumps(
-            {
-                "id": r.id,
-                "due_at": r.due_at,
-                "message": r.message,
-                "channel": r.channel,
-            }
+        due_at: int | None = None
+        if due_at_arg is not None:
+            try:
+                due_at = int(due_at_arg)
+            except (TypeError, ValueError):
+                return json.dumps({"error": "due_at must be an integer unix timestamp"})
+
+        schedule: str | None = None
+        if schedule_arg is not None:
+            if not isinstance(schedule_arg, str):
+                return json.dumps({"error": "schedule must be a string"})
+            schedule = schedule_arg
+            try:
+                agent_tasks.validate_schedule(schedule)
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)})
+
+        timezone = str(args.get("timezone", "UTC"))
+
+        t = await agent_tasks.create(
+            db,
+            title=title,
+            prompt=prompt,
+            due_at=due_at,
+            schedule=schedule,
+            timezone=timezone,
         )
+        return json.dumps(_task_to_dict(t))
 
     return Tool(
-        name="reminder_set",
+        name="task_create",
         description=(
-            "Schedule a reminder. The scheduler delivers it to the configured "
-            "channel (default 'signal') once `due_at` is reached. `due_at` is a "
-            "unix timestamp in seconds — the agent is expected to resolve "
-            "natural-language times (e.g. 'tomorrow 9am') before calling."
+            "Create a scheduled or one-shot agent task. Exactly one of "
+            "`due_at` (unix epoch seconds, one-shot) or `schedule` "
+            "(5-field cron string, recurring) must be set. The agent is "
+            "expected to resolve natural-language times (e.g. 'tomorrow "
+            "9am') before calling. `prompt` is what the agent will execute "
+            "when the task fires."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
-                "due_at": {"type": "integer", "description": "Unix epoch seconds."},
-                "message": {"type": "string"},
-                "channel": {"type": "string", "enum": ["signal"], "default": "signal"},
+                "title": {"type": "string"},
+                "prompt": {"type": "string"},
+                "due_at": {
+                    "type": "integer",
+                    "description": "Unix epoch seconds. Mutually exclusive with schedule.",
+                },
+                "schedule": {
+                    "type": "string",
+                    "description": "5-field cron expression. Mutually exclusive with due_at.",
+                },
+                "timezone": {"type": "string", "default": "UTC"},
             },
-            "required": ["due_at", "message"],
+            "required": ["title", "prompt"],
         },
         handler=handler,
     )
 
 
-def _reminder_list(db: AsyncEngine) -> Tool:
-    async def handler(args: dict[str, Any]) -> str:
-        # `bool("false")` is True — guard against non-bool payloads from
-        # providers that send raw JSON strings.
-        include_fired_arg = args.get("include_fired", False)
-        if not isinstance(include_fired_arg, bool):
-            return json.dumps({"error": "include_fired must be a boolean"})
-        rs = await reminders.list_all(db, include_fired=include_fired_arg)
-        return json.dumps(
-            [
-                {
-                    "id": r.id,
-                    "due_at": r.due_at,
-                    "message": r.message,
-                    "channel": r.channel,
-                    "fired_at": r.fired_at,
-                }
-                for r in rs
-            ]
-        )
+def _task_list(db: AsyncEngine) -> Tool:
+    async def handler(_args: dict[str, Any]) -> str:
+        items = await agent_tasks.list_all(db)
+        return json.dumps([_task_to_dict(t) for t in items])
 
     return Tool(
-        name="reminder_list",
-        description="List pending reminders (or all if `include_fired=true`).",
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "include_fired": {"type": "boolean", "default": False},
-            },
-        },
-        handler=handler,
-    )
-
-
-# ---------------------------------------------------------------------------
-def _todo_add(db: AsyncEngine) -> Tool:
-    async def handler(args: dict[str, Any]) -> str:
-        content = str(args["content"])
-        tags_arg = args.get("tags")
-        if tags_arg is None or tags_arg == "":
-            tags: str | None = None
-        elif isinstance(tags_arg, str):
-            tags = tags_arg
-        elif isinstance(tags_arg, list):
-            tags = ",".join(str(t) for t in tags_arg if str(t).strip())
-        else:
-            return json.dumps({"error": "tags must be a string or array of strings"})
-
-        t = await todos.add(db, content=content, tags=tags or None)
-        return json.dumps(
-            {"id": t.id, "content": t.content, "tags": t.tags, "created_at": t.created_at}
-        )
-
-    return Tool(
-        name="todo_add",
-        description="Add a new todo item.",
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "content": {"type": "string"},
-                "tags": {"type": "array", "items": {"type": "string"}, "default": []},
-            },
-            "required": ["content"],
-        },
-        handler=handler,
-    )
-
-
-def _todo_list(db: AsyncEngine) -> Tool:
-    async def handler(args: dict[str, Any]) -> str:
-        only_open_arg = args.get("only_open", True)
-        if not isinstance(only_open_arg, bool):
-            return json.dumps({"error": "only_open must be a boolean"})
-        tag = args.get("tag")
-        if tag is not None and not isinstance(tag, str):
-            return json.dumps({"error": "tag must be a string"})
-
-        items = await todos.list_all(db, only_open=only_open_arg, tag=tag)
-        return json.dumps(
-            [
-                {
-                    "id": t.id,
-                    "content": t.content,
-                    "tags": t.tags,
-                    "done_at": t.done_at,
-                    "created_at": t.created_at,
-                }
-                for t in items
-            ]
-        )
-
-    return Tool(
-        name="todo_list",
+        name="task_list",
         description=(
-            "List todos. By default returns only open items; pass "
-            "`only_open=false` to include completed ones, and `tag` to filter "
-            "to items carrying that exact tag token."
+            "List all agent tasks (enabled and disabled). Returns nearest-"
+            "due first. Each item carries last_run_at + last_status so the "
+            "agent can decide whether to retry / report on a stuck task."
         ),
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "only_open": {"type": "boolean", "default": True},
-                "tag": {"type": "string"},
-            },
-        },
+        parameters_schema={"type": "object", "properties": {}},
         handler=handler,
     )
 
 
-def _todo_done(db: AsyncEngine) -> Tool:
+def _task_delete(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         try:
-            todo_id = int(args["id"])
+            task_id = int(args["id"])
         except (KeyError, TypeError, ValueError):
             return json.dumps({"error": "id (integer) is required"})
-
-        marked = await todos.mark_done(db, todo_id, ts=int(time.time()))
-        if not marked:
-            return json.dumps({"error": f"todo {todo_id} not found or already done"})
-
-        t = await todos.get(db, todo_id)
-        if t is None:
-            return json.dumps({"error": f"todo {todo_id} disappeared after mark_done"})
-        return json.dumps(
-            {"id": t.id, "content": t.content, "done_at": t.done_at}
-        )
+        ok = await agent_tasks.delete(db, task_id)
+        if not ok:
+            return json.dumps({"error": f"task {task_id} not found"})
+        return json.dumps({"id": task_id, "deleted": True})
 
     return Tool(
-        name="todo_done",
-        description="Mark a todo item as completed.",
+        name="task_delete",
+        description="Delete an agent task by id. Returns {deleted: true} on success.",
         parameters_schema={
             "type": "object",
             "properties": {"id": {"type": "integer"}},

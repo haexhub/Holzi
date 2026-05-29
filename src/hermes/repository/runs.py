@@ -38,6 +38,7 @@ def _row_to_agent_run(row) -> AgentRun:
         error_trace=row.error_trace,
         input_tokens=row.input_tokens,
         output_tokens=row.output_tokens,
+        agent_task_id=row.agent_task_id,
     )
 
 
@@ -49,10 +50,15 @@ async def insert(
     channel: str,
     model: str,
     started_at: int,
+    agent_task_id: int | None = None,
 ) -> None:
     """Create the row with status='running'. Caller is expected to follow
     up with `finalize` in a `try/finally` so the row never lingers in
-    'running' across a clean process exit."""
+    'running' across a clean process exit.
+
+    `agent_task_id` is set by the scheduler when a run was triggered by an
+    `agent_tasks` row; plain /api/chat runs leave it NULL.
+    """
     async with engine.begin() as conn:
         await conn.execute(
             t_agent_runs.insert().values(
@@ -63,6 +69,7 @@ async def insert(
                 started_at=started_at,
                 finished_at=None,
                 status="running",
+                agent_task_id=agent_task_id,
             )
         )
 
