@@ -45,8 +45,15 @@ class FakeSandboxBackend:
     def __init__(self) -> None:
         self._containers: dict[str, _Container] = {}
         self._counter = 0
-        # Output for the *next* exec call; consumed once, then reset to default.
-        self._exec_script: list[ExecEvent] | None = None
+        # FIFO of scripted outputs — each entry is the events for one exec call.
+        # When empty, exec falls back to a clean exit. The queue lets tests that
+        # invoke several `exec`s in a row (e.g. `git status` followed by
+        # `git add` + `git commit`) script each one in order.
+        self._exec_scripts: list[list[ExecEvent]] = []
+        # Append-only log of every argv that has been exec'd. Tests inspect
+        # this to assert (e.g.) that a workspace write actually issued the
+        # expected `git add` + `git commit` pair with the right message.
+        self.recorded_execs: list[list[str]] = []
 
     # --- SandboxBackend ----------------------------------------------------
 
@@ -69,8 +76,12 @@ class FakeSandboxBackend:
         container = self._containers.get(handle.id)
         if container is None or container.state is not SandboxState.running:
             raise SandboxNotRunning(f"sandbox {handle.id} is not running")
-        events = self._exec_script if self._exec_script is not None else [ExecExit(exit_code=0)]
-        self._exec_script = None
+        self.recorded_execs.append(list(argv))
+        events = (
+            self._exec_scripts.pop(0)
+            if self._exec_scripts
+            else [ExecExit(exit_code=0)]
+        )
         for ev in events:
             yield ev
 
@@ -182,8 +193,10 @@ class FakeSandboxBackend:
     # --- test scripting helpers -------------------------------------------
 
     def script_exec(self, events: Sequence[ExecEvent]) -> None:
-        """Set the events the next exec call will stream."""
-        self._exec_script = list(events)
+        """Enqueue the events for the next un-scripted exec call. Subsequent
+        calls each consume the next entry in FIFO order; an exec without a
+        scripted entry falls back to a clean exit."""
+        self._exec_scripts.append(list(events))
 
     def simulate_crash(self, sandbox_id: str) -> None:
         self._containers[sandbox_id].state = SandboxState.crashed

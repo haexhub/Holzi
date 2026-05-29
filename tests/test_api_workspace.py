@@ -513,3 +513,555 @@ async def test_file_oversized_image_returns_metadata_only(
     assert body["data_url"] is None
     assert body["content"] is None
     assert body["size"] == len(fake_png)
+
+
+# --- Plan 13: sha256 on read ------------------------------------------------
+
+
+async def test_file_text_includes_sha256(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    """The on-disk sha is what writers will pass back as `base_sha`; the
+    contract is the sha of the *full file bytes*, not the preview slice."""
+    import hashlib as _hl
+
+    configure_roots("ws-1")
+    mgr, _ = install_sandbox()
+    handle = await mgr.get_workspace("ws-1")
+    payload = b"hello\nworld\n"
+    await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/notes.txt", payload)
+    response = await client.get(
+        "/api/workspace/file",
+        params={"root": "ws-1", "path": "notes.txt"},
+        headers=AUTH,
+    )
+    assert response.status_code == 200
+    assert response.json()["sha256"] == _hl.sha256(payload).hexdigest()
+
+
+async def test_file_binary_omits_sha256(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    mgr, _ = install_sandbox()
+    handle = await mgr.get_workspace("ws-1")
+    await mgr.write_file(
+        handle, f"{WORKSPACE_MOUNT}/blob.bin", b"abc\x00def" + b"X" * 100
+    )
+    response = await client.get(
+        "/api/workspace/file",
+        params={"root": "ws-1", "path": "blob.bin"},
+        headers=AUTH,
+    )
+    assert response.status_code == 200
+    assert response.json()["sha256"] is None
+
+
+# --- Plan 13: create file ---------------------------------------------------
+
+
+async def test_file_create_writes_and_commits(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    mgr, backend = install_sandbox()
+    response = await client.post(
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": "src/new.py",
+            "content": "x = 1\n",
+            "conversation_id": "42",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["root"] == "ws-1"
+    assert body["path"] == "src/new.py"
+    assert body["committed"] is True
+    # File actually landed in the sandbox volume.
+    handle = await mgr.get_workspace("ws-1")
+    assert (
+        await mgr.read_file(handle, f"{WORKSPACE_MOUNT}/src/new.py")
+        == b"x = 1\n"
+    )
+    # The `git commit -m` call carries the user[conv-N]: tag.
+    commit_argvs = [a for a in backend.recorded_execs if a[:2] == ["git", "commit"]]
+    assert commit_argvs, "no git commit call recorded"
+    message = commit_argvs[-1][commit_argvs[-1].index("-m") + 1]
+    assert message.startswith("user[conv-42]:")
+    assert "create" in message
+    assert "src/new.py" in message
+
+
+async def test_file_create_409_when_exists(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    mgr, _ = install_sandbox()
+    handle = await mgr.get_workspace("ws-1")
+    await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/x.txt", b"old")
+    response = await client.post(
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": "x.txt",
+            "content": "new",
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 409
+
+
+async def test_file_create_in_fresh_subdir_succeeds(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    """`write_file` mkdir-p's the parent, so creating a file inside a
+    not-yet-existing subdir is the expected happy path — the panel UI can
+    target a fresh directory in one shot."""
+    configure_roots("ws-1")
+    mgr, _ = install_sandbox()
+    response = await client.post(
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": "deep/nested/x.txt",
+            "content": "y",
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 201, response.text
+    handle = await mgr.get_workspace("ws-1")
+    assert (
+        await mgr.read_file(handle, f"{WORKSPACE_MOUNT}/deep/nested/x.txt")
+        == b"y"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_path", ["..", "a/../b", "/etc/passwd", "/", "a//b", "./x"]
+)
+async def test_file_create_rejects_traversal(
+    client: httpx.AsyncClient,
+    configure_roots,
+    install_sandbox,
+    bad_path: str,
+) -> None:
+    configure_roots("ws-1")
+    install_sandbox()
+    response = await client.post(
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": bad_path,
+            "content": "x",
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 400, bad_path
+
+
+async def test_file_create_rejects_binary_content(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    install_sandbox()
+    response = await client.post(
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": "blob.bin",
+            "content": "hello\x00world",
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 400
+
+
+async def test_file_create_committed_false_when_not_a_repo(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    """When `git rev-parse --is-inside-work-tree` exits non-zero the helper
+    no-ops the commit — the file write still went through."""
+    from hermes.sandbox.models import ExecExit
+
+    configure_roots("ws-1")
+    mgr, backend = install_sandbox()
+    # Pre-warm the sandbox so the rev-parse call is the first scripted exec.
+    await mgr.get_workspace("ws-1")
+    backend.script_exec([ExecExit(exit_code=128)])  # rev-parse fails
+    response = await client.post(
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": "loose.txt",
+            "content": "no repo here",
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 201
+    assert response.json()["committed"] is False
+    # No `git add` / `git commit` followed once rev-parse said "not a repo".
+    git_argvs = [a for a in backend.recorded_execs if a and a[0] == "git"]
+    # Only the rev-parse should have run.
+    assert all(a[1] == "rev-parse" for a in git_argvs)
+
+
+# --- Plan 13: update file with base_sha -------------------------------------
+
+
+async def test_file_update_succeeds_with_matching_base_sha(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    import hashlib as _hl
+
+    configure_roots("ws-1")
+    mgr, backend = install_sandbox()
+    handle = await mgr.get_workspace("ws-1")
+    initial = b"v1\n"
+    await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/file.py", initial)
+    response = await client.put(
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": "file.py",
+            "content": "v2\n",
+            "base_sha": _hl.sha256(initial).hexdigest(),
+            "conversation_id": "7",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["sha256"] == _hl.sha256(b"v2\n").hexdigest()
+    assert body["committed"] is True
+    assert await mgr.read_file(handle, f"{WORKSPACE_MOUNT}/file.py") == b"v2\n"
+    commit_argv = [a for a in backend.recorded_execs if a[:2] == ["git", "commit"]][-1]
+    message = commit_argv[commit_argv.index("-m") + 1]
+    assert message.startswith("user[conv-7]:")
+    assert "edit" in message
+    assert "file.py" in message
+
+
+async def test_file_update_409_on_base_sha_mismatch(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    mgr, _ = install_sandbox()
+    handle = await mgr.get_workspace("ws-1")
+    await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/file.py", b"current\n")
+    response = await client.put(
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": "file.py",
+            "content": "x",
+            "base_sha": "0" * 64,  # not the real sha
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 409
+    # The file is unchanged on disk.
+    assert (
+        await mgr.read_file(handle, f"{WORKSPACE_MOUNT}/file.py")
+        == b"current\n"
+    )
+
+
+async def test_file_update_404_when_missing(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    install_sandbox()
+    response = await client.put(
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": "missing.txt",
+            "content": "x",
+            "base_sha": "0" * 64,
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 404
+
+
+async def test_file_update_rejects_binary_content(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    import hashlib as _hl
+
+    configure_roots("ws-1")
+    mgr, _ = install_sandbox()
+    handle = await mgr.get_workspace("ws-1")
+    initial = b"text\n"
+    await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/text.txt", initial)
+    response = await client.put(
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": "text.txt",
+            "content": "with\x00nul",
+            "base_sha": _hl.sha256(initial).hexdigest(),
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 400
+
+
+# --- Plan 13: rename --------------------------------------------------------
+
+
+async def test_file_rename_moves_and_commits(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    mgr, backend = install_sandbox()
+    handle = await mgr.get_workspace("ws-1")
+    await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/old.md", b"# title\n")
+    response = await client.post(
+        "/api/workspace/rename",
+        json={
+            "root": "ws-1",
+            "src": "old.md",
+            "dest": "new.md",
+            "conversation_id": "9",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["committed"] is True
+    # `mv` was actually invoked in the sandbox.
+    mv_argvs = [a for a in backend.recorded_execs if a[:2] == ["mv", "--"]]
+    assert mv_argvs
+    commit_argv = [a for a in backend.recorded_execs if a[:2] == ["git", "commit"]][-1]
+    message = commit_argv[commit_argv.index("-m") + 1]
+    assert message.startswith("user[conv-9]:")
+    assert "rename" in message
+
+
+async def test_file_rename_409_when_dest_exists(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    mgr, _ = install_sandbox()
+    handle = await mgr.get_workspace("ws-1")
+    await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/a.txt", b"a")
+    await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/b.txt", b"b")
+    response = await client.post(
+        "/api/workspace/rename",
+        json={
+            "root": "ws-1",
+            "src": "a.txt",
+            "dest": "b.txt",
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 409
+
+
+async def test_file_rename_404_when_src_missing(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    install_sandbox()
+    response = await client.post(
+        "/api/workspace/rename",
+        json={
+            "root": "ws-1",
+            "src": "nope.txt",
+            "dest": "new.txt",
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 404
+
+
+async def test_file_rename_rejects_traversal(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    mgr, _ = install_sandbox()
+    handle = await mgr.get_workspace("ws-1")
+    await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/a.txt", b"a")
+    response = await client.post(
+        "/api/workspace/rename",
+        json={
+            "root": "ws-1",
+            "src": "a.txt",
+            "dest": "../escape.txt",
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 400
+
+
+# --- Plan 13: delete --------------------------------------------------------
+
+
+async def test_file_delete_removes_and_commits(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    mgr, backend = install_sandbox()
+    handle = await mgr.get_workspace("ws-1")
+    await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/gone.txt", b"bye")
+    response = await client.request(
+        "DELETE",
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": "gone.txt",
+            "conversation_id": "3",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["committed"] is True
+    rm_argvs = [a for a in backend.recorded_execs if a[:2] == ["rm", "--"]]
+    assert rm_argvs
+    commit_argv = [a for a in backend.recorded_execs if a[:2] == ["git", "commit"]][-1]
+    message = commit_argv[commit_argv.index("-m") + 1]
+    assert message.startswith("user[conv-3]:")
+    assert "delete" in message
+
+
+async def test_file_delete_404_when_missing(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    install_sandbox()
+    response = await client.request(
+        "DELETE",
+        "/api/workspace/file",
+        json={"root": "ws-1", "path": "no.txt", "conversation_id": "1"},
+        headers=AUTH,
+    )
+    assert response.status_code == 404
+
+
+async def test_file_delete_rejects_traversal(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    install_sandbox()
+    response = await client.request(
+        "DELETE",
+        "/api/workspace/file",
+        json={"root": "ws-1", "path": "..", "conversation_id": "1"},
+        headers=AUTH,
+    )
+    assert response.status_code == 400
+
+
+# --- Plan 13: git status ----------------------------------------------------
+
+
+async def test_git_status_reports_not_a_repo(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    from hermes.sandbox.models import ExecExit
+
+    configure_roots("ws-1")
+    mgr, backend = install_sandbox()
+    await mgr.get_workspace("ws-1")
+    backend.script_exec([ExecExit(exit_code=128)])  # rev-parse fails
+    response = await client.get(
+        "/api/workspace/git",
+        params={"root": "ws-1"},
+        headers=AUTH,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "root": "ws-1",
+        "is_repo": False,
+        "branch": None,
+        "dirty": False,
+        "entries": [],
+    }
+
+
+async def test_git_status_branch_and_dirty_entries(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    from hermes.sandbox.models import ExecExit, ExecOutput
+
+    configure_roots("ws-1")
+    mgr, backend = install_sandbox()
+    await mgr.get_workspace("ws-1")
+    # 1) rev-parse --is-inside-work-tree → exit 0 (is a repo)
+    backend.script_exec([ExecOutput("stdout", b"true\n"), ExecExit(exit_code=0)])
+    # 2) rev-parse --abbrev-ref HEAD → "main"
+    backend.script_exec([ExecOutput("stdout", b"main\n"), ExecExit(exit_code=0)])
+    # 3) status --porcelain=v1 → two entries
+    backend.script_exec(
+        [
+            ExecOutput("stdout", b" M src/foo.py\n?? new.md\n"),
+            ExecExit(exit_code=0),
+        ]
+    )
+    response = await client.get(
+        "/api/workspace/git",
+        params={"root": "ws-1"},
+        headers=AUTH,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["is_repo"] is True
+    assert body["branch"] == "main"
+    assert body["dirty"] is True
+    assert {(e["status"], e["path"]) for e in body["entries"]} == {
+        (" M", "src/foo.py"),
+        ("??", "new.md"),
+    }
+
+
+async def test_git_status_clean_repo(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    from hermes.sandbox.models import ExecExit, ExecOutput
+
+    configure_roots("ws-1")
+    mgr, backend = install_sandbox()
+    await mgr.get_workspace("ws-1")
+    backend.script_exec([ExecOutput("stdout", b"true\n"), ExecExit(exit_code=0)])
+    backend.script_exec(
+        [ExecOutput("stdout", b"feature/x\n"), ExecExit(exit_code=0)]
+    )
+    backend.script_exec([ExecExit(exit_code=0)])  # empty porcelain
+    response = await client.get(
+        "/api/workspace/git",
+        params={"root": "ws-1"},
+        headers=AUTH,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["branch"] == "feature/x"
+    assert body["dirty"] is False
+    assert body["entries"] == []
+
+
+async def test_git_503_when_sandbox_unconfigured(
+    client: httpx.AsyncClient, configure_roots
+) -> None:
+    configure_roots("ws-1")
+    response = await client.get(
+        "/api/workspace/git",
+        params={"root": "ws-1"},
+        headers=AUTH,
+    )
+    assert response.status_code == 503
