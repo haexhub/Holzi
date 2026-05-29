@@ -275,16 +275,17 @@ async def _drain_exec(
     return exit_code, bytes(stdout), bytes(stderr)
 
 
-# Static git identity for in-sandbox commits. The agent is the only writer
-# here, so a single identity is honest about who made the change; the
-# `user[conv-N]:` / `agent[conv-N]:` message prefix is what distinguishes
-# the actor in `git log`.
-_GIT_ENV = {
-    "GIT_AUTHOR_NAME": "Holzi",
-    "GIT_AUTHOR_EMAIL": "holzi@local",
-    "GIT_COMMITTER_NAME": "Holzi",
-    "GIT_COMMITTER_EMAIL": "holzi@local",
-}
+# Static git identity for in-sandbox commits, passed via `-c` flags rather
+# than env vars: Podman's exec API treats `Env` as a *replacement* for the
+# container env (not a merge), which would drop PATH/HOME and break the
+# `git` binary lookup. The agent is the only writer here, so a single
+# identity is honest about who made the change; the `user[conv-N]:` /
+# `agent[conv-N]:` message prefix is what distinguishes the actor in
+# `git log`.
+_GIT_IDENTITY_FLAGS = (
+    "-c", "user.name=Holzi",
+    "-c", "user.email=holzi@local",
+)
 
 
 async def _is_git_repo(mgr: SandboxManager, handle: SandboxHandle) -> bool:
@@ -326,18 +327,28 @@ async def _git_commit(
     # `git add -A` stages adds, modifies, AND deletes in one call so the same
     # helper covers all four write actions (create/update/rename/delete).
     add_argv = ["git", "add", "-A", "--", *paths]
-    add_code, _, _ = await _drain_exec(
-        mgr, handle, add_argv, cwd=WORKSPACE_MOUNT
-    )
-    if add_code != 0:
+    commit_argv = [
+        "git",
+        *_GIT_IDENTITY_FLAGS,
+        "commit",
+        "-m",
+        message,
+        "--allow-empty-message",
+    ]
+    # Sandbox-level failures (crash mid-stream, exec ended without exit) must
+    # not bubble up as a 500 after a successful file write — the docstring
+    # contract is "file change happened, just not versioned".
+    try:
+        add_code, _, _ = await _drain_exec(
+            mgr, handle, add_argv, cwd=WORKSPACE_MOUNT
+        )
+        if add_code != 0:
+            return False
+        commit_code, _, _ = await _drain_exec(
+            mgr, handle, commit_argv, cwd=WORKSPACE_MOUNT
+        )
+    except SandboxError:
         return False
-    commit_code, _, _ = await _drain_exec(
-        mgr,
-        handle,
-        ["git", "commit", "-m", message, "--allow-empty-message"],
-        cwd=WORKSPACE_MOUNT,
-        env=_GIT_ENV,
-    )
     return commit_code == 0
 
 
@@ -345,11 +356,24 @@ async def _stat_entry(
     mgr: SandboxManager, handle: SandboxHandle, rel: str
 ) -> DirEntry | None:
     """Return the DirEntry for `rel` (relative to the workspace mount) or
-    None if it doesn't exist. Raises if the parent itself is missing or
-    isn't a directory — those are caller-visible 400s/404s."""
+    None if `rel` (or any of its parents) doesn't exist. A parent that
+    exists but isn't a directory is raised as a caller-visible 400 — that
+    case is an invalid path, not just a missing target."""
     parent_rel, _, name = rel.rpartition("/")
     parent_abs = _absolute_in_sandbox(parent_rel)
-    siblings = await mgr.list_dir(handle, parent_abs)
+    try:
+        siblings = await mgr.list_dir(handle, parent_abs)
+    except SandboxFileNotFound:
+        # Missing parent ⇒ the target can't exist; normalise to "not found"
+        # so every write caller takes the same 404 path without each having
+        # to wrap _stat_entry in its own except.
+        return None
+    except SandboxError as exc:
+        if "not a directory" in str(exc):
+            raise HTTPException(
+                status_code=400, detail="parent is not a directory"
+            ) from exc
+        raise
     return next((e for e in siblings if e.name == name), None)
 
 
@@ -661,13 +685,8 @@ async def api_workspace_file_create(
     try:
         # `write_file` is documented to mkdir-p the parent, so we don't pre-check
         # the parent here — that would refuse a legitimate "create a file in a
-        # fresh subdir" flow. Existence-of-target stays a 409 below. A missing
-        # parent shows up as SandboxFileNotFound on the stat call; we map that
-        # to "target doesn't exist" and proceed.
-        try:
-            existing = await _stat_entry(mgr, handle, rel)
-        except SandboxFileNotFound:
-            existing = None
+        # fresh subdir" flow. Existence-of-target stays a 409 below.
+        existing = await _stat_entry(mgr, handle, rel)
         if existing is not None:
             # Mirror Plan 13's contract: create is the "doesn't exist yet"
             # path; the UI should show the conflict and route the user to
@@ -869,8 +888,10 @@ async def api_workspace_file_delete(
         action="delete",
         paths=[rel],
     )
-    # sha256 of an empty result; the file no longer exists. The frontend
-    # treats `committed` as the authoritative signal that delete succeeded.
+    # sha256 of an empty result; the file no longer exists. `committed`
+    # reflects only whether a git commit was created — for non-git
+    # workspaces (or commit failures) the delete itself still succeeded
+    # (HTTP 200), the change is just not versioned.
     return {
         "root": body.root,
         "path": rel,

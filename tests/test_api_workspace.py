@@ -587,7 +587,9 @@ async def test_file_create_writes_and_commits(
         == b"x = 1\n"
     )
     # The `git commit -m` call carries the user[conv-N]: tag.
-    commit_argvs = [a for a in backend.recorded_execs if a[:2] == ["git", "commit"]]
+    commit_argvs = [
+        a for a in backend.recorded_execs if a and a[0] == "git" and "commit" in a
+    ]
     assert commit_argvs, "no git commit call recorded"
     message = commit_argvs[-1][commit_argvs[-1].index("-m") + 1]
     assert message.startswith("user[conv-42]:")
@@ -742,7 +744,9 @@ async def test_file_update_succeeds_with_matching_base_sha(
     assert body["sha256"] == _hl.sha256(b"v2\n").hexdigest()
     assert body["committed"] is True
     assert await mgr.read_file(handle, f"{WORKSPACE_MOUNT}/file.py") == b"v2\n"
-    commit_argv = [a for a in backend.recorded_execs if a[:2] == ["git", "commit"]][-1]
+    commit_argv = [
+        a for a in backend.recorded_execs if a and a[0] == "git" and "commit" in a
+    ][-1]
     message = commit_argv[commit_argv.index("-m") + 1]
     assert message.startswith("user[conv-7]:")
     assert "edit" in message
@@ -844,7 +848,9 @@ async def test_file_rename_moves_and_commits(
     # `mv` was actually invoked in the sandbox.
     mv_argvs = [a for a in backend.recorded_execs if a[:2] == ["mv", "--"]]
     assert mv_argvs
-    commit_argv = [a for a in backend.recorded_execs if a[:2] == ["git", "commit"]][-1]
+    commit_argv = [
+        a for a in backend.recorded_execs if a and a[0] == "git" and "commit" in a
+    ][-1]
     message = commit_argv[commit_argv.index("-m") + 1]
     assert message.startswith("user[conv-9]:")
     assert "rename" in message
@@ -882,6 +888,26 @@ async def test_file_rename_404_when_src_missing(
             "root": "ws-1",
             "src": "nope.txt",
             "dest": "new.txt",
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 404
+
+
+async def test_file_rename_404_when_parent_missing(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    """Regression: a missing *parent* directory used to surface
+    SandboxFileNotFound from `_stat_entry` as a 500. Should be a 404."""
+    configure_roots("ws-1")
+    install_sandbox()
+    response = await client.post(
+        "/api/workspace/rename",
+        json={
+            "root": "ws-1",
+            "src": "missing/dir/a.txt",
+            "dest": "b.txt",
             "conversation_id": "1",
         },
         headers=AUTH,
@@ -933,7 +959,9 @@ async def test_file_delete_removes_and_commits(
     assert response.json()["committed"] is True
     rm_argvs = [a for a in backend.recorded_execs if a[:2] == ["rm", "--"]]
     assert rm_argvs
-    commit_argv = [a for a in backend.recorded_execs if a[:2] == ["git", "commit"]][-1]
+    commit_argv = [
+        a for a in backend.recorded_execs if a and a[0] == "git" and "commit" in a
+    ][-1]
     message = commit_argv[commit_argv.index("-m") + 1]
     assert message.startswith("user[conv-3]:")
     assert "delete" in message
@@ -948,6 +976,26 @@ async def test_file_delete_404_when_missing(
         "DELETE",
         "/api/workspace/file",
         json={"root": "ws-1", "path": "no.txt", "conversation_id": "1"},
+        headers=AUTH,
+    )
+    assert response.status_code == 404
+
+
+async def test_file_delete_404_when_parent_missing(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    """Regression: missing parent dir on delete used to bubble
+    SandboxFileNotFound as 500; expected 404."""
+    configure_roots("ws-1")
+    install_sandbox()
+    response = await client.request(
+        "DELETE",
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": "missing/dir/x.txt",
+            "conversation_id": "1",
+        },
         headers=AUTH,
     )
     assert response.status_code == 404
