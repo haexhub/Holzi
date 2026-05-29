@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Protocol, runtime_checkable
 
 from hermes.sandbox.models import (
+    DirEntry,
     ExecEvent,
     SandboxHandle,
     SandboxSpec,
@@ -51,6 +52,18 @@ class SandboxBackend(Protocol):
         """Write `data` to `path` in the sandbox volume, creating parent
         directories as needed. Raises `SandboxFileTooLarge` if `data` exceeds
         the per-call cap."""
+        ...
+
+    async def list_dir(
+        self, handle: SandboxHandle, path: str
+    ) -> list[DirEntry]:
+        """Shallow listing of the directory at `path` in the sandbox volume.
+
+        Returns one `DirEntry` per immediate child (not recursive). Raises
+        `SandboxFileNotFound` if the path does not exist, `SandboxError` if
+        the path exists but is not a directory, and `SandboxNotRunning` if
+        the sandbox is not in a runnable state. Order is backend-defined —
+        callers that need a stable presentation sort themselves."""
         ...
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:

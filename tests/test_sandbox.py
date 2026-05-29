@@ -326,6 +326,50 @@ async def test_read_write_on_dead_sandbox_raises_not_running():
         await mgr.write_file(handle, "/tmp/anything", b"data")
 
 
+# --- list_dir ---------------------------------------------------------------
+
+
+async def test_list_dir_returns_files_and_dirs():
+    mgr, _ = make_manager()
+    handle = await mgr.get_workspace("ws-1")
+    await mgr.write_file(handle, "/workspace/a.txt", b"hello")
+    await mgr.write_file(handle, "/workspace/b/c.txt", b"world!")
+
+    entries = await mgr.list_dir(handle, "/workspace")
+    by_name = {e.name: e for e in entries}
+    assert set(by_name) == {"a.txt", "b"}
+    assert by_name["a.txt"].entry_type == "file"
+    assert by_name["b"].entry_type == "dir"
+
+
+async def test_list_dir_on_missing_dir_raises_not_found():
+    mgr, _ = make_manager()
+    handle = await mgr.get_workspace("ws-1")
+    await mgr.write_file(handle, "/workspace/.placeholder", b"")
+    with pytest.raises(SandboxFileNotFound):
+        await mgr.list_dir(handle, "/workspace/empty")
+
+
+async def test_list_dir_on_dead_sandbox_raises_not_running():
+    mgr, backend = make_manager()
+    handle = await mgr.get_workspace("ws-1")
+    await mgr.write_file(handle, "/workspace/a.txt", b"hello")
+    backend.simulate_crash(handle.id)
+    with pytest.raises(SandboxNotRunning):
+        await mgr.list_dir(handle, "/workspace")
+
+
+async def test_list_dir_distinguishes_file_size():
+    mgr, _ = make_manager()
+    handle = await mgr.get_workspace("ws-1")
+    await mgr.write_file(handle, "/workspace/small.bin", b"abc")
+    await mgr.write_file(handle, "/workspace/bigger.bin", b"abcdefghij")
+    entries = await mgr.list_dir(handle, "/workspace")
+    sizes = {e.name: e.size for e in entries}
+    assert sizes["small.bin"] == 3
+    assert sizes["bigger.bin"] == 10
+
+
 async def test_manager_rejects_oversized_write_before_backend_call():
     """Manager-side cap is defence in depth: oversized writes must fail before
     we even ask the backend, so a runaway caller can't push GB into the wire."""

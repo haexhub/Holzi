@@ -103,3 +103,15 @@ class ExecExit:
 # An exec stream yields zero or more ExecOutput chunks, then exactly one
 # ExecExit. Consumers pattern-match on the event type.
 ExecEvent = ExecOutput | ExecExit
+
+
+@dataclass(frozen=True)
+class DirEntry:
+    """One child of a directory listing. `entry_type` collapses everything
+    that isn't a regular file or directory (symlinks, sockets, fifos, …) into
+    `"other"` so the read-only workspace browser surfaces them as
+    non-previewable without having to enumerate every POSIX file type."""
+
+    name: str
+    entry_type: Literal["file", "dir", "other"]
+    size: int

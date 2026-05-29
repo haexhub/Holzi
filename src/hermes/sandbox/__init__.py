@@ -14,6 +14,7 @@ from hermes.sandbox.errors import (
 )
 from hermes.sandbox.manager import SandboxManager, WorkspaceCrash
 from hermes.sandbox.models import (
+    DirEntry,
     ExecEvent,
     ExecExit,
     ExecOutput,
@@ -26,6 +27,7 @@ from hermes.sandbox.models import (
 )
 
 __all__ = [
+    "DirEntry",
     "ExecEvent",
     "ExecExit",
     "ExecOutput",
