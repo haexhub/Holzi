@@ -151,6 +151,47 @@ async def test_update_rejects_clearing_both(conn: AsyncEngine) -> None:
         )
 
 
+async def test_update_rejects_recurring_to_one_shot_without_due_at(
+    conn: AsyncEngine,
+) -> None:
+    # A naked `clear_schedule=True` on a recurring row would silently keep
+    # the cached cron `due_at` as the new one-shot timestamp — almost
+    # certainly not what the user meant. Require explicit due_at.
+    t = await agent_tasks.create(
+        conn,
+        title="t",
+        prompt="x",
+        schedule="0 8 * * *",
+        timezone="UTC",
+        ts=500,
+    )
+    with pytest.raises(ValueError, match="explicit due_at"):
+        await agent_tasks.update(conn, t.id, clear_schedule=True, ts=500)
+
+
+async def test_update_can_switch_recurring_to_one_shot_with_explicit_due_at(
+    conn: AsyncEngine,
+) -> None:
+    t = await agent_tasks.create(
+        conn,
+        title="t",
+        prompt="x",
+        schedule="0 8 * * *",
+        timezone="UTC",
+        ts=500,
+    )
+    updated = await agent_tasks.update(
+        conn,
+        t.id,
+        clear_schedule=True,
+        due_at=2_000_000_000,
+        ts=500,
+    )
+    assert updated is not None
+    assert updated.schedule is None
+    assert updated.due_at == 2_000_000_000
+
+
 async def test_delete_removes(conn: AsyncEngine) -> None:
     t = await agent_tasks.create(
         conn, title="t", prompt="x", due_at=1_000, ts=500

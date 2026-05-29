@@ -6,11 +6,13 @@ use when the user asks "remind me tomorrow at 9" (one-shot) vs "send me
 a weekly summary every Monday morning" (recurring).
 """
 import json
+import zoneinfo
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import Tool
+from hermes.logging import logger
 from hermes.repository import agent_tasks
 
 
@@ -82,6 +84,17 @@ def _task_create(db: AsyncEngine) -> Tool:
         else:
             return json.dumps({"error": "timezone must be a non-empty string"})
 
+        # Validate IANA tz upfront so an unknown name returns a clear tool
+        # error to the model instead of a deferred ZoneInfoNotFoundError
+        # inside cron evaluation. Mirrors the API boundary's _validate_timezone.
+        try:
+            zoneinfo.ZoneInfo(timezone)
+        except zoneinfo.ZoneInfoNotFoundError:
+            return json.dumps({"error": f"unknown timezone: {timezone!r}"})
+
+        # Narrow the catch so a DB outage or programmer bug bubbles up to
+        # the agent loop's error path (and the run is recorded as error)
+        # instead of being silently fed back to the model as a tool result.
         try:
             t = await agent_tasks.create(
                 db,
@@ -91,9 +104,10 @@ def _task_create(db: AsyncEngine) -> Tool:
                 schedule=schedule,
                 timezone=timezone,
             )
-        except Exception as exc:  # noqa: BLE001 — surface as tool error
-            # Most likely an unknown IANA tz name; the tool layer reports
-            # the message back to the model so it can retry with a better tz.
+        except ValueError as exc:
+            # Repository-level validation (e.g. impossibly-rare cron expr
+            # that croniter accepted but next_fire_after refuses).
+            logger.warning("task_create_value_error", error=str(exc))
             return json.dumps({"error": str(exc)})
         return json.dumps(_task_to_dict(t))
 

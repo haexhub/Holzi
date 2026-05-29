@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import json
 import uuid
+import zoneinfo
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
@@ -1208,8 +1209,6 @@ def _validate_timezone(tz: str) -> None:
     raises `ZoneInfoNotFoundError` (a subclass of KeyError) deep inside
     cron evaluation; without this guard the user sees an opaque server
     error for a perfectly client-side mistake."""
-    import zoneinfo
-
     try:
         zoneinfo.ZoneInfo(tz)
     except zoneinfo.ZoneInfoNotFoundError as exc:

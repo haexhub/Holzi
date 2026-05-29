@@ -208,6 +208,23 @@ async def update(
     if new_schedule is not None:
         validate_schedule(new_schedule)
 
+    # Going from recurring → one-shot without specifying a new `due_at` is
+    # ambiguous: the row's current `due_at` is the *materialised* next cron
+    # firing, and silently freezing it as the one-shot timestamp is almost
+    # certainly not what the user meant. Demand explicit `due_at` in the
+    # same patch.
+    transitioning_to_one_shot = (
+        existing.schedule is not None
+        and new_schedule is None
+        and due_at is None
+        and not clear_due_at
+    )
+    if transitioning_to_one_shot:
+        raise ValueError(
+            "switching from recurring to one-shot requires an explicit due_at "
+            "in the same patch"
+        )
+
     # Materialise the next firing when we have a recurring task and either
     # (a) due_at is empty (caller cleared it or switched from one-shot to
     # recurring) or (b) the rule itself changed (schedule/timezone) so the

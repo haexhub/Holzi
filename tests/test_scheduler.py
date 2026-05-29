@@ -207,6 +207,23 @@ async def test_run_now_does_not_advance_due_at(conn: AsyncEngine) -> None:
     assert refreshed.enabled is True  # not flipped off either
 
 
+async def test_run_now_does_not_disable_one_shot(conn: AsyncEngine) -> None:
+    # The other half of advance=False: a manual run of a one-shot must NOT
+    # flip enabled=0 — that disable belongs to the real scheduled firing.
+    task = await agent_tasks.create(
+        conn, title="once", prompt="manual", due_at=2_000_000_000, ts=500
+    )
+
+    sched = _scheduler(conn)
+    await sched.run_now(task.id)
+
+    refreshed = await agent_tasks.get(conn, task.id)
+    assert refreshed is not None
+    assert refreshed.enabled is True  # still due for the real firing
+    assert refreshed.due_at == 2_000_000_000
+    assert refreshed.last_status == "success"
+
+
 async def test_run_now_missing_raises_lookup_error(conn: AsyncEngine) -> None:
     sched = _scheduler(conn)
     try:
