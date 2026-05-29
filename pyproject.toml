@@ -29,6 +29,7 @@ dev = [
     "asgi-lifespan>=2.1",
     "ruff>=0.7",
     "mypy>=1.13",
+    "types-croniter>=2.0",
 ]
 
 [build-system]

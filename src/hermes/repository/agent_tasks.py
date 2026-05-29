@@ -80,12 +80,13 @@ async def create(
     now = ts if ts is not None else int(time.time())
     # For recurring tasks, materialise the first firing into `due_at` so the
     # scheduler's "enabled AND due_at <= now" query stays cheap (no cron eval
-    # in the hot path).
-    effective_due_at = (
-        due_at if due_at is not None else next_fire_after(
-            schedule, after=now, timezone=timezone
-        )
-    )
+    # in the hot path). The invariant check above guarantees schedule is set
+    # when due_at is None — narrow it explicitly for the type checker.
+    if due_at is not None:
+        effective_due_at = due_at
+    else:
+        assert schedule is not None
+        effective_due_at = next_fire_after(schedule, after=now, timezone=timezone)
     async with engine.begin() as conn:
         result = await conn.execute(
             t_agent_tasks.insert()
@@ -196,7 +197,7 @@ async def update(
     else:
         new_due_at = existing.due_at
 
-    new_schedule: int | None
+    new_schedule: str | None
     if clear_schedule:
         new_schedule = None
     elif schedule is not None:
