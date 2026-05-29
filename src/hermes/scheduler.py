@@ -193,45 +193,20 @@ class AgentTaskScheduler:
                 return result
         finally:
             # Always record the firing, even on error: that's what last_status
-            # is for. mark_run also advances due_at / disables one-shot rows.
+            # is for. `advance=False` on the run-now path leaves due_at /
+            # enabled alone so a manual run doesn't skip the next regular
+            # firing or disable a one-shot prematurely.
             try:
-                if advance_due_at:
-                    await agent_tasks_repo.mark_run(
-                        self.db,
-                        task.id,
-                        run_id=run_id,
-                        status=run_status,
-                        ts=now,
-                    )
-                else:
-                    # Manual run — only update last_*; the scheduler will
-                    # re-pick up the next regular firing as normal.
-                    await self._update_last_run_only(
-                        task.id, run_id=run_id, status=run_status, ts=now
-                    )
+                await agent_tasks_repo.mark_run(
+                    self.db,
+                    task.id,
+                    run_id=run_id,
+                    status=run_status,
+                    ts=now,
+                    advance=advance_due_at,
+                )
             except Exception:  # noqa: BLE001 — never crash the tick loop
                 logger.exception("agent_task_mark_run_failed", task_id=task.id)
-
-    async def _update_last_run_only(
-        self, task_id: int, *, run_id: str, status: str, ts: int
-    ) -> None:
-        """Write last_run_* without touching `due_at`/`enabled`. Used by
-        `run_now` so an ad-hoc manual run doesn't advance the cron schedule
-        or disable a one-shot before its scheduled firing.
-        """
-        from hermes.schema import agent_tasks as t_agent_tasks
-
-        async with self.db.begin() as conn:
-            await conn.execute(
-                t_agent_tasks.update()
-                .where(t_agent_tasks.c.id == task_id)
-                .values(
-                    last_run_at=ts,
-                    last_status=status,
-                    last_run_id=run_id,
-                    updated_at=ts,
-                )
-            )
 
 
 class ConversationSweepScheduler:

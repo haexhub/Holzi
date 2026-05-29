@@ -128,6 +128,41 @@ async def test_api_tasks_create_rejects_invalid_cron(
     assert response.status_code == 400
 
 
+async def test_api_tasks_create_rejects_unknown_timezone(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/tasks",
+        headers=AUTH,
+        json={
+            "title": "x",
+            "prompt": "y",
+            "schedule": "0 8 * * *",
+            "timezone": "Mars/Olympus_Mons",
+        },
+    )
+    assert response.status_code == 400
+    assert "timezone" in response.json()["detail"].lower()
+
+
+async def test_api_tasks_patch_rejects_unknown_timezone(
+    client: httpx.AsyncClient,
+) -> None:
+    task = await agent_tasks.create(
+        app.state.db,
+        title="t",
+        prompt="x",
+        schedule="0 8 * * *",
+        timezone="UTC",
+    )
+    response = await client.patch(
+        f"/api/tasks/{task.id}",
+        headers=AUTH,
+        json={"timezone": "Atlantis/Lost"},
+    )
+    assert response.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # patch
 # ---------------------------------------------------------------------------
@@ -247,6 +282,7 @@ async def test_api_tasks_run_now_returns_queued(
     data = response.json()
     assert data["task_id"] == task.id
     assert data["status"] == "queued"
+    assert "run_id" not in data  # contract change: no pre-allocated id
 
     # Background task fires asynchronously — wait briefly for it to land.
     import asyncio

@@ -1172,10 +1172,17 @@ class TaskResponse(BaseModel):
 
 
 class TaskRunResponse(BaseModel):
-    """Returned from POST /api/tasks/{id}/run while the run is in flight."""
+    """Returned from POST /api/tasks/{id}/run.
+
+    The run is fire-and-forget: by the time this returns 202, the scheduler
+    background task is queued but the `agent_runs` row may not exist yet.
+    Clients see the resulting `last_run_id` via the next `GET /api/tasks/{id}`
+    once the run is recorded. We don't pre-allocate a run id here because the
+    scheduler mints its own (and we'd have to thread it through three layers
+    just so the response could carry a string the UI could already poll for).
+    """
 
     task_id: int
-    run_id: str
     status: Literal["queued"]
 
 
@@ -1194,6 +1201,21 @@ def _task_to_dict(t: Any) -> dict[str, Any]:
         "created_at": t.created_at,
         "updated_at": t.updated_at,
     }
+
+
+def _validate_timezone(tz: str) -> None:
+    """Surface unknown IANA tz names as a 400 instead of a 500. `zoneinfo`
+    raises `ZoneInfoNotFoundError` (a subclass of KeyError) deep inside
+    cron evaluation; without this guard the user sees an opaque server
+    error for a perfectly client-side mistake."""
+    import zoneinfo
+
+    try:
+        zoneinfo.ZoneInfo(tz)
+    except zoneinfo.ZoneInfoNotFoundError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"unknown timezone: {tz!r}"
+        ) from exc
 
 
 def _validate_task_schedule_payload(
@@ -1233,6 +1255,7 @@ async def api_create_task(
     request: Request, body: TaskCreate
 ) -> dict[str, Any]:
     _validate_task_schedule_payload(due_at=body.due_at, schedule=body.schedule)
+    _validate_timezone(body.timezone)
     db: AsyncEngine = request.app.state.db
     t = await agent_tasks.create(
         db,
@@ -1251,13 +1274,15 @@ async def api_patch_task(
     request: Request, task_id: int, body: TaskUpdate
 ) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
-    # If the patch crosses the one-shot/recurring boundary, validate up
-    # front so the repository raises into a useful 400 instead of 500.
+    # Validate cron + tz up front so the repository's ValueError /
+    # ZoneInfoNotFoundError surfaces as a useful 400 instead of a 500.
     if body.schedule is not None:
         try:
             agent_tasks.validate_schedule(body.schedule)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if body.timezone is not None:
+        _validate_timezone(body.timezone)
     try:
         updated = await agent_tasks.update(
             db,
@@ -1294,10 +1319,11 @@ async def api_delete_task(request: Request, task_id: int) -> Response:
 async def api_run_task_now(
     request: Request, task_id: int
 ) -> dict[str, Any]:
-    """Fire a task immediately as a background job; respond 202 with the
-    pre-allocated `run_id` so the UI can correlate the firing with the
-    `agent_runs` row that will appear shortly. Does NOT advance the cron
-    schedule — a manual run shouldn't skip the next due occurrence.
+    """Fire a task immediately as a background job; respond 202 so the
+    client knows the run was accepted. The resulting `agent_runs` row id
+    lands on the task's `last_run_id` once the scheduler records it —
+    clients poll `GET /api/tasks/{id}` to pick it up. Does NOT advance the
+    cron schedule — a manual run shouldn't skip the next due occurrence.
     """
     db: AsyncEngine = request.app.state.db
     task = await agent_tasks.get(db, task_id)
@@ -1310,21 +1336,11 @@ async def api_run_task_now(
             status_code=503, detail="scheduler not configured"
         )
 
-    # Allocate the run id here so the response can carry it before the
-    # background task has called track_run. Scheduler.run_now mints its
-    # own run id internally, so for the API to return a meaningful id we
-    # rely on the task row's `last_run_id` once mark_run lands — the UI
-    # polls /api/tasks/{id} after this returns. Simpler than threading
-    # the id through.
     asyncio.create_task(
         _run_task_background(scheduler, task_id),
         name=f"task-run-now-{task_id}",
     )
-    return {
-        "task_id": task_id,
-        "run_id": "",  # filled in by the next /api/tasks/{id} read
-        "status": "queued",
-    }
+    return {"task_id": task_id, "status": "queued"}
 
 
 async def _run_task_background(scheduler: Any, task_id: int) -> None:

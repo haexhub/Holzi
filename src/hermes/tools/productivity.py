@@ -38,8 +38,15 @@ def _task_to_dict(t: Any) -> dict[str, Any]:
 
 def _task_create(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
-        title = str(args.get("title", "")).strip()
-        prompt = str(args.get("prompt", "")).strip()
+        # Coercing via `str(...)` would silently accept ints/booleans/None as
+        # text — fail loudly instead so a misbehaving LLM call can't store
+        # `"None"` as the title of a daily task.
+        title_arg = args.get("title")
+        prompt_arg = args.get("prompt")
+        if not isinstance(title_arg, str) or not isinstance(prompt_arg, str):
+            return json.dumps({"error": "title and prompt must be strings"})
+        title = title_arg.strip()
+        prompt = prompt_arg.strip()
         if not title or not prompt:
             return json.dumps({"error": "title and prompt are required"})
 
@@ -67,16 +74,27 @@ def _task_create(db: AsyncEngine) -> Tool:
             except ValueError as exc:
                 return json.dumps({"error": str(exc)})
 
-        timezone = str(args.get("timezone", "UTC"))
+        tz_arg = args.get("timezone")
+        if tz_arg is None:
+            timezone = "UTC"
+        elif isinstance(tz_arg, str) and tz_arg.strip():
+            timezone = tz_arg
+        else:
+            return json.dumps({"error": "timezone must be a non-empty string"})
 
-        t = await agent_tasks.create(
-            db,
-            title=title,
-            prompt=prompt,
-            due_at=due_at,
-            schedule=schedule,
-            timezone=timezone,
-        )
+        try:
+            t = await agent_tasks.create(
+                db,
+                title=title,
+                prompt=prompt,
+                due_at=due_at,
+                schedule=schedule,
+                timezone=timezone,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface as tool error
+            # Most likely an unknown IANA tz name; the tool layer reports
+            # the message back to the model so it can retry with a better tz.
+            return json.dumps({"error": str(exc)})
         return json.dumps(_task_to_dict(t))
 
     return Tool(

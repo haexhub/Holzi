@@ -115,13 +115,20 @@ notes = Table(
 Index("notes_tags", notes.c.tags)
 
 
-# Scheduled and one-shot agent runs (Plan 16). `due_at` is set for one-shot
-# tasks (cleared after firing — `enabled` flips to 0), `schedule` is set for
-# recurring tasks (cron expression interpreted in `timezone`). Exactly one of
-# the two is non-NULL — enforced at the repository layer rather than via a
-# CHECK constraint so we can evolve the trigger shape (e.g. interval, ical)
-# without an awkward table rebuild. `last_run_id` points at the agent_runs
-# row the scheduler produced last (NULL until the first firing).
+# Scheduled and one-shot agent runs (Plan 16). Two shapes:
+#   - One-shot: `schedule = NULL`, `due_at` is the firing time. After
+#     `mark_run` records the firing, `enabled` flips to 0; the row stays so
+#     the user can still see its history. `due_at` is not cleared.
+#   - Recurring: `schedule` is a 5-field cron expression interpreted in
+#     `timezone`. `due_at` carries the *materialised* next firing — computed
+#     at create time and rolled forward by `mark_run` after each tick — so
+#     the scheduler's "enabled AND due_at <= now" query stays cheap and
+#     index-friendly (no cron eval in the hot path).
+# Invariant `due_at IS NOT NULL` enforced at the repository layer rather
+# than via a DB CHECK so we can evolve the trigger shape (e.g. interval,
+# ical) without an awkward SQLite table rebuild. `last_run_id` is a loose
+# pointer at the agent_runs row the scheduler produced last (NULL until
+# the first firing); see the column comment below for why it isn't a real FK.
 agent_tasks = Table(
     "agent_tasks",
     metadata,

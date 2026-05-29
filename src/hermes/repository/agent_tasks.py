@@ -261,13 +261,17 @@ async def mark_run(
     run_id: str,
     status: str,
     ts: int | None = None,
+    advance: bool = True,
 ) -> AgentTask | None:
     """Record one firing of `task_id`.
 
-    For recurring tasks (schedule != NULL) advances `due_at` to the next cron
-    occurrence; for one-shot tasks (due_at != NULL, schedule == NULL) flips
-    `enabled` to 0 so the row stops being picked up by `list_due`. The row
-    itself stays around so the user can still see its history in the UI.
+    With `advance=True` (the default, scheduler tick path): for recurring
+    tasks (schedule != NULL) advances `due_at` to the next cron occurrence;
+    for one-shot tasks flips `enabled` to 0 so the row stops being picked
+    up by `list_due`. With `advance=False` (run-now path): writes only the
+    last_run_* columns, leaving `due_at`/`enabled` alone so an ad-hoc
+    manual run doesn't skip the next scheduled occurrence or disable a
+    one-shot before its real firing.
     """
     existing = await get(engine, task_id)
     if existing is None:
@@ -280,12 +284,13 @@ async def mark_run(
         "last_run_id": run_id,
         "updated_at": now,
     }
-    if existing.schedule is not None:
-        values["due_at"] = next_fire_after(
-            existing.schedule, after=now, timezone=existing.timezone
-        )
-    else:
-        values["enabled"] = 0
+    if advance:
+        if existing.schedule is not None:
+            values["due_at"] = next_fire_after(
+                existing.schedule, after=now, timezone=existing.timezone
+            )
+        else:
+            values["enabled"] = 0
 
     async with engine.begin() as conn:
         await conn.execute(

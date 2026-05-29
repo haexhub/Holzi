@@ -133,8 +133,9 @@ async def test_fire_due_records_failure_without_advancing_enabled(
     sched = _scheduler(conn, runner=_stub_runner(raises=RuntimeError("nope")))
     fired = await sched.fire_due(now=2_000)
 
-    # Counted as fired (the loop attempted it) — `fired` counts attempts
-    # that reached mark_run, regardless of success.
+    # `fired` counts only successful firings (the `fired += 1` lives after
+    # `_fire_one`, which re-raises on the runner's error). The failure is
+    # still recorded on the row via `mark_run` in the finally block.
     assert fired == 0
     refreshed = await agent_tasks.get(conn, task.id)
     assert refreshed is not None
@@ -154,7 +155,9 @@ async def test_fire_due_keeps_other_tasks_running_after_one_fails(
 ) -> None:
     # If one task blows up, the others scheduled at the same tick must
     # still get their chance. The scheduler can't trust user-authored
-    # prompts to be well-behaved.
+    # prompts to be well-behaved. Dispatch on the conversation title
+    # rather than call order: list_due only orders by due_at, so two rows
+    # with the same due_at could come back in implementation-defined order.
     bad = await agent_tasks.create(
         conn, title="bad", prompt="x", due_at=1_000, ts=500
     )
@@ -162,15 +165,11 @@ async def test_fire_due_keeps_other_tasks_running_after_one_fails(
         conn, title="good", prompt="y", due_at=1_000, ts=500
     )
 
-    calls: list[int] = []
-
     async def runner(*, db: AsyncEngine, conversation_id: int, **kwargs: Any) -> str:
-        # Order matches list_due ordering (asc due_at, asc title) — `bad`
-        # comes before `good`. Force `bad` to fail, `good` to succeed.
-        if not calls:
-            calls.append(0)
-            raise RuntimeError("first one fails")
-        calls.append(1)
+        convo = await conversations.get(db, conversation_id)
+        assert convo is not None
+        if convo.title == "[task] bad":
+            raise RuntimeError("this one fails")
         await messages.append(
             db, conversation_id=conversation_id, role="assistant", content="ok"
         )
@@ -179,7 +178,6 @@ async def test_fire_due_keeps_other_tasks_running_after_one_fails(
     sched = _scheduler(conn, runner=runner)
     await sched.fire_due(now=2_000)
 
-    assert calls == [0, 1]
     bad_after = await agent_tasks.get(conn, bad.id)
     good_after = await agent_tasks.get(conn, good.id)
     assert bad_after is not None and bad_after.last_status == "error"

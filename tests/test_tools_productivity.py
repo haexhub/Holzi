@@ -52,6 +52,26 @@ async def test_task_create_rejects_missing_title(conn: AsyncEngine) -> None:
     assert json.loads(raw)["error"]
 
 
+async def test_task_create_rejects_non_string_title(conn: AsyncEngine) -> None:
+    # Guard against silent str() coercion of None/booleans/ints — would
+    # otherwise turn `title=None` into the literal string `"None"`.
+    tool = _by_name(build_productivity_tools(conn), "task_create")
+    raw = await tool.handler({"title": 42, "prompt": "x", "due_at": 1})
+    assert "strings" in json.loads(raw)["error"]
+
+
+async def test_task_create_rejects_unknown_timezone(conn: AsyncEngine) -> None:
+    tool = _by_name(build_productivity_tools(conn), "task_create")
+    raw = await tool.handler({
+        "title": "t",
+        "prompt": "x",
+        "schedule": "0 8 * * *",
+        "timezone": "Mars/Olympus_Mons",
+    })
+    out = json.loads(raw)
+    assert "error" in out
+
+
 async def test_task_create_rejects_both_due_at_and_schedule(
     conn: AsyncEngine,
 ) -> None:
