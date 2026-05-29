@@ -11,6 +11,7 @@ the isolated network — never the agent's.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 
@@ -213,10 +214,8 @@ class SandboxManager:
     def remove_crash_handler(self, handler: CrashHandler) -> None:
         """Unsubscribe a handler. No-op if it isn't registered — callers in
         SSE/finally paths can call this without first checking."""
-        try:
+        if handler in self._crash_handlers:
             self._crash_handlers.remove(handler)
-        except ValueError:
-            pass
 
     async def start_health_watcher(self, *, interval: float = 5.0) -> None:
         """Begin polling cached workspaces for liveness. Idempotent."""
@@ -233,10 +232,8 @@ class SandboxManager:
             return
         self._watcher_task = None
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
     async def check_health_once(self) -> None:
         """Single pass over cached workspaces. Exposed for tests so they can
