@@ -1081,7 +1081,9 @@ async def api_list_notes(
 ) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
-    if q:
+    # Whitespace-only `q` is treated the same as an absent `q` — falling
+    # through to list_all keeps `?q=` and `?q=%20%20` symmetric.
+    if q and q.strip():
         sanitised = _fts5_query(q)
         if not sanitised:
             return []

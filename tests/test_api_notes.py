@@ -144,15 +144,38 @@ async def test_api_notes_search_empty_query_returns_full_list(
 async def test_api_notes_search_tolerates_fts_special_chars(
     client: httpx.AsyncClient,
 ) -> None:
-    # FTS5 raw syntax rejects bare punctuation like quotes/colons — the route
-    # has to sanitise the query before MATCH, otherwise the user gets a 500
-    # the moment they type something like `it's:` into the search box.
+    # FTS5 raw syntax rejects bare punctuation like quotes/colons and treats
+    # bare operators like AND/OR/NOT as syntax. The route has to sanitise
+    # the query before MATCH, otherwise the user gets a 500 the moment they
+    # type something like `it's:` or `AND` into the search box.
     await notes.upsert(app.state.db, key="k", content="alpha bravo")
 
+    # Quotes around a known term still hit.
     response = await client.get('/api/notes?q="alpha"', headers=AUTH)
     assert response.status_code == 200
     assert [n["key"] for n in response.json()] == ["k"]
 
+    # A bare FTS5 operator must not 500 (this is what would happen without
+    # the sanitiser; raw `MATCH 'AND'` raises OperationalError).
+    response = await client.get("/api/notes?q=AND", headers=AUTH)
+    assert response.status_code == 200
+
+    # Operator characters get stripped, so `:` becomes "foobar" — proves
+    # the colon isn't passed through to FTS5.
     response = await client.get("/api/notes?q=foo:bar", headers=AUTH)
     assert response.status_code == 200
     assert response.json() == []
+
+
+async def test_api_notes_search_whitespace_only_returns_full_list(
+    client: httpx.AsyncClient,
+) -> None:
+    # `?q=` (empty) and `?q=%20%20%20` (whitespace) should be symmetric —
+    # both fall through to list_all rather than the empty-result branch.
+    await notes.upsert(app.state.db, key="a", content="alpha")
+    await notes.upsert(app.state.db, key="b", content="beta")
+
+    response = await client.get("/api/notes?q=%20%20%20", headers=AUTH)
+    assert response.status_code == 200
+    keys = sorted(n["key"] for n in response.json())
+    assert keys == ["a", "b"]
