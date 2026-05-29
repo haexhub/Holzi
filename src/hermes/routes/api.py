@@ -1061,11 +1061,35 @@ def _note_to_dict(n: Any) -> dict[str, Any]:
     }
 
 
+def _fts5_query(raw: str) -> str:
+    # FTS5 treats `"`, `:`, `*`, `(`, `)`, `-`, etc. as syntax, so a user's
+    # free-form search string would otherwise raise OperationalError at the DB
+    # boundary. Split on whitespace, drop any non-alnum chars per token, and
+    # quote each surviving token as a phrase — that gives multi-term AND
+    # matching without exposing FTS5 operator syntax to the UI.
+    tokens: list[str] = []
+    for raw_token in raw.split():
+        cleaned = "".join(c for c in raw_token if c.isalnum() or c == "_")
+        if cleaned:
+            tokens.append(f'"{cleaned}"')
+    return " ".join(tokens)
+
+
 @router.get("/notes", response_model=list[NoteResponse])
-async def api_list_notes(request: Request, limit: int = 100) -> list[dict[str, Any]]:
+async def api_list_notes(
+    request: Request, limit: int = 100, q: str | None = None
+) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
-    items = await notes.list_all(db, limit=limit)
+    # Whitespace-only `q` is treated the same as an absent `q` — falling
+    # through to list_all keeps `?q=` and `?q=%20%20` symmetric.
+    if q and q.strip():
+        sanitised = _fts5_query(q)
+        if not sanitised:
+            return []
+        items = await notes.find(db, query=sanitised, limit=limit)
+    else:
+        items = await notes.list_all(db, limit=limit)
     return [_note_to_dict(n) for n in items]
 
 
