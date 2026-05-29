@@ -22,6 +22,7 @@ from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
 from hermes.repository import llm_credentials as llm_credentials_repo
 from hermes.routes.api import router as api_router
+from hermes.routes.diagnostics import router as diagnostics_router
 from hermes.routes.chat import router as chat_router
 from hermes.routes.llm import router as llm_router
 from hermes.routes.messenger import router as messenger_router
@@ -321,6 +322,7 @@ app.include_router(api_router)
 app.include_router(llm_router)
 app.include_router(messenger_router)
 app.include_router(workspace_router)
+app.include_router(diagnostics_router)
 
 
 @app.get("/healthz")
