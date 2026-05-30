@@ -292,6 +292,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # the manager dedupes per (workspace_id, sandbox_id), so live
             # streams and the DB both receive exactly one event per crash.
             async def persist_crash(crash: WorkspaceCrash) -> None:
+                # Clean shutdown order disposes the engine *after* the
+                # health watcher stops, so this branch shouldn't fire on
+                # the happy path. But the watcher catches all exceptions
+                # in its loop, and the manager isolates per-handler
+                # failures — keep this guard so a degraded boot (where
+                # `app.state.db` was never set) doesn't spam warnings on
+                # every tick.
+                if app.state.db is None:
+                    return
                 try:
                     await sandbox_crashes_repo.insert(
                         app.state.db,

@@ -99,6 +99,42 @@ async def test_persist_handler_records_oom_with_null_exit_code(
     assert rows[0].exit_code is None
 
 
+async def test_persist_handler_failure_does_not_block_other_handlers(
+    conn: AsyncEngine,
+) -> None:
+    """Defence-in-depth: even if the persistence handler crashes (DB
+    dispose'd, schema drift, bug, …), the manager's per-handler isolation
+    must keep firing the other registered handlers. The live SSE handler
+    in `routes/api.py` must not silently disappear just because the
+    persistence half blew up."""
+    mgr, backend = make_manager()
+
+    async def failing_persist(crash: WorkspaceCrash) -> None:
+        raise RuntimeError("simulated db failure")
+
+    recorded: list[WorkspaceCrash] = []
+
+    async def downstream(crash: WorkspaceCrash) -> None:
+        recorded.append(crash)
+
+    # Order matters: failing handler subscribed first, so a non-isolating
+    # loop would never reach `downstream`.
+    mgr.add_crash_handler(failing_persist)
+    mgr.add_crash_handler(downstream)
+
+    handle = await mgr.get_workspace("ws-1")
+    backend.simulate_crash(handle.id)
+    await mgr.check_health_once()
+
+    assert len(recorded) == 1
+    # And the watcher itself is still alive — a follow-up tick on a
+    # fresh workspace still propagates.
+    other = await mgr.get_workspace("ws-2")
+    backend.simulate_crash(other.id)
+    await mgr.check_health_once()
+    assert len(recorded) == 2
+
+
 async def test_persist_handler_records_each_restart_as_new_row(
     conn: AsyncEngine,
 ) -> None:
