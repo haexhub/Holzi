@@ -168,14 +168,90 @@ async def test_diagnostics_with_workspace_roots_configured(
 
 
 # ---------------------------------------------------------------------------
-# auth_token redaction
+# liveness edges
 # ---------------------------------------------------------------------------
 
 
-async def test_diagnostics_does_not_leak_auth_token(
+async def test_diagnostics_reports_error_when_scheduler_task_died(
     client: httpx.AsyncClient,
 ) -> None:
-    """The bearer token reached the endpoint, but the response must never
-    echo it back."""
+    """The scheduler manager survives a crashed background loop —
+    `is not None` would silently report 'ok'. Killing the task should
+    flip the check to error."""
+    scheduler = app.state.scheduler
+    assert scheduler is not None
+    original_task = scheduler._task
+    try:
+        scheduler._task = None
+        response = await client.get("/api/diagnostics", headers=AUTH)
+        sched = _check(response.json(), "scheduler")
+        assert sched["status"] == "error"
+    finally:
+        scheduler._task = original_task
+
+
+async def test_diagnostics_handles_missing_db_engine(
+    client: httpx.AsyncClient,
+) -> None:
+    """If the DB engine isn't on app.state the LLM and messenger checks
+    can't run; they must surface as 'error' rather than crashing."""
+    original_db = app.state.db
+    try:
+        app.state.db = None
+        response = await client.get("/api/diagnostics", headers=AUTH)
+        body = response.json()
+        assert _check(body, "database")["status"] == "error"
+        assert _check(body, "llm")["status"] == "error"
+        assert _check(body, "messenger")["status"] == "error"
+        assert body["overall"] == "error"
+    finally:
+        app.state.db = original_db
+
+
+# ---------------------------------------------------------------------------
+# user-input truncation
+# ---------------------------------------------------------------------------
+
+
+async def test_diagnostics_truncates_long_display_name(
+    client: httpx.AsyncClient,
+) -> None:
+    """`display_name` is user-controlled — an oversized or multiline
+    value must not dominate the response."""
+    long_name = "x" * 500 + "\nsecond line"
+    blob = app.state.encryptor.encrypt("sk-test")
+    cred = await llm_repo.create_api_key(
+        app.state.db,
+        provider="openai",
+        display_name=long_name,
+        base_url=None,
+        ciphertext=blob,
+    )
+    await llm_repo.activate(app.state.db, cred.id)
+
     response = await client.get("/api/diagnostics", headers=AUTH)
-    assert VALID_TOKEN not in response.text
+    msg = _check(response.json(), "llm")["message"]
+    # Length cap (48) + the surrounding "active credential: … (model …)"
+    # chrome stays under a comfortable ceiling.
+    assert len(msg) < 120
+    assert "\n" not in msg
+
+
+async def test_diagnostics_truncates_long_workspace_root_list(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The workspace message is meant to be short — many configured
+    roots should collapse to a count + first-few preview."""
+    from hermes import config as hermes_config
+
+    roots = [f"workspace-{i}" for i in range(20)]
+    monkeypatch.setattr(
+        hermes_config.settings, "workspace_roots", ",".join(roots)
+    )
+    response = await client.get("/api/diagnostics", headers=AUTH)
+    msg = _check(response.json(), "workspace")["message"]
+    assert "20 root(s)" in msg
+    # First three should appear, the trailing ones should not.
+    assert "workspace-0" in msg
+    assert "workspace-19" not in msg
+    assert "…" in msg

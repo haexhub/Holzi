@@ -42,6 +42,15 @@ class DiagnosticsResponse(BaseModel):
     checks: list[DiagnosticsCheck]
 
 
+def _summarise(value: str, *, max_len: int) -> str:
+    """Compact user-controlled free text into a single-line, length-capped
+    form so the diagnostics `message` field stays predictable."""
+    one_line = " ".join(value.split())
+    if len(one_line) <= max_len:
+        return one_line
+    return one_line[: max_len - 1] + "…"
+
+
 async def _check_database(db: AsyncEngine | None) -> DiagnosticsCheck:
     if db is None:
         return DiagnosticsCheck(
@@ -75,7 +84,11 @@ async def _check_llm(db: AsyncEngine) -> DiagnosticsCheck:
             status="warning",
             message="no active LLM credential — chat will fail until one is configured",
         )
-    display = active.display_name or active.provider
+    # display_name is user-controlled free text — truncate so an oversized
+    # or multiline value can't dominate the response or push the badge
+    # off-screen on the frontend.
+    raw_display = active.display_name or active.provider
+    display = _summarise(raw_display, max_len=48)
     model = active.model or settings.model
     return DiagnosticsCheck(
         id="llm",
@@ -113,6 +126,17 @@ def _check_scheduler(request: Request) -> DiagnosticsCheck:
             status="error",
             message="agent task scheduler did not start",
         )
+    # Reaching into `_task` is deliberate: the scheduler manager survives
+    # a crashed background loop (the asyncio.Task transitions to done()),
+    # so `is not None` alone would silently report "ok" while no tasks fire.
+    task = scheduler._task
+    if task is None or task.done():
+        return DiagnosticsCheck(
+            id="scheduler",
+            label="Scheduler",
+            status="error",
+            message="agent task scheduler is not running (loop stopped)",
+        )
     return DiagnosticsCheck(
         id="scheduler",
         label="Scheduler",
@@ -130,23 +154,27 @@ def _check_workspace() -> DiagnosticsCheck:
             status="warning",
             message="no workspace roots configured (HERMES_WORKSPACE_ROOTS empty)",
         )
+    preview = ", ".join(roots[:3]) + ("…" if len(roots) > 3 else "")
     return DiagnosticsCheck(
         id="workspace",
         label="Workspaces",
         status="ok",
-        message=f"{len(roots)} root(s) configured: {', '.join(roots)}",
+        message=f"{len(roots)} root(s) configured: {preview}",
     )
 
 
 def _check_sandbox(request: Request) -> DiagnosticsCheck:
     manager = request.app.state.sandbox_manager
     if manager is not None:
+        # "configured" rather than "ready" — manager creation succeeds at
+        # boot but we don't ping the Podman socket here. A dead socket
+        # surfaces lazily on the first sandbox spawn.
         return DiagnosticsCheck(
             id="sandbox",
             label="Sandbox runtime",
             status="ok",
             message=(
-                f"rootless Podman ready "
+                f"rootless Podman configured "
                 f"(image {settings.sandbox_image}, network {settings.sandbox_network})"
             ),
         )
