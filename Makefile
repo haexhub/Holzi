@@ -27,7 +27,12 @@ ifeq ($(CONTAINER_BIN),docker)
   COMPOSE_LOCAL_OVERLAYS :=
   SANDBOX_IMAGE_DEP :=
 else ifeq ($(CONTAINER_BIN),podman)
-  export HERMES_CONTAINER_SOCKET ?= $(XDG_RUNTIME_DIR)/podman/podman.sock
+  # XDG_RUNTIME_DIR is normally /run/user/$(id -u) for an interactive
+  # session but can be empty under sudo / cron / minimal CI shells.
+  # Fall back to the canonical runtime dir derived from the current uid
+  # so the resolved socket path never starts with "/podman/...".
+  PODMAN_SOCKET_DEFAULT := $(if $(XDG_RUNTIME_DIR),$(XDG_RUNTIME_DIR),/run/user/$(shell id -u))/podman/podman.sock
+  export HERMES_CONTAINER_SOCKET ?= $(PODMAN_SOCKET_DEFAULT)
   COMPOSE_LOCAL_OVERLAYS := -f docker-compose.local.podman.yml
   SANDBOX_IMAGE_DEP := sandbox-image
 endif

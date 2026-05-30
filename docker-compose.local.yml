@@ -224,9 +224,12 @@ services:
       - "127.0.0.1:${HERMES_LOCAL_DASHBOARD_PORT:-11000}:8080"
     volumes:
       # Container-control socket — docker.sock on Docker hosts, the rootless
-      # Podman socket on Podman hosts. The Makefile resolves the default per
-      # detected runtime; override via HERMES_CONTAINER_SOCKET in .env.
-      - ${HERMES_CONTAINER_SOCKET}:/var/run/docker.sock:ro
+      # Podman socket on Podman hosts. The Makefile resolves the right value
+      # per detected runtime; the `:-` default keeps hand-run `compose -f …`
+      # invocations on Docker hosts working when HERMES_CONTAINER_SOCKET is
+      # not exported. Podman hosts MUST run through the Makefile or set the
+      # variable explicitly.
+      - ${HERMES_CONTAINER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
     networks:
       - hermes-local
 

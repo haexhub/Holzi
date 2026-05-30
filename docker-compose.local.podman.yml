@@ -23,6 +23,8 @@ services:
       HERMES_SANDBOX_NETWORK: ${HERMES_SANDBOX_NETWORK:-none}
       HERMES_SANDBOX_IMAGE: ${HERMES_SANDBOX_IMAGE:-hermes-sandbox:dev}
     volumes:
-      # Host-side path comes from HERMES_CONTAINER_SOCKET (set by the Makefile
-      # to $XDG_RUNTIME_DIR/podman/podman.sock for the Podman runtime).
-      - ${HERMES_CONTAINER_SOCKET}:/run/podman/podman.sock
+      # Host-side path comes from HERMES_CONTAINER_SOCKET. The Makefile sets
+      # it to $XDG_RUNTIME_DIR/podman/podman.sock (with a /run/user/$(id -u)
+      # fallback for shells that don't carry XDG_RUNTIME_DIR). The `:-`
+      # default below covers hand-run compose without the Makefile.
+      - ${HERMES_CONTAINER_SOCKET:-/run/user/1000/podman/podman.sock}:/run/podman/podman.sock
