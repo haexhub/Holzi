@@ -76,14 +76,15 @@ def _check(body: dict, check_id: str) -> dict:
 async def test_diagnostics_default_state_flags_missing_setup(
     client: httpx.AsyncClient,
 ) -> None:
-    """Fresh boot: no LLM credential, no messenger, no workspace roots,
-    no sandbox socket → warnings, but db + scheduler are ok."""
+    """Fresh boot: no LLM credential, no workspace roots, no sandbox socket
+    → warnings, but db + scheduler are ok. Messenger is an optional bridge,
+    so its absence stays `ok` and doesn't pollute the overall badge."""
     body = (await client.get("/api/diagnostics", headers=AUTH)).json()
 
     assert _check(body, "database")["status"] == "ok"
     assert _check(body, "scheduler")["status"] == "ok"
     assert _check(body, "llm")["status"] == "warning"
-    assert _check(body, "messenger")["status"] == "warning"
+    assert _check(body, "messenger")["status"] == "ok"
     assert _check(body, "workspace")["status"] == "warning"
     assert _check(body, "sandbox")["status"] == "warning"
     # Overall = worst of children → warning when anything is < ok.
@@ -143,8 +144,23 @@ async def test_diagnostics_with_active_messenger_account_reports_ok(
     messenger = _check(body, "messenger")
 
     assert messenger["status"] == "ok"
+    # Distinguishes the "configured" case from the "optional / not set up" case.
+    assert "active account" in messenger["message"]
     # Phone numbers are PII — must not be returned verbatim.
     assert phone not in response.text
+
+
+async def test_diagnostics_without_messenger_account_is_ok_not_warning(
+    client: httpx.AsyncClient,
+) -> None:
+    """Messenger is an optional Signal/Telegram bridge — its absence is a
+    valid web-only configuration, not a setup issue. Status must be `ok` so
+    the overall badge stays green when only LLM is configured."""
+    response = await client.get("/api/diagnostics", headers=AUTH)
+    messenger = _check(response.json(), "messenger")
+
+    assert messenger["status"] == "ok"
+    assert "optional" in messenger["message"].lower()
 
 
 # ---------------------------------------------------------------------------
