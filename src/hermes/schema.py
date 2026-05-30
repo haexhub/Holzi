@@ -312,6 +312,29 @@ Index(
 )
 
 
+# Plan 25: workspaces as a first-class managed object. The slug (`id`) is
+# stable kebab-case (validated at the repository layer) and is the only
+# user-controlled piece that ends up in a path — the on-disk location is
+# always `${sandbox_volume_root}/${id}`, never user-controlled outside the
+# slug. `display_name` is rename-friendly UI text. Soft-delete via
+# `archived_at`: rows are tombstoned, the on-disk directory stays (hard
+# delete is an explicit follow-up plan).
+#
+# `HERMES_WORKSPACE_ROOTS` env still works as a *bootstrap* — the lifespan
+# backfills any slug from the env that isn't already in the table — but
+# this table is the source of truth from Plan 25 onwards.
+workspaces = Table(
+    "workspaces",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("display_name", Text, nullable=False),
+    Column("created_at", Integer, nullable=False),
+    # NULL until archived; non-NULL rows are excluded from list_active by
+    # default so the UI's primary view stays clean.
+    Column("archived_at", Integer),
+)
+
+
 # Plan 21: always-scope tool approvals. Session-scope lives purely on
 # `app.state.session_approvals` (dict[conversation_id, set[tool_name]]); only
 # `allow_always` decisions need to survive a process restart, so only those
