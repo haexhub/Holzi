@@ -21,7 +21,7 @@ Adjacent endpoints (existing, deliberately *not* moved here):
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Literal
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -167,7 +167,7 @@ async def _drain_exec(
         return await run()
     try:
         return await asyncio.wait_for(run(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return None
 
 

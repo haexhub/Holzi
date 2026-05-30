@@ -13,7 +13,6 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 
-from hermes import config as hermes_config
 from hermes.main import app
 from hermes.repository import workspaces as repo
 from hermes.repository.workspaces import validate_slug
