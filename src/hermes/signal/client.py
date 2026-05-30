@@ -1,6 +1,9 @@
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+import websockets
 
 
 class SignalClient:
@@ -8,19 +11,30 @@ class SignalClient:
         self.http = http
         self.number = number
 
-    async def receive(self, *, timeout: int = 30) -> list[dict[str, Any]]:
-        response = await self.http.get(
-            f"/v1/receive/{self.number}",
-            params={"timeout": timeout},
-            timeout=timeout + 5,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, list):
-            raise ValueError(
-                f"signal-cli /v1/receive returned non-list payload: {type(payload).__name__}"
-            )
-        return payload
+    def _ws_url(self) -> str:
+        base = str(self.http.base_url).rstrip("/")
+        if base.startswith("https://"):
+            ws_base = "wss://" + base[len("https://") :]
+        elif base.startswith("http://"):
+            ws_base = "ws://" + base[len("http://") :]
+        else:
+            ws_base = base
+        return f"{ws_base}/v1/receive/{self.number}"
+
+    async def receive_stream(self) -> AsyncIterator[dict[str, Any]]:
+        """Open a WebSocket to signal-cli-rest-api's /v1/receive endpoint
+        (json-rpc mode contract) and yield each decoded envelope dict.
+
+        The HTTP GET variant is intentionally not used — in json-rpc mode it
+        silently no-ops. Reconnect policy lives in the caller (SignalWorker).
+        """
+        url = self._ws_url()
+        async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+            async for raw in ws:
+                payload_text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+                payload = json.loads(payload_text)
+                if isinstance(payload, dict):
+                    yield payload
 
     async def send(self, *, recipient: str, message: str) -> None:
         response = await self.http.post(
