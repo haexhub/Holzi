@@ -70,3 +70,6 @@ frontend/.output/
 .claude/
 .playwright-mcp/
 docs/
+
+# Git worktrees
+.worktrees/
