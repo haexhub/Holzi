@@ -23,6 +23,7 @@ from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
 from hermes.repository import llm_credentials as llm_credentials_repo
 from hermes.repository import sandbox_crashes as sandbox_crashes_repo
+from hermes.repository import workspaces as workspaces_repo
 from hermes.routes.api import router as api_router
 from hermes.routes.chat import router as chat_router
 from hermes.routes.diagnostics import router as diagnostics_router
@@ -30,6 +31,7 @@ from hermes.routes.llm import router as llm_router
 from hermes.routes.messenger import router as messenger_router
 from hermes.routes.sandbox import router as sandbox_router
 from hermes.routes.workspace import router as workspace_router
+from hermes.routes.workspaces import router as workspaces_router
 from hermes.run_tracker import track_run
 from hermes.sandbox import WorkspaceCrash
 from hermes.sandbox.factory import build_sandbox_manager
@@ -132,6 +134,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     try:
         app.state.db = await init_db(settings.db_path)
+
+        # Plan 25: backfill workspaces from HERMES_WORKSPACE_ROOTS. The env
+        # is the bootstrap mechanism; the DB is the source of truth from
+        # this point on. Idempotent — already-seeded slugs are skipped, so
+        # operators can leave the env in place during the transition.
+        env_slugs = [
+            r.strip()
+            for r in settings.workspace_roots.split(",")
+            if r.strip()
+        ]
+        if env_slugs:
+            inserted = await workspaces_repo.backfill_from_env(
+                app.state.db, slugs=env_slugs
+            )
+            if inserted:
+                logger.info(
+                    "workspaces_backfilled_from_env",
+                    count=len(inserted),
+                    slugs=inserted,
+                )
+
         # Master key lives next to the DB so backups capture both. Pure
         # in-memory DBs (test path) fall back to a temp file under cwd.
         key_file = (
@@ -367,6 +390,7 @@ app.include_router(api_router)
 app.include_router(llm_router)
 app.include_router(messenger_router)
 app.include_router(workspace_router)
+app.include_router(workspaces_router)
 app.include_router(sandbox_router)
 app.include_router(diagnostics_router)
 

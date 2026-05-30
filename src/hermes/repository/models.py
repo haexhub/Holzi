@@ -133,6 +133,18 @@ class ToolApproval:
 
 
 @dataclass(frozen=True, slots=True)
+class Workspace:
+    """A row from `workspaces` (Plan 25). `id` is the stable kebab-case slug
+    used as the workspace_id on `SandboxManager` and as the path component
+    `${sandbox_volume_root}/${id}`. `archived_at` is None for active rows."""
+
+    id: str
+    display_name: str
+    created_at: int
+    archived_at: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class MessengerAccount:
     """A row from `messenger_accounts`. `bot_token_*` ciphertext columns
     are only populated for telegram rows; signal rows leave them NULL and
