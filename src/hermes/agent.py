@@ -2,12 +2,13 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import attachments as attachments_mod
+from hermes.events import ApprovalDecisionLiteral
 from hermes.repository import attachments, messages
 from hermes.repository.models import Attachment
 
@@ -27,9 +28,14 @@ OnToolResult = Callable[[str, str, str], Awaitable[None]]
 @dataclass(frozen=True, slots=True)
 class ApprovalDecision:
     """The user's verdict on a paused tool call. ``reason`` is an optional
-    free-text note (shown to the LLM on deny so it can adapt)."""
+    free-text note (shown to the LLM on deny so it can adapt). The
+    four-value literal is canonical in :mod:`hermes.events` — Plan 21
+    extended this from two to four to add ``allow_session`` /
+    ``allow_always``; the agent loop treats anything that isn't ``deny``
+    as "run the tool", and the route layer interprets the specific
+    ``allow_*`` variant to update the standing-approval lists."""
 
-    decision: Literal["allow_once", "deny"]
+    decision: ApprovalDecisionLiteral
     reason: str | None = None
 
 

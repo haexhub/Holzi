@@ -122,6 +122,17 @@ class AgentRun:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolApproval:
+    """A row from `tool_approvals` — a tool the user has granted standing
+    (`allow_always`) permission for. `last_used_at` is reserved for a future
+    audit surface and stays None today."""
+
+    tool_name: str
+    granted_at: int
+    last_used_at: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class MessengerAccount:
     """A row from `messenger_accounts`. `bot_token_*` ciphertext columns
     are only populated for telegram rows; signal rows leave them NULL and
