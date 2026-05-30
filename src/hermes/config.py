@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     # SandboxManager workspace key; tree/file reads spin the sandbox up on
     # first use via the existing `get_workspace` semantics.
     workspace_roots: str = ""
+    # --- Workspace git (Plan 24) -------------------------------------------
+    # Gates the *destructive* git endpoints (discard, hard reset). Off by
+    # default so a misconfigured deployment can never throw away unstaged
+    # work via an API call; flip to true on dev hosts where the workspace
+    # is checkpointed externally (snapshot, separate backup branch).
+    workspace_git_destructive: bool = False
 
 
 settings = Settings()  # type: ignore[call-arg]
