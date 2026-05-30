@@ -1,10 +1,13 @@
+import asyncio
 import json
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
+from websockets.exceptions import ConnectionClosed
 
 from hermes.repository import conversations, messages
 from hermes.signal.client import SignalClient
@@ -12,6 +15,35 @@ from hermes.signal.worker import SignalWorker
 
 SELF_NUMBER = "+491701234567"
 OTHER_NUMBER = "+491709999999"
+
+
+class FakeSignalClient:
+    """Stream-based stand-in for SignalClient. Each entry in `scripts` is one
+    receive_stream() session: yield the listed envelopes, then optionally
+    raise `raise_at_end` (e.g. ConnectionClosed to exercise reconnect, or
+    CancelledError to terminate _run cleanly in a test)."""
+
+    def __init__(self, scripts: list[dict[str, Any]]) -> None:
+        self._scripts = list(scripts)
+        self.sends: list[dict[str, Any]] = []
+        self.connect_count = 0
+
+    async def receive_stream(self) -> AsyncIterator[dict[str, Any]]:
+        self.connect_count += 1
+        if not self._scripts:
+            # No more scripts → simulate idle stream by sleeping forever.
+            # Tests that hit this branch are malformed (worker should have
+            # been stopped via _stop or CancelledError before reaching it).
+            await asyncio.Event().wait()
+            return
+        script = self._scripts.pop(0)
+        for env in script.get("envelopes", []):
+            yield env
+        if (exc := script.get("raise_at_end")) is not None:
+            raise exc
+
+    async def send(self, *, recipient: str, message: str) -> None:
+        self.sends.append({"recipient": recipient, "message": message})
 
 
 def _make_signal_client(send_capture: list[dict[str, Any]] | None = None) -> SignalClient:
@@ -51,9 +83,7 @@ def _echoing_agent_runner():
         msgs = await messages.list_by_conversation(db, conversation_id)
         last_user = next((m for m in reversed(msgs) if m.role == "user"), None)
         reply = f"agent says: {last_user.content if last_user else ''}"
-        await messages.append(
-            db, conversation_id=conversation_id, role="assistant", content=reply
-        )
+        await messages.append(db, conversation_id=conversation_id, role="assistant", content=reply)
         return reply
 
     return runner
@@ -213,3 +243,50 @@ async def test_process_envelope_touches_conversation_even_when_agent_fails(
     assert refreshed is not None
     assert refreshed.updated_at == current_ts
     assert refreshed.updated_at > initial_updated_at
+
+
+async def test_worker_processes_envelope_from_stream(conn: AsyncEngine) -> None:
+    envelope = _envelope(SELF_NUMBER, "hello via stream")
+    client = FakeSignalClient([{"envelopes": [envelope], "raise_at_end": asyncio.CancelledError()}])
+    worker = SignalWorker(client, conn, SELF_NUMBER, agent_runner=_echoing_agent_runner())
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker._run()
+
+    convos = await conversations.list_by_channel(conn, "signal")
+    assert len(convos) == 1
+    assert client.sends == [{"recipient": SELF_NUMBER, "message": "agent says: hello via stream"}]
+
+
+async def test_worker_reconnects_after_connection_closed(
+    conn: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    envelope = _envelope(SELF_NUMBER, "after reconnect")
+    client = FakeSignalClient(
+        [
+            # First session: drops immediately, mimicking signal-cli-rest-api restart.
+            {"raise_at_end": ConnectionClosed(None, None)},
+            # Second session: yields one envelope, then bails out via CancelledError
+            # to terminate _run cleanly.
+            {"envelopes": [envelope], "raise_at_end": asyncio.CancelledError()},
+        ]
+    )
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr("hermes.signal.worker._sleep", fake_sleep)
+
+    worker = SignalWorker(client, conn, SELF_NUMBER, agent_runner=_echoing_agent_runner())
+    with pytest.raises(asyncio.CancelledError):
+        await worker._run()
+
+    # One reconnect → one backoff sleep at the initial 1s step.
+    assert sleep_calls == [1.0]
+    assert client.connect_count == 2
+    # Envelope from the second session got processed.
+    convos = await conversations.list_by_channel(conn, "signal")
+    assert len(convos) == 1
+    assert client.sends == [{"recipient": SELF_NUMBER, "message": "agent says: after reconnect"}]
