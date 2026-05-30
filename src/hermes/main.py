@@ -1,4 +1,5 @@
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -21,13 +22,16 @@ from hermes.logging import configure_logging, logger
 from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
 from hermes.repository import llm_credentials as llm_credentials_repo
+from hermes.repository import sandbox_crashes as sandbox_crashes_repo
 from hermes.routes.api import router as api_router
 from hermes.routes.chat import router as chat_router
 from hermes.routes.diagnostics import router as diagnostics_router
 from hermes.routes.llm import router as llm_router
 from hermes.routes.messenger import router as messenger_router
+from hermes.routes.sandbox import router as sandbox_router
 from hermes.routes.workspace import router as workspace_router
 from hermes.run_tracker import track_run
+from hermes.sandbox import WorkspaceCrash
 from hermes.sandbox.factory import build_sandbox_manager
 from hermes.scheduler import AgentTaskScheduler, ConversationSweepScheduler
 from hermes.signal.lifecycle import rebuild_signal_worker_from_db
@@ -280,6 +284,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         built = build_sandbox_manager(settings)
         if built is not None:
             app.state.sandbox_manager, app.state.sandbox_backend = built
+
+            # Plan 20-A: persist every dead-transition the health watcher
+            # fires. Subscribe BEFORE start_health_watcher() so the very
+            # first watcher tick already has the persistence handler in
+            # place. The per-chat SSE handler in routes/api.py stays —
+            # the manager dedupes per (workspace_id, sandbox_id), so live
+            # streams and the DB both receive exactly one event per crash.
+            async def persist_crash(crash: WorkspaceCrash) -> None:
+                # Clean shutdown order disposes the engine *after* the
+                # health watcher stops, so this branch shouldn't fire on
+                # the happy path. But the watcher catches all exceptions
+                # in its loop, and the manager isolates per-handler
+                # failures — keep this guard so a degraded boot (where
+                # `app.state.db` was never set) doesn't spam warnings on
+                # every tick.
+                if app.state.db is None:
+                    return
+                try:
+                    await sandbox_crashes_repo.insert(
+                        app.state.db,
+                        workspace_id=crash.workspace_id,
+                        sandbox_id=crash.sandbox_id,
+                        crashed_at=int(time.time()),
+                        state=crash.state.value,
+                        exit_code=crash.exit_code,
+                    )
+                except Exception as exc:  # noqa: BLE001 — handler isolation
+                    logger.warning(
+                        "sandbox_crash_persist_failed",
+                        workspace_id=crash.workspace_id,
+                        error=str(exc),
+                    )
+
+            app.state.sandbox_manager.add_crash_handler(persist_crash)
+
             # Plan 11b-b: poll workspace liveness so a crash surfaces as a
             # `sandbox_crashed` SSE event on any active chat stream. Watcher
             # never auto-restarts — surface-only by design.
@@ -322,6 +361,7 @@ app.include_router(api_router)
 app.include_router(llm_router)
 app.include_router(messenger_router)
 app.include_router(workspace_router)
+app.include_router(sandbox_router)
 app.include_router(diagnostics_router)
 
 

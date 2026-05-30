@@ -275,6 +275,43 @@ Index(
 Index("agent_runs_status_started", agent_runs.c.status, agent_runs.c.started_at.desc())
 
 
+# Plan 20-A: durable record of every sandbox dead-transition the health
+# watcher fires. Plan 11b-b's live `sandbox_crashed` SSE event only reaches
+# UIs with an active chat stream open; this table backs the persistent
+# "Sandbox-Abstürze" section on /settings/diagnostics so a crash that
+# happens with no chat connected is still recoverable. One row per
+# `(workspace_id, sandbox_id)` dead-transition — the manager's existing
+# dedupe means we never re-insert for the same crashed container.
+sandbox_crashes = Table(
+    "sandbox_crashes",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    # Same workspace identifier carried by SandboxHandle/WorkspaceCrash.
+    # Workspaces are configured via HERMES_WORKSPACE_ROOTS, not a DB table,
+    # so this isn't an FK.
+    Column("workspace_id", Text, nullable=False),
+    # Container id of the dead sandbox — useful for cross-referencing the
+    # Podman log on the host. Carried through to the API response.
+    Column("sandbox_id", Text, nullable=False),
+    # Unix epoch seconds when the watcher's handler fired.
+    Column("crashed_at", Integer, nullable=False),
+    # SandboxState value — 'crashed' | 'oom' | 'removed'. Stored as text so
+    # the enum can evolve without an awkward SQLite column rebuild.
+    Column("state", Text, nullable=False),
+    # Container exit code when Podman exposes one; NULL for OOM / removed
+    # transitions that don't carry a clean exit value.
+    Column("exit_code", Integer),
+    # Reserved for a future follow-up that pipes structured context (e.g.
+    # last exec failure) through the crash handler. Always NULL today.
+    Column("last_message", Text),
+)
+
+Index(
+    "sandbox_crashes_crashed_at",
+    sandbox_crashes.c.crashed_at.desc(),
+)
+
+
 messenger_accounts = Table(
     "messenger_accounts",
     metadata,
