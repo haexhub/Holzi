@@ -1,0 +1,28 @@
+# Podman-only overlay for the local dev-stack (Plan 20-B).
+#
+# Layered in by the Makefile when CONTAINER_BIN=podman. Adds the rootless
+# Podman control-socket mount + HERMES_SANDBOX_* env on `hermes-server` so
+# the agent can spawn workspace sandboxes via the rootless Podman socket.
+# Docker-only hosts never see this overlay and boot the agent with sandboxing
+# disabled (`/api/diagnostics` reports sandbox=warning, "not configured").
+#
+# Mount on top of docker-compose.local.yml:
+#
+#   podman compose -p hermes-local \
+#     -f docker-compose.local.yml \
+#     -f docker-compose.local.podman.yml \
+#     up -d
+#
+# (The Makefile already chains those flags; this header is for hand-running.)
+services:
+  hermes-server:
+    environment:
+      # Rootless Podman control socket inside the container. The volume below
+      # bind-mounts the host path of the socket to this unix:// location.
+      HERMES_SANDBOX_SOCKET: ${HERMES_SANDBOX_SOCKET:-unix:///run/podman/podman.sock}
+      HERMES_SANDBOX_NETWORK: ${HERMES_SANDBOX_NETWORK:-none}
+      HERMES_SANDBOX_IMAGE: ${HERMES_SANDBOX_IMAGE:-hermes-sandbox:dev}
+    volumes:
+      # Host-side path comes from HERMES_CONTAINER_SOCKET (set by the Makefile
+      # to $XDG_RUNTIME_DIR/podman/podman.sock for the Podman runtime).
+      - ${HERMES_CONTAINER_SOCKET}:/run/podman/podman.sock
