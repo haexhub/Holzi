@@ -13,6 +13,13 @@ class Settings(BaseSettings):
 
     auth_token: str = Field(..., min_length=1)
     log_level: str = "INFO"
+    # Plan 27: when set, structlog also writes JSON rows to this file
+    # (rotated by `RotatingFileHandler`) so the Control Center's Logs page
+    # has something to tail. Unset = stdout-only; the /api/logs endpoint
+    # reports 503 in that case.
+    log_file: str | None = None
+    log_file_max_bytes: int = 10 * 1024 * 1024
+    log_file_backup_count: int = 3
     db_path: str = "./hermes.db"
     # AES-256-GCM master key for `llm_credentials` ciphertext. Optional —
     # when unset, `crypto.resolve_master_key` falls back to a persisted

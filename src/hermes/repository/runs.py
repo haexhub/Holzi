@@ -12,7 +12,7 @@ Status transitions are intentionally one-way:
 A row whose state is 'running' but whose process has died is recoverable
 only by an out-of-band sweep; this layer never resurrects rows.
 """
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository.models import AgentRun
@@ -144,3 +144,133 @@ async def list_runs(
         result = await conn.execute(stmt)
         rows = result.all()
     return [_row_to_agent_run(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Aggregates (Plan 27 — /api/insights)
+# ---------------------------------------------------------------------------
+
+
+async def aggregate_totals(
+    engine: AsyncEngine, *, since_ts: int
+) -> dict[str, int]:
+    """Sum runs / errors / tokens for rows with `started_at >= since_ts`."""
+    stmt = select(
+        func.count(t_agent_runs.c.id).label("runs"),
+        func.coalesce(func.sum(t_agent_runs.c.input_tokens), 0).label("input_tokens"),
+        func.coalesce(func.sum(t_agent_runs.c.output_tokens), 0).label("output_tokens"),
+        func.coalesce(
+            func.sum(
+                (t_agent_runs.c.status == "error").cast(t_agent_runs.c.id.type)
+            ),
+            0,
+        ).label("errors"),
+    ).where(t_agent_runs.c.started_at >= since_ts)
+    async with engine.connect() as conn:
+        result = await conn.execute(stmt)
+        row = result.first()
+    return {
+        "runs": int(row.runs or 0),
+        "errors": int(row.errors or 0),
+        "input_tokens": int(row.input_tokens or 0),
+        "output_tokens": int(row.output_tokens or 0),
+    }
+
+
+async def aggregate_by_day(
+    engine: AsyncEngine, *, since_ts: int
+) -> list[dict[str, int | str]]:
+    """Group rows into UTC date buckets. Returns raw (non-zero-filled) rows;
+    the route layer fills the rest of the window with zero buckets so the
+    chart never lies about empty days."""
+    bucket = func.strftime("%Y-%m-%d", t_agent_runs.c.started_at, "unixepoch")
+    stmt = (
+        select(
+            bucket.label("bucket"),
+            func.count(t_agent_runs.c.id).label("runs"),
+            func.coalesce(func.sum(t_agent_runs.c.input_tokens), 0).label(
+                "input_tokens"
+            ),
+            func.coalesce(func.sum(t_agent_runs.c.output_tokens), 0).label(
+                "output_tokens"
+            ),
+        )
+        .where(t_agent_runs.c.started_at >= since_ts)
+        .group_by(bucket)
+        .order_by(bucket)
+    )
+    async with engine.connect() as conn:
+        result = await conn.execute(stmt)
+        rows = result.all()
+    return [
+        {
+            "bucket": r.bucket,
+            "runs": int(r.runs or 0),
+            "input_tokens": int(r.input_tokens or 0),
+            "output_tokens": int(r.output_tokens or 0),
+        }
+        for r in rows
+    ]
+
+
+async def aggregate_by_model(
+    engine: AsyncEngine, *, since_ts: int
+) -> list[dict[str, int | str]]:
+    """Per-model totals over the same window."""
+    stmt = (
+        select(
+            t_agent_runs.c.model.label("model"),
+            func.count(t_agent_runs.c.id).label("runs"),
+            func.coalesce(func.sum(t_agent_runs.c.input_tokens), 0).label(
+                "input_tokens"
+            ),
+            func.coalesce(func.sum(t_agent_runs.c.output_tokens), 0).label(
+                "output_tokens"
+            ),
+            func.coalesce(
+                func.sum(
+                    (t_agent_runs.c.status == "error").cast(t_agent_runs.c.id.type)
+                ),
+                0,
+            ).label("errors"),
+        )
+        .where(t_agent_runs.c.started_at >= since_ts)
+        .group_by(t_agent_runs.c.model)
+        .order_by(desc("runs"))
+    )
+    async with engine.connect() as conn:
+        result = await conn.execute(stmt)
+        rows = result.all()
+    return [
+        {
+            "model": r.model,
+            "runs": int(r.runs or 0),
+            "input_tokens": int(r.input_tokens or 0),
+            "output_tokens": int(r.output_tokens or 0),
+            "errors": int(r.errors or 0),
+        }
+        for r in rows
+    ]
+
+
+async def aggregate_by_status(
+    engine: AsyncEngine, *, since_ts: int
+) -> dict[str, int]:
+    """Counts per status value. Zero-fills every VALID_STATUSES key so the
+    frontend doesn't have to handle missing keys."""
+    stmt = (
+        select(
+            t_agent_runs.c.status.label("status"),
+            func.count(t_agent_runs.c.id).label("count"),
+        )
+        .where(t_agent_runs.c.started_at >= since_ts)
+        .group_by(t_agent_runs.c.status)
+    )
+    async with engine.connect() as conn:
+        result = await conn.execute(stmt)
+        rows = result.all()
+    counts = {s: 0 for s in VALID_STATUSES}
+    for r in rows:
+        if r.status in counts:
+            counts[r.status] = int(r.count or 0)
+    return counts
