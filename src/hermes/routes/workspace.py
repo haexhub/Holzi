@@ -291,14 +291,23 @@ def _normalise_relative(path: str) -> str:
     """Turn an API-supplied relative path into a clean POSIX form.
 
     Rejects anything that would break out of `/workspace`: empty segments,
-    `.`, `..`, leading slashes, and absolute paths. The empty string maps
-    to the root directory."""
+    `.`, `..`, leading slashes, absolute paths, AND a leading `-` (which
+    would be parsed as a flag by any git/POSIX tool that doesn't use a
+    `--` separator). The empty string maps to the root directory.
+
+    Leading-`-` rejection is the *defence-in-depth* against forgetting the
+    `--` separator at any call site. Plan-24's git endpoints all do pass
+    `--` correctly today, but a future endpoint that bolts on `git
+    something <path>` without the separator gets flag-injection for free,
+    so we kill the class at the input layer."""
     if path == "":
         return ""
     # A leading slash is the most common "this is an absolute path" mistake;
     # rather than silently stripping (which would hide real bugs in callers)
     # we refuse and force the caller to fix the request.
     if path.startswith("/"):
+        raise HTTPException(status_code=400, detail="invalid path")
+    if path.startswith("-"):
         raise HTTPException(status_code=400, detail="invalid path")
     segments = path.split("/")
     for segment in segments:
@@ -1314,6 +1323,14 @@ async def api_workspace_git_log(
 async def api_workspace_git_checkout(
     request: Request, body: GitCheckoutRequest
 ) -> dict[str, Any]:
+    # A leading `-` would be parsed by `git checkout` as a flag, not a ref —
+    # `git checkout --orphan x` is a destructive operation that bypasses
+    # the dirty-tree gate, and `git checkout -B existing` overwrites a
+    # branch ref. Reject at the input layer; `git checkout -- branch`
+    # doesn't work as a workaround because the `--` would have to come
+    # after the new branch name in the `-b` form.
+    if body.branch.startswith("-"):
+        raise HTTPException(status_code=400, detail="invalid branch name")
     mgr, handle = await _resolve_git_workspace(request, body.root)
     await _require_repo(mgr, handle)
 
@@ -1483,6 +1500,10 @@ async def api_workspace_git_pull(
     mgr, handle = await _resolve_git_workspace(request, body.root)
     await _require_repo(mgr, handle)
 
+    # `--no-rebase` is the deliberate default: some users have
+    # `pull.rebase=true` in their gitconfig and would be surprised when the
+    # workspace pulls differently from their CLI. The UI doesn't yet expose
+    # a "rebase / merge" toggle, so we pin the strategy here.
     code, out, err = await _drain_exec(
         mgr,
         handle,
@@ -1494,12 +1515,25 @@ async def api_workspace_git_pull(
     if code == 0:
         return {"ok": True, "message": stderr.strip(), "conflicts": []}
 
-    # Conflict lines look like:  `CONFLICT (content): Merge conflict in foo`
-    # — extracting the trailing path is enough for the UI to render the list.
-    conflicts: list[str] = []
-    for line in (stdout + "\n" + stderr).splitlines():
-        if "CONFLICT" in line and " in " in line:
-            conflicts.append(line.rsplit(" in ", 1)[1].strip())
+    # Conflict surfacing: ask git itself for the unmerged paths.
+    # `--name-only --diff-filter=U` enumerates exactly the files with
+    # merge conflicts regardless of the CONFLICT variant (content,
+    # modify/delete, rename/rename, add/add, …). A line-grep over the
+    # `CONFLICT (...): ... in <path>` strings looks tempting but most
+    # variants put the path in a different position or include a branch
+    # name after ` in `, so parsing the raw output gives the wrong path
+    # for everything except the canonical "content" conflict.
+    _, names_out, _ = await _drain_exec(
+        mgr,
+        handle,
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        cwd=WORKSPACE_MOUNT,
+    )
+    conflicts: list[str] = [
+        line.strip()
+        for line in _decode(names_out).splitlines()
+        if line.strip()
+    ]
     message = stderr.strip() or stdout.strip() or "git pull failed"
     return {"ok": False, "message": message, "conflicts": conflicts}
 
@@ -1526,6 +1560,13 @@ async def api_workspace_git_push(
             raise HTTPException(
                 status_code=400,
                 detail="cannot push --set-upstream from a detached HEAD",
+            )
+        # Defence-in-depth — the current branch name comes from
+        # `rev-parse` and *should* be safe, but a `-`-prefixed branch in
+        # the working tree would still be parsed as a flag by git push.
+        if cur.startswith("-"):
+            raise HTTPException(
+                status_code=400, detail="invalid current branch name"
             )
         argv.extend(["-u", "origin", cur])
 

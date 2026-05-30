@@ -662,6 +662,9 @@ async def test_pull_conflict_returns_file_list_not_500(
             ExecExit(exit_code=1),
         ]
     )
+    # The pull endpoint enumerates unmerged paths via
+    # `git diff --name-only --diff-filter=U` (not from the CONFLICT lines).
+    backend.script_exec(_stdout("README.md\nsrc/x.py\n"))
 
     resp = await client.post(
         "/api/workspace/git/pull",
@@ -752,3 +755,106 @@ async def test_diff_503_when_sandbox_not_configured(
         "/api/workspace/git/diff?root=ws-1", headers=AUTH
     )
     assert resp.status_code == 503
+
+
+# --- review fixes ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "branch",
+    ["--orphan", "-B", "--detach", "--track=foo"],
+)
+async def test_checkout_rejects_flag_like_branch_name(
+    client: httpx.AsyncClient, configure_roots, install_sandbox, branch: str
+) -> None:
+    """`git checkout --orphan x` is destructive and bypasses the dirty-tree
+    gate; reject any branch name starting with `-` before it ever reaches
+    the argv."""
+    configure_roots("ws-1")
+    install_sandbox()
+    resp = await client.post(
+        "/api/workspace/git/checkout",
+        json={"root": "ws-1", "branch": branch},
+        headers=AUTH,
+    )
+    assert resp.status_code == 400, branch
+
+
+@pytest.mark.parametrize(
+    "bad_path", ["-n", "--hard", "-rf"],
+)
+async def test_stage_rejects_flag_like_path(
+    client: httpx.AsyncClient, configure_roots, install_sandbox, bad_path: str
+) -> None:
+    """Every git endpoint that takes paths today routes them through `--`
+    in the argv, so a `-`-prefixed path can't hit `git add`. We harden at
+    the normaliser anyway so a future caller that forgets the `--` doesn't
+    get flag-injection for free."""
+    configure_roots("ws-1")
+    install_sandbox()
+    resp = await client.post(
+        "/api/workspace/git/stage",
+        json={"root": "ws-1", "paths": [bad_path]},
+        headers=AUTH,
+    )
+    assert resp.status_code == 400, bad_path
+
+
+async def test_diff_rejects_flag_like_path(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    configure_roots("ws-1")
+    install_sandbox()
+    resp = await client.get(
+        "/api/workspace/git/diff?root=ws-1&path=-n", headers=AUTH
+    )
+    assert resp.status_code == 400
+
+
+async def test_pull_conflict_uses_diff_name_only_not_line_parser(
+    client: httpx.AsyncClient, configure_roots, install_sandbox
+) -> None:
+    """`git diff --name-only --diff-filter=U` is authoritative, so an
+    "added in both" conflict (which a naive `CONFLICT … in <path>` grep
+    would point at the branch name instead of the file) still ends up
+    listing the correct path."""
+    configure_roots("ws-1")
+    _, backend = install_sandbox()
+    backend.script_exec([ExecExit(exit_code=0)])  # rev-parse
+    backend.script_exec(
+        [
+            ExecOutput(
+                stream="stdout",
+                data=(
+                    # CONFLICT line with branch name after ` in ` — a naive
+                    # parser would have extracted "feature/x" as the file.
+                    b"CONFLICT (add/add): src/dup.py added in HEAD and added in feature/x\n"
+                ),
+            ),
+            ExecOutput(
+                stream="stderr",
+                data=b"Automatic merge failed; fix conflicts and then commit.\n",
+            ),
+            ExecExit(exit_code=1),
+        ],
+    )
+    backend.script_exec(_stdout("src/dup.py\n"))
+
+    resp = await client.post(
+        "/api/workspace/git/pull",
+        json={"root": "ws-1"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["conflicts"] == ["src/dup.py"]
+    name_only_call = next(
+        a for a in _git_argvs(backend) if a[1] == "diff" and "--diff-filter=U" in a
+    )
+    assert name_only_call == [
+        "git",
+        "diff",
+        "--name-only",
+        "--diff-filter=U",
+    ]
