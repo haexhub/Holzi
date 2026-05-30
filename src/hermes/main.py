@@ -22,8 +22,8 @@ from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
 from hermes.repository import llm_credentials as llm_credentials_repo
 from hermes.routes.api import router as api_router
-from hermes.routes.diagnostics import router as diagnostics_router
 from hermes.routes.chat import router as chat_router
+from hermes.routes.diagnostics import router as diagnostics_router
 from hermes.routes.llm import router as llm_router
 from hermes.routes.messenger import router as messenger_router
 from hermes.routes.workspace import router as workspace_router
