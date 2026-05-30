@@ -167,6 +167,104 @@ class WorkspaceGitResponse(BaseModel):
     entries: list[GitEntry]
 
 
+# --- Plan 24: extended git surface ----------------------------------------
+
+
+class GitDiffSummary(BaseModel):
+    files: int
+    insertions: int
+    deletions: int
+
+
+class GitDiffResponse(BaseModel):
+    # `none` = no diff (either path is identical or there is nothing changed
+    # at all). `binary` = git refuses to emit a patch; the patch field stays
+    # null and the UI shows the summary only.
+    kind: Literal["text", "binary", "none"]
+    patch: str | None = None
+    summary: GitDiffSummary
+    # True when the patch body was truncated at the response cap. The summary
+    # is still authoritative.
+    truncated: bool = False
+
+
+class GitBranch(BaseModel):
+    name: str
+    is_remote: bool
+    last_commit_at: str | None
+
+
+class GitBranchesResponse(BaseModel):
+    current: str | None
+    all: list[GitBranch]
+
+
+class GitLogEntry(BaseModel):
+    sha: str
+    short_sha: str
+    author: str
+    subject: str
+    committed_at: str
+
+
+class GitCheckoutRequest(BaseModel):
+    root: str
+    branch: str = Field(min_length=1)
+    create: bool = False
+    # `force` only matters when the working tree is dirty: dirty checkout
+    # without force returns 409; dirty checkout with force discards local
+    # changes via `git checkout -f`, so it's gated by the destructive flag.
+    force: bool = False
+
+
+class GitPathsRequest(BaseModel):
+    root: str
+    paths: list[str] = Field(default_factory=list)
+
+
+class GitDiscardRequest(BaseModel):
+    root: str
+    paths: list[str] = Field(default_factory=list)
+    conversation_id: str = Field(min_length=1)
+
+
+class GitCommitRequest(BaseModel):
+    root: str
+    message: str = Field(min_length=1)
+    conversation_id: str = Field(min_length=1)
+    # `all=true` stages tracked modifications before committing (git commit -a),
+    # matching the "type a message and commit everything currently dirty" UX
+    # path. Default false = commit whatever is already staged.
+    all: bool = False
+
+
+class GitFetchRequest(BaseModel):
+    root: str
+
+
+class GitPullRequest(BaseModel):
+    root: str
+
+
+class GitPushRequest(BaseModel):
+    root: str
+    set_upstream: bool = False
+
+
+class GitOpResponse(BaseModel):
+    ok: bool
+    # stderr from the underlying git invocation. Surfaced verbatim so the UI
+    # can show "permission denied" / "no upstream" without parsing.
+    message: str = ""
+
+
+class GitPullResponse(GitOpResponse):
+    # Files git reported as conflicting (CONFLICT markers in stdout). Empty
+    # on a clean pull; non-empty + ok=false on a conflict, returned as HTTP 200
+    # so the UI doesn't have to parse a 4xx body to find the file list.
+    conflicts: list[str] = Field(default_factory=list)
+
+
 # --- helpers ---------------------------------------------------------------
 
 
@@ -193,14 +291,23 @@ def _normalise_relative(path: str) -> str:
     """Turn an API-supplied relative path into a clean POSIX form.
 
     Rejects anything that would break out of `/workspace`: empty segments,
-    `.`, `..`, leading slashes, and absolute paths. The empty string maps
-    to the root directory."""
+    `.`, `..`, leading slashes, absolute paths, AND a leading `-` (which
+    would be parsed as a flag by any git/POSIX tool that doesn't use a
+    `--` separator). The empty string maps to the root directory.
+
+    Leading-`-` rejection is the *defence-in-depth* against forgetting the
+    `--` separator at any call site. Plan-24's git endpoints all do pass
+    `--` correctly today, but a future endpoint that bolts on `git
+    something <path>` without the separator gets flag-injection for free,
+    so we kill the class at the input layer."""
     if path == "":
         return ""
     # A leading slash is the most common "this is an absolute path" mistake;
     # rather than silently stripping (which would hide real bugs in callers)
     # we refuse and force the caller to fix the request.
     if path.startswith("/"):
+        raise HTTPException(status_code=400, detail="invalid path")
+    if path.startswith("-"):
         raise HTTPException(status_code=400, detail="invalid path")
     segments = path.split("/")
     for segment in segments:
@@ -967,3 +1074,503 @@ async def api_workspace_git(request: Request, root: str) -> dict[str, Any]:
         "dirty": len(entries) > 0,
         "entries": entries,
     }
+
+
+# --- Plan 24: extended git surface ----------------------------------------
+
+# Cap on the patch body returned by GET /git/diff. The summary is still
+# computed from the *untruncated* output (via `--numstat`), so the UI shows
+# accurate insertion/deletion counts even when the patch is too big to ship.
+_GIT_DIFF_PATCH_CAP = 256 * 1024
+
+
+async def _resolve_git_workspace(
+    request: Request, root: str
+) -> tuple[SandboxManager, SandboxHandle]:
+    """Shared preamble: validate the root, grab the sandbox manager, spin up
+    (or reuse) the workspace handle. Raises 404/503 the same way every git
+    endpoint should."""
+    _require_known_root(root)
+    mgr = _require_sandbox_manager(request)
+    try:
+        handle = await mgr.get_workspace(root)
+    except SandboxNotRunning as exc:
+        raise HTTPException(
+            status_code=503, detail="workspace sandbox not running"
+        ) from exc
+    return mgr, handle
+
+
+async def _require_repo(mgr: SandboxManager, handle: SandboxHandle) -> None:
+    if not await _is_git_repo(mgr, handle):
+        raise HTTPException(status_code=409, detail="workspace is not a git repo")
+
+
+def _decode(data: bytes) -> str:
+    return data.decode("utf-8", "replace")
+
+
+async def _working_tree_dirty(
+    mgr: SandboxManager, handle: SandboxHandle
+) -> bool:
+    """`git status --porcelain=v1` empty ⇒ clean. Any non-zero exit is
+    treated as "couldn't tell" → dirty, so we err on the side of refusing a
+    destructive op rather than silently nuking the user's WIP."""
+    code, out, _ = await _drain_exec(
+        mgr,
+        handle,
+        ["git", "status", "--porcelain=v1"],
+        cwd=WORKSPACE_MOUNT,
+    )
+    if code != 0:
+        return True
+    return bool(_decode(out).strip())
+
+
+@router.get("/git/diff", response_model=GitDiffResponse)
+async def api_workspace_git_diff(
+    request: Request,
+    root: str,
+    path: str | None = None,
+    staged: bool = False,
+) -> dict[str, Any]:
+    """Patch + summary for the working tree (or staged changes when
+    `staged=true`). When `path` is set, the diff is restricted to that file —
+    relative-path discipline matches the rest of the workspace API."""
+    mgr, handle = await _resolve_git_workspace(request, root)
+    await _require_repo(mgr, handle)
+
+    argv = ["git", "diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/"]
+    if staged:
+        argv.append("--staged")
+    if path is not None:
+        rel = _normalise_relative(path)
+        if rel == "":
+            raise HTTPException(status_code=400, detail="path must be a file")
+        argv.extend(["--", rel])
+
+    patch_code, patch_out, patch_err = await _drain_exec(
+        mgr, handle, argv, cwd=WORKSPACE_MOUNT
+    )
+    if patch_code != 0:
+        # Surface the stderr so the user can see e.g. "ambiguous argument".
+        raise HTTPException(
+            status_code=400, detail=_decode(patch_err).strip() or "git diff failed"
+        )
+    patch_bytes = bytes(patch_out)
+
+    # `--numstat` gives `additions<TAB>deletions<TAB>path` (or `-\t-\tpath`
+    # for binary). One row per changed file, so the row count *is* the
+    # files-changed total — no need for a second `--shortstat` pass.
+    numstat_argv = argv[:1] + ["diff", "--numstat"]
+    if staged:
+        numstat_argv.append("--staged")
+    if path is not None:
+        numstat_argv.extend(["--", _normalise_relative(path)])
+    num_code, num_out, _ = await _drain_exec(
+        mgr, handle, numstat_argv, cwd=WORKSPACE_MOUNT
+    )
+    files = 0
+    insertions = 0
+    deletions = 0
+    is_binary = False
+    if num_code == 0:
+        for line in _decode(num_out).splitlines():
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            files += 1
+            if parts[0] == "-" and parts[1] == "-":
+                is_binary = True
+                continue
+            try:
+                insertions += int(parts[0])
+                deletions += int(parts[1])
+            except ValueError:
+                continue
+
+    if files == 0 and not patch_bytes:
+        return {
+            "kind": "none",
+            "patch": None,
+            "summary": {"files": 0, "insertions": 0, "deletions": 0},
+            "truncated": False,
+        }
+
+    if is_binary and not patch_bytes:
+        return {
+            "kind": "binary",
+            "patch": None,
+            "summary": {
+                "files": files,
+                "insertions": insertions,
+                "deletions": deletions,
+            },
+            "truncated": False,
+        }
+
+    truncated = len(patch_bytes) > _GIT_DIFF_PATCH_CAP
+    if truncated:
+        patch_bytes = patch_bytes[:_GIT_DIFF_PATCH_CAP]
+    return {
+        "kind": "text",
+        "patch": _decode(patch_bytes),
+        "summary": {
+            "files": files,
+            "insertions": insertions,
+            "deletions": deletions,
+        },
+        "truncated": truncated,
+    }
+
+
+@router.get("/git/branches", response_model=GitBranchesResponse)
+async def api_workspace_git_branches(
+    request: Request, root: str
+) -> dict[str, Any]:
+    mgr, handle = await _resolve_git_workspace(request, root)
+    await _require_repo(mgr, handle)
+
+    cur_code, cur_out, _ = await _drain_exec(
+        mgr,
+        handle,
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=WORKSPACE_MOUNT,
+    )
+    current = _decode(cur_out).strip() if cur_code == 0 else None
+    if current == "HEAD":
+        current = None  # detached
+
+    # `for-each-ref` with a custom format gives us every local *and* remote
+    # ref in one pass, with the committer date in ISO-8601 (so the UI can
+    # render "last touched X ago" without re-parsing).
+    fmt = "%(refname:short)|%(committerdate:iso-strict)|%(refname)"
+    code, out, _ = await _drain_exec(
+        mgr,
+        handle,
+        ["git", "for-each-ref", f"--format={fmt}", "refs/heads", "refs/remotes"],
+        cwd=WORKSPACE_MOUNT,
+    )
+    branches: list[dict[str, Any]] = []
+    if code == 0:
+        for line in _decode(out).splitlines():
+            parts = line.split("|")
+            if len(parts) < 3:
+                continue
+            short = parts[0]
+            iso = parts[1] or None
+            full = parts[2]
+            is_remote = full.startswith("refs/remotes/")
+            # `origin/HEAD` is a symbolic ref and confuses the UI — skip it.
+            if is_remote and short.endswith("/HEAD"):
+                continue
+            branches.append(
+                {"name": short, "is_remote": is_remote, "last_commit_at": iso}
+            )
+
+    return {"current": current, "all": branches}
+
+
+@router.get("/git/log", response_model=list[GitLogEntry])
+async def api_workspace_git_log(
+    request: Request,
+    root: str,
+    path: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be 1..200")
+    mgr, handle = await _resolve_git_workspace(request, root)
+    await _require_repo(mgr, handle)
+
+    # `%x1f` (ASCII unit separator) is more robust than `|` — commit subjects
+    # routinely contain pipes, but never a 0x1f byte.
+    fmt = "%H%x1f%h%x1f%an%x1f%cI%x1f%s"
+    argv = [
+        "git",
+        "log",
+        f"--pretty=format:{fmt}",
+        f"-n{limit}",
+    ]
+    if path is not None:
+        rel = _normalise_relative(path)
+        argv.extend(["--", rel])
+
+    code, out, err = await _drain_exec(mgr, handle, argv, cwd=WORKSPACE_MOUNT)
+    if code != 0:
+        raise HTTPException(
+            status_code=400, detail=_decode(err).strip() or "git log failed"
+        )
+    entries: list[dict[str, Any]] = []
+    for line in _decode(out).splitlines():
+        parts = line.split("\x1f")
+        if len(parts) < 5:
+            continue
+        sha, short, author, committed_at, subject = parts[:5]
+        entries.append(
+            {
+                "sha": sha,
+                "short_sha": short,
+                "author": author,
+                "subject": subject,
+                "committed_at": committed_at,
+            }
+        )
+    return entries
+
+
+@router.post("/git/checkout", response_model=GitOpResponse)
+async def api_workspace_git_checkout(
+    request: Request, body: GitCheckoutRequest
+) -> dict[str, Any]:
+    # A leading `-` would be parsed by `git checkout` as a flag, not a ref —
+    # `git checkout --orphan x` is a destructive operation that bypasses
+    # the dirty-tree gate, and `git checkout -B existing` overwrites a
+    # branch ref. Reject at the input layer; `git checkout -- branch`
+    # doesn't work as a workaround because the `--` would have to come
+    # after the new branch name in the `-b` form.
+    if body.branch.startswith("-"):
+        raise HTTPException(status_code=400, detail="invalid branch name")
+    mgr, handle = await _resolve_git_workspace(request, body.root)
+    await _require_repo(mgr, handle)
+
+    if not body.force and await _working_tree_dirty(mgr, handle):
+        raise HTTPException(
+            status_code=409,
+            detail="working tree has uncommitted changes",
+        )
+    if body.force and not settings.workspace_git_destructive:
+        raise HTTPException(
+            status_code=403,
+            detail="destructive git ops disabled (set HERMES_WORKSPACE_GIT_DESTRUCTIVE=1)",
+        )
+
+    argv: list[str] = ["git", "checkout"]
+    if body.force:
+        argv.append("-f")
+    if body.create:
+        argv.append("-b")
+    argv.append(body.branch)
+
+    code, _, err = await _drain_exec(mgr, handle, argv, cwd=WORKSPACE_MOUNT)
+    if code != 0:
+        raise HTTPException(
+            status_code=400, detail=_decode(err).strip() or "git checkout failed"
+        )
+    return {"ok": True, "message": ""}
+
+
+def _normalise_paths(paths: Sequence[str]) -> list[str]:
+    """Empty list = whole tree → callers translate to `-A`. Anything else
+    must be safe relative paths (same discipline as the file endpoints)."""
+    return [_normalise_relative(p) for p in paths]
+
+
+@router.post("/git/stage", response_model=GitOpResponse)
+async def api_workspace_git_stage(
+    request: Request, body: GitPathsRequest
+) -> dict[str, Any]:
+    mgr, handle = await _resolve_git_workspace(request, body.root)
+    await _require_repo(mgr, handle)
+    rels = _normalise_paths(body.paths)
+
+    argv = ["git", "add"]
+    if not rels:
+        argv.append("-A")
+    else:
+        argv.extend(["--", *rels])
+    code, _, err = await _drain_exec(mgr, handle, argv, cwd=WORKSPACE_MOUNT)
+    if code != 0:
+        raise HTTPException(
+            status_code=400, detail=_decode(err).strip() or "git add failed"
+        )
+    return {"ok": True, "message": ""}
+
+
+@router.post("/git/unstage", response_model=GitOpResponse)
+async def api_workspace_git_unstage(
+    request: Request, body: GitPathsRequest
+) -> dict[str, Any]:
+    mgr, handle = await _resolve_git_workspace(request, body.root)
+    await _require_repo(mgr, handle)
+    rels = _normalise_paths(body.paths)
+
+    # `git restore --staged` is the modern path; targets either a list of
+    # paths or `.` for "everything currently staged". Returns 0 on success
+    # even when nothing was actually changed.
+    argv = ["git", "restore", "--staged"]
+    if not rels:
+        argv.append(".")
+    else:
+        argv.extend(["--", *rels])
+    code, _, err = await _drain_exec(mgr, handle, argv, cwd=WORKSPACE_MOUNT)
+    if code != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=_decode(err).strip() or "git restore --staged failed",
+        )
+    return {"ok": True, "message": ""}
+
+
+@router.post("/git/discard", response_model=GitOpResponse)
+async def api_workspace_git_discard(
+    request: Request, body: GitDiscardRequest
+) -> dict[str, Any]:
+    """Destructive: throws away unstaged changes in `paths`. Gated by the
+    `HERMES_WORKSPACE_GIT_DESTRUCTIVE` env flag — without it the endpoint
+    refuses (403) so a misconfigured deployment can't lose work."""
+    if not settings.workspace_git_destructive:
+        raise HTTPException(
+            status_code=403,
+            detail="destructive git ops disabled (set HERMES_WORKSPACE_GIT_DESTRUCTIVE=1)",
+        )
+    mgr, handle = await _resolve_git_workspace(request, body.root)
+    await _require_repo(mgr, handle)
+    rels = _normalise_paths(body.paths)
+
+    argv = ["git", "checkout", "--"]
+    if not rels:
+        argv = ["git", "checkout", "--", "."]
+    else:
+        argv.extend(rels)
+    code, _, err = await _drain_exec(mgr, handle, argv, cwd=WORKSPACE_MOUNT)
+    if code != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=_decode(err).strip() or "git checkout -- failed",
+        )
+    return {"ok": True, "message": ""}
+
+
+@router.post("/git/commit", response_model=GitOpResponse)
+async def api_workspace_git_commit(
+    request: Request, body: GitCommitRequest
+) -> dict[str, Any]:
+    """Explicit user-message commit. The Plan-13 auto-commit (`user[conv-N]:
+    …`) still fires on every file write; this is the path the Git tab uses
+    when the user types their own message."""
+    mgr, handle = await _resolve_git_workspace(request, body.root)
+    await _require_repo(mgr, handle)
+
+    # `[user]` prefix keeps the Git-tab UI's commits visually distinct from
+    # the auto-commit `user[conv-N]:` line. The conversation id still ends up
+    # in the message so `git log` carries the same audit trail as the
+    # auto-commits.
+    message = f"[user conv-{body.conversation_id}] {body.message}"
+    argv: list[str] = [
+        "git",
+        *_GIT_IDENTITY_FLAGS,
+        "commit",
+        "-m",
+        message,
+    ]
+    if body.all:
+        argv.insert(argv.index("commit") + 1, "-a")
+    code, _, err = await _drain_exec(mgr, handle, argv, cwd=WORKSPACE_MOUNT)
+    if code != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=_decode(err).strip() or "git commit failed",
+        )
+    return {"ok": True, "message": ""}
+
+
+@router.post("/git/fetch", response_model=GitOpResponse)
+async def api_workspace_git_fetch(
+    request: Request, body: GitFetchRequest
+) -> dict[str, Any]:
+    mgr, handle = await _resolve_git_workspace(request, body.root)
+    await _require_repo(mgr, handle)
+
+    code, _, err = await _drain_exec(
+        mgr, handle, ["git", "fetch", "--prune"], cwd=WORKSPACE_MOUNT
+    )
+    if code != 0:
+        return {"ok": False, "message": _decode(err).strip() or "git fetch failed"}
+    return {"ok": True, "message": _decode(err).strip()}
+
+
+@router.post("/git/pull", response_model=GitPullResponse)
+async def api_workspace_git_pull(
+    request: Request, body: GitPullRequest
+) -> dict[str, Any]:
+    """Pulls the upstream; conflicts surface as `ok=false` + a file list,
+    *not* an HTTP error — the UI shows the list inline and tells the user
+    to resolve in their editor."""
+    mgr, handle = await _resolve_git_workspace(request, body.root)
+    await _require_repo(mgr, handle)
+
+    # `--no-rebase` is the deliberate default: some users have
+    # `pull.rebase=true` in their gitconfig and would be surprised when the
+    # workspace pulls differently from their CLI. The UI doesn't yet expose
+    # a "rebase / merge" toggle, so we pin the strategy here.
+    code, out, err = await _drain_exec(
+        mgr,
+        handle,
+        ["git", *_GIT_IDENTITY_FLAGS, "pull", "--no-rebase"],
+        cwd=WORKSPACE_MOUNT,
+    )
+    stdout = _decode(out)
+    stderr = _decode(err)
+    if code == 0:
+        return {"ok": True, "message": stderr.strip(), "conflicts": []}
+
+    # Conflict surfacing: ask git itself for the unmerged paths.
+    # `--name-only --diff-filter=U` enumerates exactly the files with
+    # merge conflicts regardless of the CONFLICT variant (content,
+    # modify/delete, rename/rename, add/add, …). A line-grep over the
+    # `CONFLICT (...): ... in <path>` strings looks tempting but most
+    # variants put the path in a different position or include a branch
+    # name after ` in `, so parsing the raw output gives the wrong path
+    # for everything except the canonical "content" conflict.
+    _, names_out, _ = await _drain_exec(
+        mgr,
+        handle,
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        cwd=WORKSPACE_MOUNT,
+    )
+    conflicts: list[str] = [
+        line.strip()
+        for line in _decode(names_out).splitlines()
+        if line.strip()
+    ]
+    message = stderr.strip() or stdout.strip() or "git pull failed"
+    return {"ok": False, "message": message, "conflicts": conflicts}
+
+
+@router.post("/git/push", response_model=GitOpResponse)
+async def api_workspace_git_push(
+    request: Request, body: GitPushRequest
+) -> dict[str, Any]:
+    mgr, handle = await _resolve_git_workspace(request, body.root)
+    await _require_repo(mgr, handle)
+
+    argv: list[str] = ["git", "push"]
+    if body.set_upstream:
+        # `-u` requires a branch name; resolve the current branch so the
+        # client doesn't have to pass it explicitly.
+        cur_code, cur_out, _ = await _drain_exec(
+            mgr,
+            handle,
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=WORKSPACE_MOUNT,
+        )
+        cur = _decode(cur_out).strip() if cur_code == 0 else ""
+        if not cur or cur == "HEAD":
+            raise HTTPException(
+                status_code=400,
+                detail="cannot push --set-upstream from a detached HEAD",
+            )
+        # Defence-in-depth — the current branch name comes from
+        # `rev-parse` and *should* be safe, but a `-`-prefixed branch in
+        # the working tree would still be parsed as a flag by git push.
+        if cur.startswith("-"):
+            raise HTTPException(
+                status_code=400, detail="invalid current branch name"
+            )
+        argv.extend(["-u", "origin", cur])
+
+    code, _, err = await _drain_exec(mgr, handle, argv, cwd=WORKSPACE_MOUNT)
+    if code != 0:
+        return {"ok": False, "message": _decode(err).strip() or "git push failed"}
+    return {"ok": True, "message": _decode(err).strip()}
