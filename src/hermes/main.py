@@ -105,6 +105,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # awaiting user approval. Same single-worker invariant as chat_runs:
     # POST /api/approvals/{id} resolves the future the agent task is awaiting.
     app.state.approvals = {}
+    # Plan 21: in-memory session-scope grants. `{conversation_id: {tool_name, ...}}`
+    # — a conversation that resolves an approval with `allow_session` adds the
+    # tool here so further calls in the same chat skip the gate. Always-scope
+    # grants live in the `tool_approvals` table because they need to outlive
+    # this dict (process restart).
+    app.state.session_approvals = {}
     app.state.encryptor = None
     app.state.oauth_driver = None
     app.state.upstream = None

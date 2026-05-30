@@ -21,11 +21,26 @@ Forward-compatibility contract (mirrored by the frontend):
 
 Plans 09 (approvals) and 10 (reasoning/subagents) add new event types here and
 reuse this envelope rather than inventing their own.
+
+Plan 21 also lives here: the four-value :data:`ApprovalDecisionLiteral` is the
+single source of truth for the decisions the agent loop, the HTTP request
+model, and the standing-approval bookkeeping all agree on.
 """
 
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, RootModel
+
+# Plan 21: the four user-facing approval decisions. `allow_once` runs the
+# tool one time and re-asks on the next call; `allow_session` adds the tool
+# to `app.state.session_approvals[conversation_id]` so further calls in the
+# same chat skip the gate; `allow_always` upserts a `tool_approvals` row
+# that survives a restart; `deny` refuses with an optional reason fed back
+# to the LLM. Frontend and backend share this literal via the generated
+# OpenAPI schema.
+ApprovalDecisionLiteral = Literal[
+    "allow_once", "allow_session", "allow_always", "deny"
+]
 
 # --- per-event data payloads ------------------------------------------------
 

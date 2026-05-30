@@ -16,6 +16,7 @@ from hermes import attachments as attachments_mod
 from hermes.agent import ApprovalDecision, ChatRunCancelled, run_agent
 from hermes.config import conversation_scratch_root, settings
 from hermes.events import (
+    ApprovalDecisionLiteral,
     ApprovalRequiredData,
     ApprovalRequiredEvent,
     CancelledEvent,
@@ -47,6 +48,9 @@ from hermes.repository import (
     messages,
     notes,
     runs,
+)
+from hermes.repository import (
+    approvals as approvals_repo,
 )
 from hermes.repository import (
     llm_credentials as llm_credentials_repo,
@@ -253,6 +257,12 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
     approvals: dict[str, asyncio.Future[ApprovalDecision]] = (
         request.app.state.approvals
     )
+    # Plan 21: per-conversation set of tools the user has granted
+    # `allow_session` to. Always-scope grants live in the `tool_approvals`
+    # table — this dict only holds the in-memory session view.
+    session_approvals: dict[int, set[str]] = (
+        request.app.state.session_approvals
+    )
 
     # Active credential overrides settings.model; resolve once before the
     # SSE generator so the model id we persist in agent_runs matches what
@@ -300,6 +310,17 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
         async def on_approval(
             call_id: str, name: str, args: dict[str, Any], reason: str
         ) -> ApprovalDecision:
+            # Plan 21 pre-gate: if the user has already granted this tool a
+            # standing permission (always-scope persisted in DB, or
+            # session-scope cached for the active conversation), skip the
+            # card entirely. The agent loop only branches on
+            # `decision == "deny"`, so returning `allow_once` is the right
+            # signal regardless of which standing scope matched.
+            if await approvals_repo.is_always_allowed(db, name):
+                return ApprovalDecision(decision="allow_once")
+            if name in session_approvals.get(convo.id, set()):
+                return ApprovalDecision(decision="allow_once")
+
             # Register a future, surface the card, then block the agent task
             # until POST /api/approvals/{id} resolves it. The SSE generator
             # keeps the connection alive with heartbeats meanwhile.
@@ -320,11 +341,19 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
                 )
             )
             try:
-                return await future
+                decision = await future
             finally:
                 # Drop the entry however we leave (resolved, run cancelled,
                 # client disconnect) so a later decision can't hit a stale id.
                 approvals.pop(approval_id, None)
+            # Promote the decision to a standing grant when the user picked a
+            # broader scope than `allow_once`. The agent loop sees the
+            # original `decision` so its `== "deny"` check is unchanged.
+            if decision.decision == "allow_session":
+                session_approvals.setdefault(convo.id, set()).add(name)
+            elif decision.decision == "allow_always":
+                await approvals_repo.grant_always(db, name)
+            return decision
 
         # Subscribe to sandbox crashes for the lifetime of this stream so a
         # workspace dying mid-conversation surfaces as a `sandbox_crashed`
@@ -480,9 +509,14 @@ async def api_chat_cancel_run(request: Request, run_id: str) -> Response:
 
 
 class ApprovalDecisionRequest(BaseModel):
-    decision: Literal["allow_once", "deny"]
+    # Plan 21: four-decision union. Backend interprets `allow_session` /
+    # `allow_always` to upsert the standing lists; the agent loop only
+    # cares about `deny` vs. not-deny.
+    decision: ApprovalDecisionLiteral
     # Optional note shown to the LLM on deny so it can adapt its next turn.
-    reason: str | None = None
+    # Length-capped at 500 to keep tool errors bounded and to stop a stray
+    # paste from blowing the request body up; the UI hint matches.
+    reason: str | None = Field(default=None, max_length=500)
 
 
 @router.post(
@@ -516,6 +550,107 @@ async def api_resolve_approval(
     future.set_result(
         ApprovalDecision(decision=body.decision, reason=body.reason)
     )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Plan 21 standing-approvals surface: read + revoke the two non-`allow_once`
+# scopes. Granting still goes through the approval card (POST above) — a
+# dedicated grant endpoint would just duplicate that flow.
+# ---------------------------------------------------------------------------
+
+
+class StandingAlwaysEntry(BaseModel):
+    tool: str
+    granted_at: int
+    last_used_at: int | None
+
+
+class StandingSessionEntry(BaseModel):
+    conversation_id: int
+    tool: str
+
+
+class StandingApprovalsResponse(BaseModel):
+    always: list[StandingAlwaysEntry]
+    session: list[StandingSessionEntry]
+
+
+@router.get("/approvals/standing", response_model=StandingApprovalsResponse)
+async def api_list_standing_approvals(request: Request) -> StandingApprovalsResponse:
+    """Read the active standing-approval lists.
+
+    Returns persisted `allow_always` rows plus the in-memory
+    `allow_session` entries currently cached on `app.state`. The
+    web UI doesn't have a dedicated settings page for these yet
+    (Plan 21 Non-Goal); the data shape is here so a future page
+    only has to render it.
+    """
+    db: AsyncEngine = request.app.state.db
+    always_rows = await approvals_repo.list_always(db)
+    session_state: dict[int, set[str]] = request.app.state.session_approvals
+    session_entries = sorted(
+        (
+            StandingSessionEntry(conversation_id=conv_id, tool=tool)
+            for conv_id, tools in session_state.items()
+            for tool in tools
+        ),
+        key=lambda e: (e.conversation_id, e.tool),
+    )
+    return StandingApprovalsResponse(
+        always=[
+            StandingAlwaysEntry(
+                tool=row.tool_name,
+                granted_at=row.granted_at,
+                last_used_at=row.last_used_at,
+            )
+            for row in always_rows
+        ],
+        session=session_entries,
+    )
+
+
+StandingScope = Literal["always", "session"]
+
+
+@router.delete(
+    "/approvals/standing/{tool_name}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={404: {"description": "Tool not in the standing list for that scope"}},
+)
+async def api_revoke_standing_approval(
+    request: Request, tool_name: str, scope: StandingScope
+) -> Response:
+    """Drop a standing-approval grant so the next call re-prompts.
+
+    `scope=always` deletes the `tool_approvals` row; `scope=session`
+    removes the tool from every conversation's in-memory set (single-user
+    deployment — there's only one user's app.state to scrub). Missing
+    tools 404 so the UI can tell a stale revoke from a successful one.
+    """
+    if scope == "always":
+        db: AsyncEngine = request.app.state.db
+        removed = await approvals_repo.revoke_always(db, tool_name)
+        if not removed:
+            raise HTTPException(
+                status_code=404, detail="tool not in always-allowed list"
+            )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    # scope == "session": single user / single-worker deployment, so we
+    # walk every conversation's set. Conversations whose set becomes empty
+    # get dropped to keep the dict tidy.
+    session_state: dict[int, set[str]] = request.app.state.session_approvals
+    touched = False
+    for conv_id in list(session_state.keys()):
+        tools = session_state[conv_id]
+        if tool_name in tools:
+            tools.discard(tool_name)
+            touched = True
+            if not tools:
+                session_state.pop(conv_id, None)
+    if not touched:
+        raise HTTPException(status_code=404, detail="tool not in session-allowed list")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

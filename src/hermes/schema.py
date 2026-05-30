@@ -312,6 +312,25 @@ Index(
 )
 
 
+# Plan 21: always-scope tool approvals. Session-scope lives purely on
+# `app.state.session_approvals` (dict[conversation_id, set[tool_name]]); only
+# `allow_always` decisions need to survive a process restart, so only those
+# get a DB row. One row per tool — granular per-argument rules are
+# out-of-scope (see Plan 21's Non-Goals).
+tool_approvals = Table(
+    "tool_approvals",
+    metadata,
+    Column("tool_name", Text, primary_key=True),
+    # Unix epoch seconds. Refreshed on re-grant (upsert) so the audit trail
+    # always shows when the standing permission last became effective.
+    Column("granted_at", Integer, nullable=False),
+    # Reserved for a future "last used" surface; NULL until the agent loop
+    # starts marking standing-allowed calls. Plan 21 ships the column but
+    # never writes to it.
+    Column("last_used_at", Integer),
+)
+
+
 messenger_accounts = Table(
     "messenger_accounts",
     metadata,
