@@ -99,14 +99,18 @@ async def _check_llm(db: AsyncEngine) -> DiagnosticsCheck:
 
 
 async def _check_messenger(db: AsyncEngine) -> DiagnosticsCheck:
+    # Messenger is an optional bridge, not a setup gate: the WebUI chat works
+    # without Signal/Telegram. Surface the state as `ok` when nothing is
+    # configured so the overall badge doesn't go yellow on users who run
+    # Hermes web-only by design.
     accounts = await messenger_repo.list_all(db)
     active = [a for a in accounts if a.is_active]
     if not active:
         return DiagnosticsCheck(
             id="messenger",
             label="Messenger",
-            status="warning",
-            message="no active messenger account — Signal/Telegram bridges are off",
+            status="ok",
+            message="no messenger accounts configured (optional Signal/Telegram bridge)",
         )
     providers = sorted({a.provider for a in active})
     return DiagnosticsCheck(
