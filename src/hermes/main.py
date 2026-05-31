@@ -27,7 +27,9 @@ from hermes.repository import workspaces as workspaces_repo
 from hermes.routes.api import router as api_router
 from hermes.routes.chat import router as chat_router
 from hermes.routes.diagnostics import router as diagnostics_router
+from hermes.routes.insights import router as insights_router
 from hermes.routes.llm import router as llm_router
+from hermes.routes.logs import router as logs_router
 from hermes.routes.messenger import router as messenger_router
 from hermes.routes.sandbox import router as sandbox_router
 from hermes.routes.workspace import router as workspace_router
@@ -393,6 +395,8 @@ app.include_router(workspace_router)
 app.include_router(workspaces_router)
 app.include_router(sandbox_router)
 app.include_router(diagnostics_router)
+app.include_router(insights_router)
+app.include_router(logs_router)
 
 
 @app.get("/healthz")
