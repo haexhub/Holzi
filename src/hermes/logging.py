@@ -19,6 +19,18 @@ SECRET_KEY_PATTERN = re.compile(
 )
 REDACTED = "<redacted>"
 
+# Same key vocabulary but as a `key=value` / `key: value` matcher for
+# free-form text lines that don't parse as JSON (e.g. stdlib log records
+# from uvicorn / httpx). Captures the value up to the next whitespace,
+# quote, comma, or end-of-line so URL params and key=value pairs are
+# both covered.
+SECRET_INLINE_PATTERN = re.compile(
+    r"(?P<key>api[_-]?key|token|password|secret|authorization|bearer)"
+    r"(?P<sep>\s*[:=]\s*|\s+)"
+    r"(?P<val>[^\s,;\"']+)",
+    re.IGNORECASE,
+)
+
 
 def redact_secrets(obj: Any) -> Any:
     """Walk a JSON-ish value and replace any value whose key matches
@@ -36,6 +48,16 @@ def redact_secrets(obj: Any) -> Any:
     if isinstance(obj, list):
         return [redact_secrets(v) for v in obj]
     return obj
+
+
+def redact_secrets_in_text(line: str) -> str:
+    """Belt-and-braces redaction for raw log text that doesn't parse as
+    a JSON dict — `redact_secrets` only matches keys in structured data,
+    so a stdlib record like `Bearer abc123` would otherwise leak. The
+    secret-key list mirrors `SECRET_KEY_PATTERN` plus `bearer`."""
+    return SECRET_INLINE_PATTERN.sub(
+        lambda m: f"{m.group('key')}{m.group('sep')}{REDACTED}", line
+    )
 
 
 def _redaction_processor(_logger, _method, event_dict):
@@ -63,10 +85,13 @@ def configure_logging() -> None:
         )
 
     # Replace existing handlers so re-running configure_logging() (tests,
-    # hot-reload) doesn't multiply them.
+    # hot-reload) doesn't multiply them. `close()` releases the underlying
+    # stream/FD; just `removeHandler` would leak file descriptors on each
+    # rebuild and could keep a rotated log file locked.
     root = logging.getLogger()
     for h in list(root.handlers):
         root.removeHandler(h)
+        h.close()
     for h in handlers:
         h.setFormatter(logging.Formatter("%(message)s"))
         root.addHandler(h)

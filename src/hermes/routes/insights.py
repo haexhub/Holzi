@@ -4,9 +4,11 @@ Backs the Insights page (Plan 27). Pure read path over the persistent
 `agent_runs` table: total runs / errors / token usage, daily series for
 the chart, per-model split, and status counts.
 
-The window is a rolling number of seconds ending at `now`. Buckets are
-UTC dates — the frontend renders them in user-tz. Empty buckets are
-zero-filled so the chart never lies about a quiet day.
+For `7d`/`30d` the window is anchored to UTC day boundaries: SQL cutoff
+and the rendered bucket labels are derived from the same `_utc_today()`
+snapshot, so totals/by_model/by_status never include rows that the
+`series` view drops as out-of-window. `24h` is the one rolling window —
+two UTC bucket labels straddle the 24h boundary by design.
 """
 from __future__ import annotations
 
@@ -23,12 +25,6 @@ from hermes.repository import runs as runs_repo
 router = APIRouter(prefix="/api/insights", tags=["insights"])
 
 Period = Literal["24h", "7d", "30d"]
-
-_PERIOD_SECONDS: dict[Period, int] = {
-    "24h": 24 * 3600,
-    "7d": 7 * 86400,
-    "30d": 30 * 86400,
-}
 
 # 24h windows can straddle two UTC days; 7d / 30d always render that many
 # buckets (the most recent N days ending today, inclusive).
@@ -82,9 +78,10 @@ def _utc_today() -> datetime:
     )
 
 
-def _bucket_dates(period: Period) -> list[str]:
-    """Daily UTC bucket labels for the window, oldest-first."""
-    today = _utc_today()
+def _bucket_dates(period: Period, today: datetime) -> list[str]:
+    """Daily UTC bucket labels for the window, oldest-first. Takes
+    `today` as a parameter so the caller can pin SQL cutoff and labels
+    to the same UTC boundary."""
     count = _PERIOD_BUCKETS[period]
     return [
         (today - timedelta(days=i)).strftime("%Y-%m-%d")
@@ -93,11 +90,11 @@ def _bucket_dates(period: Period) -> list[str]:
 
 
 def _zero_fill_series(
-    period: Period, observed: list[dict]
+    period: Period, today: datetime, observed: list[dict]
 ) -> list[DailyBucket]:
     by_bucket = {b["bucket"]: b for b in observed}
     out: list[DailyBucket] = []
-    for label in _bucket_dates(period):
+    for label in _bucket_dates(period, today):
         row = by_bucket.get(label)
         if row is None:
             out.append(
@@ -117,6 +114,21 @@ def _zero_fill_series(
     return out
 
 
+def _since_ts(period: Period, today: datetime) -> int:
+    """SQL cutoff for a given period, in epoch seconds.
+
+    - 24h: now - 24h (rolling, can straddle two UTC days).
+    - 7d / 30d: the oldest rendered UTC bucket's 00:00, so SQL and
+      labels stay in sync; otherwise rows on the partial oldest UTC day
+      counted in totals/by_model/by_status would be dropped from series.
+    """
+    if period == "24h":
+        return int(time.time()) - 24 * 3600
+    bucket_count = _PERIOD_BUCKETS[period]
+    oldest_bucket_start = today - timedelta(days=bucket_count - 1)
+    return int(oldest_bucket_start.timestamp())
+
+
 @router.get("", response_model=InsightsResponse)
 async def api_insights(
     request: Request,
@@ -125,13 +137,14 @@ async def api_insights(
     # Reject unknown periods at the boundary with a 400 (matches /api/runs
     # and /api/tasks); a typed `Literal` parameter would 422 via FastAPI's
     # validator, which the rest of the API surface doesn't do.
-    if period not in _PERIOD_SECONDS:
+    if period not in _PERIOD_BUCKETS:
         raise HTTPException(
             status_code=400,
-            detail=f"period must be one of {sorted(_PERIOD_SECONDS)}",
+            detail=f"period must be one of {sorted(_PERIOD_BUCKETS)}",
         )
     db: AsyncEngine = request.app.state.db
-    since_ts = int(time.time()) - _PERIOD_SECONDS[period]
+    today = _utc_today()
+    since_ts = _since_ts(period, today)
     totals = await runs_repo.aggregate_totals(db, since_ts=since_ts)
     raw_series = await runs_repo.aggregate_by_day(db, since_ts=since_ts)
     by_model = await runs_repo.aggregate_by_model(db, since_ts=since_ts)
@@ -139,7 +152,7 @@ async def api_insights(
     return InsightsResponse(
         period=period,
         totals=TotalsResponse(**totals),
-        series=_zero_fill_series(period, raw_series),
+        series=_zero_fill_series(period, today, raw_series),
         by_model=[
             ModelBreakdown(
                 model=str(row["model"]),

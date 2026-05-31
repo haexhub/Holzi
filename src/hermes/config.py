@@ -18,8 +18,11 @@ class Settings(BaseSettings):
     # has something to tail. Unset = stdout-only; the /api/logs endpoint
     # reports 503 in that case.
     log_file: str | None = None
-    log_file_max_bytes: int = 10 * 1024 * 1024
-    log_file_backup_count: int = 3
+    # Bounds matter: max_bytes <= 0 silently disables rollover in
+    # RotatingFileHandler, which converts the file handler into an
+    # unbounded sink. Fail fast on a bad .env value instead.
+    log_file_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    log_file_backup_count: int = Field(default=3, ge=0)
     db_path: str = "./hermes.db"
     # AES-256-GCM master key for `llm_credentials` ciphertext. Optional —
     # when unset, `crypto.resolve_master_key` falls back to a persisted

@@ -229,3 +229,20 @@ async def test_logs_redacts_secret_in_nested_dict(
     [row] = (await client.get("/api/logs", headers=AUTH)).json()["rows"]
     assert row["context"]["api_key"] == "<redacted>"
     assert row["context"]["model"] == "x"
+
+
+async def test_logs_redacts_secrets_in_raw_text_fallback(
+    client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """A non-JSON line that contains an inline secret (e.g. a stdlib log
+    record like `authorization=Bearer sk-xxx`) must come out scrubbed —
+    redact_secrets only matches JSON keys, so the fallback needs its
+    own inline scrubber."""
+    log_file = tmp_path / "hermes.log"
+    log_file.write_text(
+        "uvicorn: GET /x authorization=sk-leak token: abc123 ok\n"
+    )
+    [row] = (await client.get("/api/logs", headers=AUTH)).json()["rows"]
+    assert "sk-leak" not in row["_raw"]
+    assert "abc123" not in row["_raw"]
+    assert "<redacted>" in row["_raw"]

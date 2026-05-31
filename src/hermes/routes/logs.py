@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from hermes.config import settings
-from hermes.logging import redact_secrets
+from hermes.logging import redact_secrets, redact_secrets_in_text
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
 
@@ -67,13 +67,16 @@ def _tail_lines(path: Path, tail: int) -> list[str]:
 
 def _parse_row(line: str) -> dict[str, Any]:
     """Decode a single JSON row. Malformed lines pass through as
-    `{"_raw": "..."}` so a single bad write doesn't break the tail."""
+    `{"_raw": "..."}` so a single bad write doesn't break the tail. The
+    raw fallback runs through `redact_secrets_in_text` because
+    `redact_secrets` only scrubs JSON keys — a stdlib record like
+    `Bearer abc123` would otherwise leak through verbatim."""
     try:
         obj = json.loads(line)
     except json.JSONDecodeError:
-        return {"_raw": line}
+        return {"_raw": redact_secrets_in_text(line)}
     if not isinstance(obj, dict):
-        return {"_raw": line}
+        return {"_raw": redact_secrets_in_text(line)}
     return obj
 
 
