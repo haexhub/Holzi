@@ -10,8 +10,8 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 
-from hermes import config as hermes_config
 from hermes.main import app
+from hermes.repository import workspaces as workspaces_repo
 from hermes.sandbox import (
     ResourceLimits,
     SandboxManager,
@@ -39,13 +39,22 @@ async def client():
 
 
 @pytest.fixture
-def configure_roots(monkeypatch):
-    """Set HERMES_WORKSPACE_ROOTS-equivalent in-process and tear it down."""
+def configure_roots():
+    """Seed the `workspaces` table for browser tests (Plan 25-A).
 
-    def _set(value: str) -> None:
-        monkeypatch.setattr(
-            hermes_config.settings, "workspace_roots", value
-        )
+    Accepts the same comma-separated slug list the env used to carry, so
+    existing call sites don't need to change shape — just `await` the
+    return value. Empty strings / whitespace-only entries are skipped to
+    match the env's tolerant parse. Each test gets a fresh DB via the
+    conftest `_reset_app_db_path` autouse fixture, so no teardown.
+    """
+
+    async def _set(value: str) -> None:
+        slugs = [s.strip() for s in value.split(",") if s.strip()]
+        for slug in slugs:
+            await workspaces_repo.create(
+                app.state.db, workspace_id=slug, display_name=slug
+            )
 
     return _set
 
@@ -106,7 +115,7 @@ async def test_roots_requires_auth(client: httpx.AsyncClient) -> None:
 async def test_roots_empty_when_unconfigured(
     client: httpx.AsyncClient, configure_roots
 ) -> None:
-    configure_roots("")
+    await configure_roots("")
     response = await client.get("/api/workspace/roots", headers=AUTH)
     assert response.status_code == 200
     assert response.json() == {"roots": []}
@@ -115,7 +124,7 @@ async def test_roots_empty_when_unconfigured(
 async def test_roots_lists_configured_ids(
     client: httpx.AsyncClient, configure_roots
 ) -> None:
-    configure_roots("ws-1, ws-2 ,,")
+    await configure_roots("ws-1, ws-2 ,,")
     response = await client.get("/api/workspace/roots", headers=AUTH)
     assert response.status_code == 200
     assert response.json() == {"roots": [{"id": "ws-1"}, {"id": "ws-2"}]}
@@ -124,7 +133,7 @@ async def test_roots_lists_configured_ids(
 async def test_tree_503_when_sandbox_not_configured(
     client: httpx.AsyncClient, configure_roots
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     assert app.state.sandbox_manager is None
     response = await client.get(
         "/api/workspace/tree", params={"root": "ws-1"}, headers=AUTH
@@ -135,7 +144,7 @@ async def test_tree_503_when_sandbox_not_configured(
 async def test_tree_unknown_root_returns_404(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.get(
         "/api/workspace/tree", params={"root": "ws-other"}, headers=AUTH
@@ -156,7 +165,7 @@ async def test_tree_rejects_traversal_paths(
     install_sandbox,
     bad_path: str,
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.get(
         "/api/workspace/tree",
@@ -176,7 +185,7 @@ async def test_tree_empty_workspace_returns_empty_entries(
     a mounted volume in real Podman — the API must surface that as 200 with an
     empty entries list, not as 404 (the frontend renders that as "empty
     workspace", not "missing workspace")."""
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.get(
         "/api/workspace/tree",
@@ -193,7 +202,7 @@ async def test_tree_empty_workspace_returns_empty_entries(
 async def test_tree_lists_files_and_dirs(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/readme.md", b"# hello")
@@ -217,7 +226,7 @@ async def test_tree_lists_files_and_dirs(
 async def test_tree_nested_path(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/src/a.py", b"x = 1")
@@ -238,7 +247,7 @@ async def test_tree_nested_path(
 async def test_tree_on_file_returns_400(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/file.txt", b"hi")
@@ -256,7 +265,7 @@ async def test_tree_on_file_returns_400(
 async def test_file_503_when_sandbox_not_configured(
     client: httpx.AsyncClient, configure_roots
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     assert app.state.sandbox_manager is None
     response = await client.get(
         "/api/workspace/file",
@@ -269,7 +278,7 @@ async def test_file_503_when_sandbox_not_configured(
 async def test_file_unknown_root_404(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.get(
         "/api/workspace/file",
@@ -282,7 +291,7 @@ async def test_file_unknown_root_404(
 async def test_file_missing_returns_404(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/other.txt", b"hi")
@@ -297,7 +306,7 @@ async def test_file_missing_returns_404(
 async def test_file_on_directory_returns_400(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/src/a.py", b"x = 1")
@@ -312,7 +321,7 @@ async def test_file_on_directory_returns_400(
 async def test_file_empty_path_returns_400(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.get(
         "/api/workspace/file",
@@ -325,7 +334,7 @@ async def test_file_empty_path_returns_400(
 async def test_file_text_preview(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     text = "hello\nworld\n"
@@ -349,7 +358,7 @@ async def test_file_text_preview(
 async def test_file_markdown_preview(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     md = "# Title\n\nBody.\n"
@@ -373,7 +382,7 @@ async def test_tree_on_dead_sandbox_returns_503(
     """A crashed workspace must surface as 503 (matching the chat-stream's
     crash semantics) so the frontend can offer Restart via the same path,
     not 500 (which would imply an internal bug)."""
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, backend = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     backend.simulate_crash(handle.id)
@@ -389,7 +398,7 @@ async def test_tree_on_dead_sandbox_returns_503(
 async def test_file_on_dead_sandbox_returns_503(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, backend = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/x.txt", b"hi")
@@ -408,7 +417,7 @@ async def test_file_svg_previews_as_text_source(
 ) -> None:
     """SVG is XML — we'd rather show the source than base64-inline an opaque
     image, so it falls into the text path (not image)."""
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     svg = '<svg xmlns="http://www.w3.org/2000/svg"/>\n'
@@ -430,7 +439,7 @@ async def test_file_svg_previews_as_text_source(
 async def test_file_binary_metadata_only(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     # A NUL early in the file triggers the binary classifier.
@@ -452,7 +461,7 @@ async def test_file_binary_metadata_only(
 async def test_file_image_preview(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     png = _tiny_png()
@@ -475,7 +484,7 @@ async def test_file_image_preview(
 async def test_file_oversized_text_is_truncated(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     huge = ("a" * (TEXT_PREVIEW_CAP + 100)).encode()
@@ -495,7 +504,7 @@ async def test_file_oversized_text_is_truncated(
 async def test_file_oversized_image_returns_metadata_only(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     # The runtime cap is 10 MiB; the image preview cap is 2 MiB, so a 3 MiB
@@ -525,7 +534,7 @@ async def test_file_text_includes_sha256(
     contract is the sha of the *full file bytes*, not the preview slice."""
     import hashlib as _hl
 
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     payload = b"hello\nworld\n"
@@ -542,7 +551,7 @@ async def test_file_text_includes_sha256(
 async def test_file_binary_omits_sha256(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(
@@ -563,7 +572,7 @@ async def test_file_binary_omits_sha256(
 async def test_file_create_writes_and_commits(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, backend = install_sandbox()
     response = await client.post(
         "/api/workspace/file",
@@ -600,7 +609,7 @@ async def test_file_create_writes_and_commits(
 async def test_file_create_409_when_exists(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/x.txt", b"old")
@@ -623,7 +632,7 @@ async def test_file_create_in_fresh_subdir_succeeds(
     """`write_file` mkdir-p's the parent, so creating a file inside a
     not-yet-existing subdir is the expected happy path — the panel UI can
     target a fresh directory in one shot."""
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     response = await client.post(
         "/api/workspace/file",
@@ -652,7 +661,7 @@ async def test_file_create_rejects_traversal(
     install_sandbox,
     bad_path: str,
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.post(
         "/api/workspace/file",
@@ -670,7 +679,7 @@ async def test_file_create_rejects_traversal(
 async def test_file_create_rejects_binary_content(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.post(
         "/api/workspace/file",
@@ -692,7 +701,7 @@ async def test_file_create_committed_false_when_not_a_repo(
     no-ops the commit — the file write still went through."""
     from hermes.sandbox.models import ExecExit
 
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, backend = install_sandbox()
     # Pre-warm the sandbox so the rev-parse call is the first scripted exec.
     await mgr.get_workspace("ws-1")
@@ -723,7 +732,7 @@ async def test_file_update_succeeds_with_matching_base_sha(
 ) -> None:
     import hashlib as _hl
 
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, backend = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     initial = b"v1\n"
@@ -756,7 +765,7 @@ async def test_file_update_succeeds_with_matching_base_sha(
 async def test_file_update_409_on_base_sha_mismatch(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/file.py", b"current\n")
@@ -782,7 +791,7 @@ async def test_file_update_409_on_base_sha_mismatch(
 async def test_file_update_404_when_missing(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.put(
         "/api/workspace/file",
@@ -803,7 +812,7 @@ async def test_file_update_rejects_binary_content(
 ) -> None:
     import hashlib as _hl
 
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     initial = b"text\n"
@@ -828,7 +837,7 @@ async def test_file_update_rejects_binary_content(
 async def test_file_rename_moves_and_commits(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, backend = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/old.md", b"# title\n")
@@ -859,7 +868,7 @@ async def test_file_rename_moves_and_commits(
 async def test_file_rename_409_when_dest_exists(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/a.txt", b"a")
@@ -880,7 +889,7 @@ async def test_file_rename_409_when_dest_exists(
 async def test_file_rename_404_when_src_missing(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.post(
         "/api/workspace/rename",
@@ -900,7 +909,7 @@ async def test_file_rename_404_when_parent_missing(
 ) -> None:
     """Regression: a missing *parent* directory used to surface
     SandboxFileNotFound from `_stat_entry` as a 500. Should be a 404."""
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.post(
         "/api/workspace/rename",
@@ -918,7 +927,7 @@ async def test_file_rename_404_when_parent_missing(
 async def test_file_rename_rejects_traversal(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, _ = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/a.txt", b"a")
@@ -941,7 +950,7 @@ async def test_file_rename_rejects_traversal(
 async def test_file_delete_removes_and_commits(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, backend = install_sandbox()
     handle = await mgr.get_workspace("ws-1")
     await mgr.write_file(handle, f"{WORKSPACE_MOUNT}/gone.txt", b"bye")
@@ -970,7 +979,7 @@ async def test_file_delete_removes_and_commits(
 async def test_file_delete_404_when_missing(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.request(
         "DELETE",
@@ -986,7 +995,7 @@ async def test_file_delete_404_when_parent_missing(
 ) -> None:
     """Regression: missing parent dir on delete used to bubble
     SandboxFileNotFound as 500; expected 404."""
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.request(
         "DELETE",
@@ -1004,7 +1013,7 @@ async def test_file_delete_404_when_parent_missing(
 async def test_file_delete_rejects_traversal(
     client: httpx.AsyncClient, configure_roots, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     install_sandbox()
     response = await client.request(
         "DELETE",
@@ -1023,7 +1032,7 @@ async def test_git_status_reports_not_a_repo(
 ) -> None:
     from hermes.sandbox.models import ExecExit
 
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, backend = install_sandbox()
     await mgr.get_workspace("ws-1")
     backend.script_exec([ExecExit(exit_code=128)])  # rev-parse fails
@@ -1048,7 +1057,7 @@ async def test_git_status_branch_and_dirty_entries(
 ) -> None:
     from hermes.sandbox.models import ExecExit, ExecOutput
 
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, backend = install_sandbox()
     await mgr.get_workspace("ws-1")
     # 1) rev-parse --is-inside-work-tree → exit 0 (is a repo)
@@ -1083,7 +1092,7 @@ async def test_git_status_clean_repo(
 ) -> None:
     from hermes.sandbox.models import ExecExit, ExecOutput
 
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     mgr, backend = install_sandbox()
     await mgr.get_workspace("ws-1")
     backend.script_exec([ExecOutput("stdout", b"true\n"), ExecExit(exit_code=0)])
@@ -1106,7 +1115,7 @@ async def test_git_status_clean_repo(
 async def test_git_503_when_sandbox_unconfigured(
     client: httpx.AsyncClient, configure_roots
 ) -> None:
-    configure_roots("ws-1")
+    await configure_roots("ws-1")
     response = await client.get(
         "/api/workspace/git",
         params={"root": "ws-1"},

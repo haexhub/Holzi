@@ -17,6 +17,7 @@ from asgi_lifespan import LifespanManager
 from hermes.main import app
 from hermes.repository import llm_credentials as llm_repo
 from hermes.repository import messenger as messenger_repo
+from hermes.repository import workspaces as workspaces_repo
 
 VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -164,23 +165,59 @@ async def test_diagnostics_without_messenger_account_is_ok_not_warning(
 
 
 # ---------------------------------------------------------------------------
-# workspace roots
+# workspaces (Plan 25-A: DB-driven; the env is bootstrap-only)
 # ---------------------------------------------------------------------------
 
 
-async def test_diagnostics_with_workspace_roots_configured(
-    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+async def test_diagnostics_with_workspaces_in_db_reports_ok(
+    client: httpx.AsyncClient,
 ) -> None:
-    from hermes import config as hermes_config
-
-    monkeypatch.setattr(
-        hermes_config.settings, "workspace_roots", "holzi,hermes"
+    """Plan 25-A: the `workspaces` table is the source of truth. Two active
+    rows → status ok, display_name surfaces in the message."""
+    await workspaces_repo.create(
+        app.state.db, workspace_id="holzi", display_name="Holzi"
+    )
+    await workspaces_repo.create(
+        app.state.db, workspace_id="hermes", display_name="Hermes"
     )
     response = await client.get("/api/diagnostics", headers=AUTH)
     workspace = _check(response.json(), "workspace")
     assert workspace["status"] == "ok"
-    # The root ids themselves are configured user-facing names, fine to surface.
-    assert "holzi" in workspace["message"] or "2" in workspace["message"]
+    assert "Holzi" in workspace["message"] or "2" in workspace["message"]
+
+
+async def test_diagnostics_with_env_set_but_empty_table_still_warns(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guards against regressions: even when `HERMES_WORKSPACE_ROOTS` is set
+    at request time, the check must ignore it and look at the table only.
+    (The lifespan backfill normally inserts env slugs at boot, but if a
+    test bypasses that flow the env alone must not count as configured.)"""
+    from hermes import config as hermes_config
+
+    monkeypatch.setattr(
+        hermes_config.settings, "workspace_roots", "from-env-only"
+    )
+    response = await client.get("/api/diagnostics", headers=AUTH)
+    workspace = _check(response.json(), "workspace")
+    assert workspace["status"] == "warning"
+    # New copy points at the UI surface, not the env.
+    assert "/settings/workspaces" in workspace["message"]
+    assert "HERMES_WORKSPACE_ROOTS" not in workspace["message"]
+
+
+async def test_diagnostics_excludes_archived_workspaces(
+    client: httpx.AsyncClient,
+) -> None:
+    """`list_active` excludes archived rows. A workspace that's been
+    archived via the UI must not keep the check green on its own."""
+    await workspaces_repo.create(
+        app.state.db, workspace_id="ghost", display_name="Ghost"
+    )
+    await workspaces_repo.archive(app.state.db, "ghost")
+    response = await client.get("/api/diagnostics", headers=AUTH)
+    workspace = _check(response.json(), "workspace")
+    assert workspace["status"] == "warning"
 
 
 # ---------------------------------------------------------------------------
@@ -253,21 +290,37 @@ async def test_diagnostics_truncates_long_display_name(
     assert "\n" not in msg
 
 
-async def test_diagnostics_truncates_long_workspace_root_list(
-    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+async def test_diagnostics_truncates_long_workspaces_list(
+    client: httpx.AsyncClient,
 ) -> None:
     """The workspace message is meant to be short — many configured
-    roots should collapse to a count + first-few preview."""
-    from hermes import config as hermes_config
+    workspaces should collapse to a count + first-few preview using
+    `display_name` (sorted ascending)."""
+    for i in range(20):
+        await workspaces_repo.create(
+            app.state.db,
+            workspace_id=f"workspace-{i:02d}",
+            display_name=f"Workspace {i:02d}",
+        )
+    response = await client.get("/api/diagnostics", headers=AUTH)
+    msg = _check(response.json(), "workspace")["message"]
+    assert "20 workspace(s)" in msg
+    # First three (display_name ascending) should appear, trailing ones not.
+    assert "Workspace 00" in msg
+    assert "Workspace 19" not in msg
+    assert "…" in msg
 
-    roots = [f"workspace-{i}" for i in range(20)]
-    monkeypatch.setattr(
-        hermes_config.settings, "workspace_roots", ",".join(roots)
+
+async def test_diagnostics_truncates_long_workspace_display_name(
+    client: httpx.AsyncClient,
+) -> None:
+    """`display_name` is user-controlled — an oversized or multiline value
+    must not dominate the response (same defence-in-depth as the LLM check)."""
+    long_name = "x" * 500 + "\nsecond line"
+    await workspaces_repo.create(
+        app.state.db, workspace_id="big", display_name=long_name
     )
     response = await client.get("/api/diagnostics", headers=AUTH)
     msg = _check(response.json(), "workspace")["message"]
-    assert "20 root(s)" in msg
-    # First three should appear, the trailing ones should not.
-    assert "workspace-0" in msg
-    assert "workspace-19" not in msg
-    assert "…" in msg
+    assert len(msg) < 200
+    assert "\n" not in msg

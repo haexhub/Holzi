@@ -27,7 +27,6 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from hermes.config import settings
 from hermes.repository import workspaces as repo
 from hermes.sandbox import (
     ExecExit,
@@ -283,11 +282,6 @@ async def _aggregate(
         disk=disk,
         git=git,
     )
-
-
-def _configured_root_slugs() -> list[str]:
-    """Parse `HERMES_WORKSPACE_ROOTS` into a slug list for backfill."""
-    return [r.strip() for r in settings.workspace_roots.split(",") if r.strip()]
 
 
 # --- endpoints -------------------------------------------------------------

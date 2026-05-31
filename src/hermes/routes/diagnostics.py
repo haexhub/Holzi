@@ -23,6 +23,7 @@ from hermes.config import settings
 from hermes.logging import logger
 from hermes.repository import llm_credentials as llm_repo
 from hermes.repository import messenger as messenger_repo
+from hermes.repository import workspaces as workspaces_repo
 
 router = APIRouter(prefix="/api/diagnostics", tags=["diagnostics"])
 
@@ -149,21 +150,36 @@ def _check_scheduler(request: Request) -> DiagnosticsCheck:
     )
 
 
-def _check_workspace() -> DiagnosticsCheck:
-    roots = [r.strip() for r in settings.workspace_roots.split(",") if r.strip()]
-    if not roots:
+async def _check_workspace(db: AsyncEngine | None) -> DiagnosticsCheck:
+    # Plan 25-A: the `workspaces` table is the source of truth. The
+    # `HERMES_WORKSPACE_ROOTS` env stays as a boot-time backfill (handled
+    # in `main.py` lifespan) but is never read at request time.
+    if db is None:
+        return DiagnosticsCheck(
+            id="workspace",
+            label="Workspaces",
+            status="error",
+            message="cannot check — database not initialised",
+        )
+    rows = await workspaces_repo.list_active(db)
+    if not rows:
         return DiagnosticsCheck(
             id="workspace",
             label="Workspaces",
             status="warning",
-            message="no workspace roots configured (HERMES_WORKSPACE_ROOTS empty)",
+            message="no workspaces configured (add one in /settings/workspaces)",
         )
-    preview = ", ".join(roots[:3]) + ("…" if len(roots) > 3 else "")
+    # display_name is user-controlled — same length-cap defence-in-depth
+    # as the LLM check. list_active returns rows ordered by display_name
+    # asc, so the preview matches the UI's sidebar order.
+    previews = [_summarise(r.display_name, max_len=48) for r in rows[:3]]
+    suffix = "…" if len(rows) > 3 else ""
+    preview = ", ".join(previews) + suffix
     return DiagnosticsCheck(
         id="workspace",
         label="Workspaces",
         status="ok",
-        message=f"{len(roots)} root(s) configured: {preview}",
+        message=f"{len(rows)} workspace(s) configured: {preview}",
     )
 
 
@@ -223,13 +239,9 @@ async def api_diagnostics(request: Request) -> DiagnosticsResponse:
                 message="cannot check — database not initialised",
             )
         )
-    checks.extend(
-        [
-            _check_scheduler(request),
-            _check_workspace(),
-            _check_sandbox(request),
-        ]
-    )
+    checks.append(_check_scheduler(request))
+    checks.append(await _check_workspace(db))
+    checks.append(_check_sandbox(request))
     overall: Status = "ok"
     for c in checks:
         if _SEVERITY[c.status] > _SEVERITY[overall]:
