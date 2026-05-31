@@ -320,9 +320,12 @@ Index(
 # `archived_at`: rows are tombstoned, the on-disk directory stays (hard
 # delete is an explicit follow-up plan).
 #
-# `HERMES_WORKSPACE_ROOTS` env still works as a *bootstrap* — the lifespan
-# backfills any slug from the env that isn't already in the table — but
-# this table is the source of truth from Plan 25 onwards.
+# `HERMES_WORKSPACE_ROOTS` env is *bootstrap-only* (Plan 25 + 25-A): the
+# lifespan backfills any slug from the env that isn't already in the
+# table on boot, but no request-time code path reads the env. This table
+# is the sole source of truth — the diagnostics check, the read-only
+# browser, and every write/git endpoint go through
+# `workspaces_repo.list_active`.
 workspaces = Table(
     "workspaces",
     metadata,
