@@ -15,6 +15,7 @@ from asgi_lifespan import LifespanManager
 
 from hermes import config as hermes_config
 from hermes.main import app
+from hermes.repository import workspaces as workspaces_repo
 from hermes.sandbox import (
     ResourceLimits,
     SandboxManager,
@@ -40,9 +41,16 @@ async def client():
 
 
 @pytest.fixture
-def configure_roots(monkeypatch):
-    def _set(value: str) -> None:
-        monkeypatch.setattr(hermes_config.settings, "workspace_roots", value)
+def configure_workspaces():
+    """Plan 25-A: seed the `workspaces` table with the given slugs so the
+    request-time membership check in `_active_root_slugs(db)` accepts
+    them. DB engine is per-test, so no explicit teardown is required."""
+
+    async def _set(slugs: list[str]) -> None:
+        for slug in slugs:
+            await workspaces_repo.create(
+                app.state.db, workspace_id=slug, display_name=slug
+            )
 
     return _set
 
@@ -101,9 +109,9 @@ def _fail(stderr: str, *, exit_code: int = 1) -> list:
 
 
 async def test_diff_returns_text_patch_and_summary(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     patch_body = (
         "diff --git a/x.txt b/x.txt\n"
@@ -130,9 +138,9 @@ async def test_diff_returns_text_patch_and_summary(
 
 
 async def test_diff_returns_none_when_clean(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])  # rev-parse
     backend.script_exec(_stdout(""))  # git diff (empty)
@@ -149,9 +157,9 @@ async def test_diff_returns_none_when_clean(
 
 
 async def test_diff_binary_reports_kind_binary(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])  # rev-parse
     backend.script_exec(_stdout(""))  # diff (no body for binary)
@@ -167,9 +175,9 @@ async def test_diff_binary_reports_kind_binary(
 
 
 async def test_diff_staged_passes_flag(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout(""))
@@ -185,9 +193,9 @@ async def test_diff_staged_passes_flag(
 
 
 async def test_diff_with_path_restricts_argv(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout(""))
@@ -202,9 +210,9 @@ async def test_diff_with_path_restricts_argv(
 
 
 async def test_diff_rejects_traversal_path(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     install_sandbox()
     resp = await client.get(
         "/api/workspace/git/diff?root=ws-1&path=../etc/passwd", headers=AUTH
@@ -213,9 +221,9 @@ async def test_diff_rejects_traversal_path(
 
 
 async def test_diff_truncates_large_patch(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     big = "+" + "x" * (300 * 1024)
     backend.script_exec([ExecExit(exit_code=0)])
@@ -234,9 +242,9 @@ async def test_diff_truncates_large_patch(
 
 
 async def test_branches_lists_local_and_remote(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])  # is-inside-work-tree
     backend.script_exec(_stdout("main\n"))  # rev-parse --abbrev-ref HEAD
@@ -261,9 +269,9 @@ async def test_branches_lists_local_and_remote(
 
 
 async def test_branches_detached_head_reports_null_current(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout("HEAD\n"))  # detached
@@ -279,9 +287,9 @@ async def test_branches_detached_head_reports_null_current(
 
 
 async def test_log_parses_unit_separator_format(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])  # rev-parse
     sha = "abcdef1234567890" * 2 + "abcdef12"  # 40 chars
@@ -301,9 +309,9 @@ async def test_log_parses_unit_separator_format(
 
 
 async def test_log_limit_clamped(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     install_sandbox()
     resp = await client.get(
         "/api/workspace/git/log?root=ws-1&limit=0", headers=AUTH
@@ -319,9 +327,9 @@ async def test_log_limit_clamped(
 
 
 async def test_checkout_succeeds_on_clean_tree(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])  # rev-parse
     backend.script_exec(_stdout(""))  # status: clean
@@ -339,9 +347,9 @@ async def test_checkout_succeeds_on_clean_tree(
 
 
 async def test_checkout_create_passes_dash_b(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout(""))  # clean
@@ -358,9 +366,9 @@ async def test_checkout_create_passes_dash_b(
 
 
 async def test_checkout_dirty_returns_409(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout(" M file.txt\n"))  # dirty
@@ -374,9 +382,9 @@ async def test_checkout_dirty_returns_409(
 
 
 async def test_checkout_force_without_flag_returns_403(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout(""))  # clean
@@ -390,9 +398,9 @@ async def test_checkout_force_without_flag_returns_403(
 
 
 async def test_checkout_force_with_flag_passes_dash_f(
-    client: httpx.AsyncClient, configure_roots, install_sandbox, destructive_on
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox, destructive_on
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout(""))  # clean
@@ -412,9 +420,9 @@ async def test_checkout_force_with_flag_passes_dash_f(
 
 
 async def test_stage_empty_paths_uses_dash_A(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout(""))
@@ -430,9 +438,9 @@ async def test_stage_empty_paths_uses_dash_A(
 
 
 async def test_stage_explicit_paths(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout(""))
@@ -448,9 +456,9 @@ async def test_stage_explicit_paths(
 
 
 async def test_stage_rejects_traversal_path(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     install_sandbox()
     resp = await client.post(
         "/api/workspace/git/stage",
@@ -461,9 +469,9 @@ async def test_stage_rejects_traversal_path(
 
 
 async def test_unstage_empty_paths_uses_dot(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout(""))
@@ -479,9 +487,9 @@ async def test_unstage_empty_paths_uses_dot(
 
 
 async def test_discard_without_flag_returns_403(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     install_sandbox()
     resp = await client.post(
         "/api/workspace/git/discard",
@@ -492,9 +500,9 @@ async def test_discard_without_flag_returns_403(
 
 
 async def test_discard_with_flag_runs_checkout(
-    client: httpx.AsyncClient, configure_roots, install_sandbox, destructive_on
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox, destructive_on
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])  # rev-parse
     backend.script_exec(_stdout(""))  # checkout --
@@ -513,9 +521,9 @@ async def test_discard_with_flag_runs_checkout(
 
 
 async def test_commit_writes_message_with_identity_flags(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])  # rev-parse
     backend.script_exec(_stdout(""))  # commit
@@ -538,9 +546,9 @@ async def test_commit_writes_message_with_identity_flags(
 
 
 async def test_commit_all_inserts_dash_a(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout(""))
@@ -563,9 +571,9 @@ async def test_commit_all_inserts_dash_a(
 
 
 async def test_commit_propagates_git_error(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_fail("nothing to commit, working tree clean"))
@@ -583,9 +591,9 @@ async def test_commit_propagates_git_error(
 
 
 async def test_fetch_success_returns_ok(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout(""))
@@ -600,9 +608,9 @@ async def test_fetch_success_returns_ok(
 
 
 async def test_fetch_failure_returns_ok_false_with_stderr(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_fail("fatal: Could not read from remote repository."))
@@ -621,9 +629,9 @@ async def test_fetch_failure_returns_ok_false_with_stderr(
 
 
 async def test_pull_clean_returns_ok(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout("Already up to date.\n"))
@@ -640,9 +648,9 @@ async def test_pull_clean_returns_ok(
 
 
 async def test_pull_conflict_returns_file_list_not_500(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(
@@ -679,9 +687,9 @@ async def test_pull_conflict_returns_file_list_not_500(
 
 
 async def test_push_success(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout(""))
@@ -698,9 +706,9 @@ async def test_push_success(
 
 
 async def test_push_set_upstream_resolves_current_branch(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])  # rev-parse is-inside-work-tree
     backend.script_exec(_stdout("feature/x\n"))  # rev-parse --abbrev-ref HEAD
@@ -717,9 +725,9 @@ async def test_push_set_upstream_resolves_current_branch(
 
 
 async def test_push_set_upstream_from_detached_head_400(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])
     backend.script_exec(_stdout("HEAD\n"))  # detached
@@ -736,9 +744,9 @@ async def test_push_set_upstream_from_detached_head_400(
 
 
 async def test_diff_requires_known_root(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     install_sandbox()
     resp = await client.get(
         "/api/workspace/git/diff?root=ws-unknown", headers=AUTH
@@ -747,9 +755,9 @@ async def test_diff_requires_known_root(
 
 
 async def test_diff_503_when_sandbox_not_configured(
-    client: httpx.AsyncClient, configure_roots
+    client: httpx.AsyncClient, configure_workspaces
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     # No install_sandbox → app.state.sandbox_manager stays None.
     resp = await client.get(
         "/api/workspace/git/diff?root=ws-1", headers=AUTH
@@ -765,12 +773,12 @@ async def test_diff_503_when_sandbox_not_configured(
     ["--orphan", "-B", "--detach", "--track=foo"],
 )
 async def test_checkout_rejects_flag_like_branch_name(
-    client: httpx.AsyncClient, configure_roots, install_sandbox, branch: str
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox, branch: str
 ) -> None:
     """`git checkout --orphan x` is destructive and bypasses the dirty-tree
     gate; reject any branch name starting with `-` before it ever reaches
     the argv."""
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     install_sandbox()
     resp = await client.post(
         "/api/workspace/git/checkout",
@@ -784,13 +792,13 @@ async def test_checkout_rejects_flag_like_branch_name(
     "bad_path", ["-n", "--hard", "-rf"],
 )
 async def test_stage_rejects_flag_like_path(
-    client: httpx.AsyncClient, configure_roots, install_sandbox, bad_path: str
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox, bad_path: str
 ) -> None:
     """Every git endpoint that takes paths today routes them through `--`
     in the argv, so a `-`-prefixed path can't hit `git add`. We harden at
     the normaliser anyway so a future caller that forgets the `--` doesn't
     get flag-injection for free."""
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     install_sandbox()
     resp = await client.post(
         "/api/workspace/git/stage",
@@ -801,9 +809,9 @@ async def test_stage_rejects_flag_like_path(
 
 
 async def test_diff_rejects_flag_like_path(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     install_sandbox()
     resp = await client.get(
         "/api/workspace/git/diff?root=ws-1&path=-n", headers=AUTH
@@ -812,13 +820,13 @@ async def test_diff_rejects_flag_like_path(
 
 
 async def test_pull_conflict_uses_diff_name_only_not_line_parser(
-    client: httpx.AsyncClient, configure_roots, install_sandbox
+    client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:
     """`git diff --name-only --diff-filter=U` is authoritative, so an
     "added in both" conflict (which a naive `CONFLICT … in <path>` grep
     would point at the branch name instead of the file) still ends up
     listing the correct path."""
-    configure_roots("ws-1")
+    await configure_workspaces(["ws-1"])
     _, backend = install_sandbox()
     backend.script_exec([ExecExit(exit_code=0)])  # rev-parse
     backend.script_exec(

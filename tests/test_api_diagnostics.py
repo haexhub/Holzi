@@ -168,19 +168,53 @@ async def test_diagnostics_without_messenger_account_is_ok_not_warning(
 # ---------------------------------------------------------------------------
 
 
-async def test_diagnostics_with_workspace_roots_configured(
-    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+async def test_diagnostics_with_workspaces_configured(
+    client: httpx.AsyncClient,
 ) -> None:
-    from hermes import config as hermes_config
+    """Plan 25-A: the `workspaces` table is the source of truth. A row
+    created via the CRUD endpoint (or seeded directly in a test) must
+    flip the workspace check from warning to ok, with the
+    user-controlled `display_name` showing through in the preview."""
+    from hermes.repository import workspaces as workspaces_repo
 
-    monkeypatch.setattr(
-        hermes_config.settings, "workspace_roots", "holzi,hermes"
+    await workspaces_repo.create(
+        app.state.db, workspace_id="holzi", display_name="Holzi"
+    )
+    await workspaces_repo.create(
+        app.state.db, workspace_id="hermes", display_name="Hermes"
     )
     response = await client.get("/api/diagnostics", headers=AUTH)
     workspace = _check(response.json(), "workspace")
     assert workspace["status"] == "ok"
-    # The root ids themselves are configured user-facing names, fine to surface.
-    assert "holzi" in workspace["message"] or "2" in workspace["message"]
+    # `display_name` is what the user sees on /settings/workspaces.
+    assert "Holzi" in workspace["message"]
+    assert "2 workspace" in workspace["message"]
+
+
+async def test_diagnostics_truncates_long_workspace_list(
+    client: httpx.AsyncClient,
+) -> None:
+    """20 workspace rows collapse to a count + first three names + an
+    ellipsis — same shape the env version used, sourced from
+    `list_active` now."""
+    from hermes.repository import workspaces as workspaces_repo
+
+    for i in range(20):
+        await workspaces_repo.create(
+            app.state.db,
+            workspace_id=f"workspace-{i:02d}",
+            display_name=f"Workspace {i:02d}",
+        )
+    response = await client.get("/api/diagnostics", headers=AUTH)
+    msg = _check(response.json(), "workspace")["message"]
+    assert "20 workspace(s)" in msg
+    # list_active orders by display_name asc — first three names appear.
+    assert "Workspace 00" in msg
+    assert "Workspace 02" in msg
+    # The 20th row is dropped (only first three rendered) + the ellipsis
+    # signals there is more.
+    assert "Workspace 19" not in msg
+    assert "…" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -253,21 +287,3 @@ async def test_diagnostics_truncates_long_display_name(
     assert "\n" not in msg
 
 
-async def test_diagnostics_truncates_long_workspace_root_list(
-    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The workspace message is meant to be short — many configured
-    roots should collapse to a count + first-few preview."""
-    from hermes import config as hermes_config
-
-    roots = [f"workspace-{i}" for i in range(20)]
-    monkeypatch.setattr(
-        hermes_config.settings, "workspace_roots", ",".join(roots)
-    )
-    response = await client.get("/api/diagnostics", headers=AUTH)
-    msg = _check(response.json(), "workspace")["message"]
-    assert "20 root(s)" in msg
-    # First three should appear, the trailing ones should not.
-    assert "workspace-0" in msg
-    assert "workspace-19" not in msg
-    assert "…" in msg

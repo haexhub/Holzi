@@ -1,6 +1,11 @@
-"""Read-only workspace browser (Plan 12).
+"""Read-only workspace browser (Plan 12) + write / git endpoints (Plans 13/24).
 
-Roots = SandboxManager workspace ids declared in `HERMES_WORKSPACE_ROOTS`.
+Roots = active rows in the `workspaces` table (Plan 25-A made it the
+source of truth). `HERMES_WORKSPACE_ROOTS` survives only as the
+boot-time backfill in `main.py` lifespan — every request-time
+membership check goes through `_active_root_slugs(db)`, so workspaces
+created via `POST /api/workspaces` are usable without a restart.
+
 Tree and file reads are served by spinning up (or reusing) the matching
 workspace sandbox and reading from its `/workspace` volume — the agent
 container never touches the host filesystem here.
@@ -20,8 +25,10 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.config import settings
+from hermes.repository import workspaces as workspaces_repo
 from hermes.sandbox import (
     DirEntry,
     ExecExit,
@@ -268,8 +275,15 @@ class GitPullResponse(GitOpResponse):
 # --- helpers ---------------------------------------------------------------
 
 
-def _configured_roots() -> list[str]:
-    return [r.strip() for r in settings.workspace_roots.split(",") if r.strip()]
+async def _active_root_slugs(db: AsyncEngine) -> list[str]:
+    """Plan 25-A: the `workspaces` table is the source of truth. The env
+    `HERMES_WORKSPACE_ROOTS` stays as the boot-time backfill mechanism
+    (see `main.py` lifespan), but every request-time root check reads the
+    live DB so a workspace created via `POST /api/workspaces` is visible
+    to the browser + git endpoints without a container restart.
+    """
+    rows = await workspaces_repo.list_active(db)
+    return [r.id for r in rows]
 
 
 def _require_sandbox_manager(request: Request) -> Any:
@@ -282,8 +296,9 @@ def _require_sandbox_manager(request: Request) -> Any:
     return mgr
 
 
-def _require_known_root(root: str) -> None:
-    if root not in _configured_roots():
+async def _require_known_root(request: Request, root: str) -> None:
+    db: AsyncEngine = request.app.state.db
+    if root not in await _active_root_slugs(db):
         raise HTTPException(status_code=404, detail="unknown workspace root")
 
 
@@ -501,20 +516,22 @@ def _looks_like_text(data: bytes) -> bool:
 
 
 @router.get("/roots", response_model=WorkspaceRootsResponse)
-async def api_workspace_roots() -> dict[str, Any]:
-    """List the configured workspace roots.
+async def api_workspace_roots(request: Request) -> dict[str, Any]:
+    """List the active workspace roots.
 
     Returns 200 with an empty list when nothing is configured — the frontend
     distinguishes "not configured" from "sandbox unavailable" by the absence
-    of a 503 here."""
-    return {"roots": [{"id": rid} for rid in _configured_roots()]}
+    of a 503 here. The slug list is sourced from `workspaces.list_active`
+    (Plan 25-A); the legacy `HERMES_WORKSPACE_ROOTS` env is bootstrap-only."""
+    db: AsyncEngine = request.app.state.db
+    return {"roots": [{"id": rid} for rid in await _active_root_slugs(db)]}
 
 
 @router.get("/tree", response_model=WorkspaceTreeResponse)
 async def api_workspace_tree(
     request: Request, root: str, path: str = ""
 ) -> dict[str, Any]:
-    _require_known_root(root)
+    await _require_known_root(request, root)
     mgr = _require_sandbox_manager(request)
     rel = _normalise_relative(path)
     abs_path = _absolute_in_sandbox(rel)
@@ -555,7 +572,7 @@ async def api_workspace_tree(
 async def api_workspace_file(
     request: Request, root: str, path: str
 ) -> dict[str, Any]:
-    _require_known_root(root)
+    await _require_known_root(request, root)
     mgr = _require_sandbox_manager(request)
     rel = _normalise_relative(path)
     if rel == "":
@@ -779,7 +796,7 @@ async def _ensure_parent_dir(
 async def api_workspace_file_create(
     request: Request, body: WorkspaceCreateRequest
 ) -> dict[str, Any]:
-    _require_known_root(body.root)
+    await _require_known_root(request, body.root)
     mgr = _require_sandbox_manager(request)
     rel = _normalise_relative(body.path)
     if rel == "":
@@ -827,7 +844,7 @@ async def api_workspace_file_create(
 async def api_workspace_file_update(
     request: Request, body: WorkspaceUpdateRequest
 ) -> dict[str, Any]:
-    _require_known_root(body.root)
+    await _require_known_root(request, body.root)
     mgr = _require_sandbox_manager(request)
     rel = _normalise_relative(body.path)
     if rel == "":
@@ -886,7 +903,7 @@ async def api_workspace_file_update(
 async def api_workspace_file_rename(
     request: Request, body: WorkspaceRenameRequest
 ) -> dict[str, Any]:
-    _require_known_root(body.root)
+    await _require_known_root(request, body.root)
     mgr = _require_sandbox_manager(request)
     src_rel = _normalise_relative(body.src)
     dest_rel = _normalise_relative(body.dest)
@@ -956,7 +973,7 @@ async def api_workspace_file_rename(
 async def api_workspace_file_delete(
     request: Request, body: WorkspaceDeleteRequest
 ) -> dict[str, Any]:
-    _require_known_root(body.root)
+    await _require_known_root(request, body.root)
     mgr = _require_sandbox_manager(request)
     rel = _normalise_relative(body.path)
     if rel == "":
@@ -1009,7 +1026,7 @@ async def api_workspace_file_delete(
 
 @router.get("/git", response_model=WorkspaceGitResponse)
 async def api_workspace_git(request: Request, root: str) -> dict[str, Any]:
-    _require_known_root(root)
+    await _require_known_root(request, root)
     mgr = _require_sandbox_manager(request)
     handle = await mgr.get_workspace(root)
 
@@ -1090,7 +1107,7 @@ async def _resolve_git_workspace(
     """Shared preamble: validate the root, grab the sandbox manager, spin up
     (or reuse) the workspace handle. Raises 404/503 the same way every git
     endpoint should."""
-    _require_known_root(root)
+    await _require_known_root(request, root)
     mgr = _require_sandbox_manager(request)
     try:
         handle = await mgr.get_workspace(root)
