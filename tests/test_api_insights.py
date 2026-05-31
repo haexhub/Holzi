@@ -8,7 +8,7 @@ itself. Pure read path — the table itself is unchanged.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -68,7 +68,7 @@ async def _seed_run(
 
 
 def _utc_date(ts: int) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d")
 
 
 # ---------------------------------------------------------------------------

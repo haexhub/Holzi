@@ -11,7 +11,7 @@ zero-filled so the chart never lies about a quiet day.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -77,7 +77,7 @@ class InsightsResponse(BaseModel):
 
 
 def _utc_today() -> datetime:
-    return datetime.now(tz=timezone.utc).replace(
+    return datetime.now(tz=UTC).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
 
@@ -140,6 +140,15 @@ async def api_insights(
         period=period,
         totals=TotalsResponse(**totals),
         series=_zero_fill_series(period, raw_series),
-        by_model=[ModelBreakdown(**row) for row in by_model],
+        by_model=[
+            ModelBreakdown(
+                model=str(row["model"]),
+                runs=int(row["runs"]),
+                input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+                errors=int(row["errors"]),
+            )
+            for row in by_model
+        ],
         by_status=StatusCounts(**by_status),
     )

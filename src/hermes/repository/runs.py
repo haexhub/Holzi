@@ -168,7 +168,8 @@ async def aggregate_totals(
     ).where(t_agent_runs.c.started_at >= since_ts)
     async with engine.connect() as conn:
         result = await conn.execute(stmt)
-        row = result.first()
+        # Aggregate over COUNT/SUM/coalesce always produces exactly one row.
+        row = result.one()
     return {
         "runs": int(row.runs or 0),
         "errors": int(row.errors or 0),
@@ -258,10 +259,12 @@ async def aggregate_by_status(
 ) -> dict[str, int]:
     """Counts per status value. Zero-fills every VALID_STATUSES key so the
     frontend doesn't have to handle missing keys."""
+    # Label as "n" rather than "count" — Row exposes labels as attributes and
+    # `Row.count` is already a built-in method, so the access shadows the data.
     stmt = (
         select(
             t_agent_runs.c.status.label("status"),
-            func.count(t_agent_runs.c.id).label("count"),
+            func.count(t_agent_runs.c.id).label("n"),
         )
         .where(t_agent_runs.c.started_at >= since_ts)
         .group_by(t_agent_runs.c.status)
@@ -272,5 +275,5 @@ async def aggregate_by_status(
     counts = {s: 0 for s in VALID_STATUSES}
     for r in rows:
         if r.status in counts:
-            counts[r.status] = int(r.count or 0)
+            counts[r.status] = int(r.n or 0)
     return counts
