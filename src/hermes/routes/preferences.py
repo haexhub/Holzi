@@ -33,6 +33,43 @@ from hermes.repository.models import ChannelPromptRow, Persona
 router = APIRouter(prefix="/api")
 
 
+# ---------------------------------------------------------------------------
+# Response models — kept Pydantic so OpenAPI emits proper TS types for
+# `pnpm run gen:api`. The repo layer returns dataclasses; conversion is
+# trivial and lives in `_persona_to_dict` / `_channel_to_dict` below.
+# ---------------------------------------------------------------------------
+
+
+class PersonaResponse(BaseModel):
+    id: int
+    name: str
+    prompt: str
+    is_default: bool
+    created_at: int
+    updated_at: int
+
+
+class PersonaListResponse(BaseModel):
+    personas: list[PersonaResponse]
+
+
+class ChannelPromptResponse(BaseModel):
+    channel: str
+    label: str
+    default_prompt: str
+    prompt: str
+    # True iff `prompt == default_prompt` — the UI uses this to decide
+    # whether to render the "Reset prompt" button without doing the
+    # comparison client-side.
+    is_default_prompt: bool
+    default_persona_id: int | None
+    updated_at: int
+
+
+class ChannelPromptListResponse(BaseModel):
+    channels: list[ChannelPromptResponse]
+
+
 def _db(request: Request) -> AsyncEngine:
     return request.app.state.db
 
@@ -82,13 +119,17 @@ class PersonaUpdate(BaseModel):
     is_default: bool | None = None
 
 
-@router.get("/personas")
+@router.get("/personas", response_model=PersonaListResponse)
 async def list_personas(request: Request) -> dict[str, Any]:
     rows = await personas_repo.list_all(_db(request))
     return {"personas": [_persona_to_dict(p) for p in rows]}
 
 
-@router.post("/personas", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/personas",
+    status_code=status.HTTP_201_CREATED,
+    response_model=PersonaResponse,
+)
 async def create_persona(
     body: PersonaCreate, request: Request
 ) -> dict[str, Any]:
@@ -107,7 +148,7 @@ async def create_persona(
     return _persona_to_dict(persona)
 
 
-@router.put("/personas/{persona_id}")
+@router.put("/personas/{persona_id}", response_model=PersonaResponse)
 async def update_persona(
     persona_id: int, body: PersonaUpdate, request: Request
 ) -> dict[str, Any]:
@@ -196,13 +237,13 @@ class ChannelUpdate(BaseModel):
     default_persona_id: int | None = None
 
 
-@router.get("/channels")
+@router.get("/channels", response_model=ChannelPromptListResponse)
 async def list_channels(request: Request) -> dict[str, Any]:
     rows = await channels_repo.list_all(_db(request))
     return {"channels": [_channel_to_dict(r) for r in rows]}
 
 
-@router.put("/channels/{channel}")
+@router.put("/channels/{channel}", response_model=ChannelPromptResponse)
 async def update_channel(
     channel: str, body: ChannelUpdate, request: Request
 ) -> dict[str, Any]:
@@ -242,7 +283,9 @@ async def update_channel(
     return _channel_to_dict(updated)
 
 
-@router.post("/channels/{channel}/reset")
+@router.post(
+    "/channels/{channel}/reset", response_model=ChannelPromptResponse
+)
 async def reset_channel_prompt(
     channel: str, request: Request
 ) -> dict[str, Any]:
