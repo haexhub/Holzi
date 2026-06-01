@@ -14,9 +14,11 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 
+from hermes import config as hermes_config
 from hermes.main import app
 from hermes.repository import llm_credentials as llm_repo
 from hermes.repository import messenger as messenger_repo
+from hermes.repository import workspaces as workspaces_repo
 
 VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -225,8 +227,6 @@ async def test_diagnostics_with_env_set_but_empty_table_still_warns(
     `workspaces` table only. (The lifespan backfill normally inserts env
     slugs at boot, but a test that bypasses that flow proves the
     request-time path is DB-only.)"""
-    from hermes import config as hermes_config
-
     monkeypatch.setattr(
         hermes_config.settings, "workspace_roots", "from-env-only"
     )
@@ -243,8 +243,6 @@ async def test_diagnostics_excludes_archived_workspaces(
 ) -> None:
     """`list_active` excludes archived rows. A workspace that's been
     archived via the UI must not keep the check green on its own."""
-    from hermes.repository import workspaces as workspaces_repo
-
     await workspaces_repo.create(
         app.state.db, workspace_id="ghost", display_name="Ghost"
     )
@@ -260,8 +258,6 @@ async def test_diagnostics_truncates_long_workspace_display_name(
     """`display_name` is user-controlled — an oversized or multiline value
     must not dominate the response (same defence-in-depth as the LLM
     check's name truncation)."""
-    from hermes.repository import workspaces as workspaces_repo
-
     long_name = "x" * 500 + "\nsecond line"
     await workspaces_repo.create(
         app.state.db, workspace_id="big", display_name=long_name
