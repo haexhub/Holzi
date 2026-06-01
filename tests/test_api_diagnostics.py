@@ -14,9 +14,11 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 
+from hermes import config as hermes_config
 from hermes.main import app
 from hermes.repository import llm_credentials as llm_repo
 from hermes.repository import messenger as messenger_repo
+from hermes.repository import workspaces as workspaces_repo
 
 VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -215,6 +217,55 @@ async def test_diagnostics_truncates_long_workspace_list(
     # signals there is more.
     assert "Workspace 19" not in msg
     assert "…" in msg
+
+
+async def test_diagnostics_with_env_set_but_empty_table_still_warns(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for Plan 25-A: even when `HERMES_WORKSPACE_ROOTS`
+    is set at request time, the check must ignore the env and look at the
+    `workspaces` table only. (The lifespan backfill normally inserts env
+    slugs at boot, but a test that bypasses that flow proves the
+    request-time path is DB-only.)"""
+    monkeypatch.setattr(
+        hermes_config.settings, "workspace_roots", "from-env-only"
+    )
+    response = await client.get("/api/diagnostics", headers=AUTH)
+    workspace = _check(response.json(), "workspace")
+    assert workspace["status"] == "warning"
+    # Copy points at the UI surface, never the env name.
+    assert "/settings/workspaces" in workspace["message"]
+    assert "HERMES_WORKSPACE_ROOTS" not in workspace["message"]
+
+
+async def test_diagnostics_excludes_archived_workspaces(
+    client: httpx.AsyncClient,
+) -> None:
+    """`list_active` excludes archived rows. A workspace that's been
+    archived via the UI must not keep the check green on its own."""
+    await workspaces_repo.create(
+        app.state.db, workspace_id="ghost", display_name="Ghost"
+    )
+    await workspaces_repo.archive(app.state.db, "ghost")
+    response = await client.get("/api/diagnostics", headers=AUTH)
+    workspace = _check(response.json(), "workspace")
+    assert workspace["status"] == "warning"
+
+
+async def test_diagnostics_truncates_long_workspace_display_name(
+    client: httpx.AsyncClient,
+) -> None:
+    """`display_name` is user-controlled — an oversized or multiline value
+    must not dominate the response (same defence-in-depth as the LLM
+    check's name truncation)."""
+    long_name = "x" * 500 + "\nsecond line"
+    await workspaces_repo.create(
+        app.state.db, workspace_id="big", display_name=long_name
+    )
+    response = await client.get("/api/diagnostics", headers=AUTH)
+    msg = _check(response.json(), "workspace")["message"]
+    assert len(msg) < 200
+    assert "\n" not in msg
 
 
 # ---------------------------------------------------------------------------
