@@ -176,6 +176,57 @@ async def test_api_chat_creates_new_conversation_when_none_provided(
     ]
 
 
+async def test_api_chat_passes_composed_persona_channel_system_prompt(
+    client: httpx.AsyncClient,
+) -> None:
+    """Plan 29-A end-to-end: /api/chat builds its system prompt via
+    `get_effective_system_prompt("web", db)`. Two states verified:
+    (a) fresh backfill → default Hermes + default web prompt,
+    (b) customised via the public preferences endpoints → composition
+    reflects the new persona + channel prompt."""
+    from hermes.personas import CHANNEL_REGISTRY, DEFAULT_PERSONA_PROMPT
+
+    # (a) Default composition.
+    seen = _install_upstream_responses([_assistant_oneshot("a")])
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "first"}
+    ) as response:
+        async for _ in response.aiter_bytes():
+            pass
+    sys_a = seen[0]["messages"][0]
+    assert sys_a["role"] == "system"
+    assert sys_a["content"] == (
+        f"{DEFAULT_PERSONA_PROMPT}\n\n"
+        f"{CHANNEL_REGISTRY['web']['default_prompt']}"
+    )
+
+    # (b) Customised: new persona + custom channel prompt.
+    new_persona = await client.post(
+        "/api/personas",
+        headers=AUTH,
+        json={"name": "Reviewer", "prompt": "Be merciless about types."},
+    )
+    pid = new_persona.json()["id"]
+    await client.put(
+        "/api/channels/web",
+        headers=AUTH,
+        json={
+            "prompt": "Custom web prompt.",
+            "default_persona_id": pid,
+        },
+    )
+
+    seen = _install_upstream_responses([_assistant_oneshot("b")])
+    async with client.stream(
+        "POST", "/api/chat", headers=AUTH, json={"message": "second"}
+    ) as response:
+        async for _ in response.aiter_bytes():
+            pass
+    sys_b = seen[0]["messages"][0]
+    assert sys_b["role"] == "system"
+    assert sys_b["content"] == "Be merciless about types.\n\nCustom web prompt."
+
+
 async def test_api_chat_continues_existing_conversation(
     client: httpx.AsyncClient,
 ) -> None:

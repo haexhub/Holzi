@@ -84,6 +84,59 @@ async def test_fire_due_runs_one_shot_and_disables(conn: AsyncEngine) -> None:
     assert run.status == "success"
 
 
+async def test_fire_due_passes_composed_persona_channel_system_prompt(
+    conn: AsyncEngine,
+) -> None:
+    """Plan 29-A: the scheduler resolves `get_effective_system_prompt(
+    "task", db)` and feeds the composition to `run_agent`. Two states:
+    (a) backfill only → default Hermes + default task prompt;
+    (b) custom channel prompt → composition uses the override."""
+    from hermes.personas import (
+        CHANNEL_REGISTRY,
+        DEFAULT_PERSONA_PROMPT,
+        ensure_backfill,
+    )
+    from hermes.repository import channels as channels_repo
+
+    await ensure_backfill(conn)
+
+    captured: list[str] = []
+
+    async def capturing_runner(
+        *,
+        upstream: httpx.AsyncClient,  # noqa: ARG001
+        db: AsyncEngine,  # noqa: ARG001
+        conversation_id: int,  # noqa: ARG001
+        system_prompt: str,
+        model: str,  # noqa: ARG001
+        tools: Any | None = None,  # noqa: ARG001
+        metrics: dict[str, Any] | None = None,  # noqa: ARG001
+    ) -> str:
+        captured.append(system_prompt)
+        return "ok"
+
+    # (a) default backfill composition.
+    await agent_tasks.create(
+        conn, title="t1", prompt="run me", due_at=1_000, ts=500
+    )
+    sched = _scheduler(conn, runner=capturing_runner)
+    await sched.fire_due(now=2_000)
+    assert captured[-1] == (
+        f"{DEFAULT_PERSONA_PROMPT}\n\n"
+        f"{CHANNEL_REGISTRY['task']['default_prompt']}"
+    )
+
+    # (b) custom channel prompt → flows through.
+    await channels_repo.update(conn, "task", prompt="Custom task prompt.")
+    await agent_tasks.create(
+        conn, title="t2", prompt="run me too", due_at=1_000, ts=500
+    )
+    await sched.fire_due(now=3_000)
+    assert captured[-1] == (
+        f"{DEFAULT_PERSONA_PROMPT}\n\nCustom task prompt."
+    )
+
+
 async def test_fire_due_skips_disabled(conn: AsyncEngine) -> None:
     task = await agent_tasks.create(
         conn, title="paused", prompt="x", due_at=1_000, enabled=False, ts=500

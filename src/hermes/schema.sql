@@ -76,3 +76,24 @@ CREATE VIEW IF NOT EXISTS proxy_credentials_v1 AS
 -- ---------------------------------------------------------------------------
 CREATE UNIQUE INDEX IF NOT EXISTS messenger_accounts_active_per_provider
   ON messenger_accounts(provider) WHERE is_active = 1;
+
+-- ---------------------------------------------------------------------------
+-- personas (Plan 29-A): single-default invariant. Inserting or updating a
+-- row with is_default=1 demotes every other row. Triggers stay simple —
+-- the API layer is responsible for blocking the "demote the only default"
+-- case (returns 422). FOR EACH ROW + WHEN guard keeps these no-ops for
+-- inserts of is_default=0 rows.
+-- ---------------------------------------------------------------------------
+CREATE TRIGGER IF NOT EXISTS personas_single_default_insert
+AFTER INSERT ON personas
+FOR EACH ROW WHEN NEW.is_default = 1
+BEGIN
+  UPDATE personas SET is_default = 0 WHERE id != NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS personas_single_default_update
+AFTER UPDATE OF is_default ON personas
+FOR EACH ROW WHEN NEW.is_default = 1
+BEGIN
+  UPDATE personas SET is_default = 0 WHERE id != NEW.id;
+END;
