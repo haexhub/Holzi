@@ -10,10 +10,9 @@ The slug is the only user-controlled value that ends up in a path
 layer and 400s a bad slug here.
 
 Adjacent endpoints (existing, deliberately *not* moved here):
-- `GET /api/workspace/{roots,tree,file,git}` — Plan 12/13 browser surface
-  in `routes/workspace.py` (singular). Still reads `HERMES_WORKSPACE_ROOTS`
-  today; a follow-up plan can rebase it onto this table once the UI work
-  here lands.
+- `GET /api/workspace/{roots,tree,file,git}` — Plan 12/13/24 browser,
+  write and git surface in `routes/workspace.py` (singular). Also reads
+  from this table at request time (Plan 25-A); the env is bootstrap-only.
 - `GET /api/workspaces/{id}/sandbox` + `POST .../sandbox/restart` —
   Plan 11b-b sandbox lifecycle in `routes/api.py`. The aggregate `GET
   /api/workspaces` here reuses the same `peek_workspace`/`status` calls.

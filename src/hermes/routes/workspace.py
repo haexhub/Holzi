@@ -1,9 +1,11 @@
-"""Read-only workspace browser (Plan 12).
+"""Workspace browser + writer + git surface (Plans 12 / 13 / 24).
 
-Roots = SandboxManager workspace ids declared in `HERMES_WORKSPACE_ROOTS`.
-Tree and file reads are served by spinning up (or reusing) the matching
-workspace sandbox and reading from its `/workspace` volume — the agent
-container never touches the host filesystem here.
+Roots = the slugs of every non-archived row in the `workspaces` table
+(Plan 25-A). The `HERMES_WORKSPACE_ROOTS` env still seeds the table at
+boot via the lifespan backfill in `main.py`, but is never read at request
+time. Tree, file, write and git endpoints all spin up (or reuse) the
+matching workspace sandbox and operate on its `/workspace` volume — the
+agent container never touches the host filesystem here.
 
 Path discipline: everything coming over the wire is a POSIX-style path
 *relative* to a workspace root, with no leading `/` and no traversal
