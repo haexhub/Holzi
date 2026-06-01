@@ -21,6 +21,8 @@ from hermes.db import init_db
 from hermes.logging import configure_logging, logger
 from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
+from hermes.personas import ensure_backfill as ensure_personas_backfill
+from hermes.personas import get_effective_system_prompt
 from hermes.repository import llm_credentials as llm_credentials_repo
 from hermes.repository import sandbox_crashes as sandbox_crashes_repo
 from hermes.repository import workspaces as workspaces_repo
@@ -31,6 +33,7 @@ from hermes.routes.insights import router as insights_router
 from hermes.routes.llm import router as llm_router
 from hermes.routes.logs import router as logs_router
 from hermes.routes.messenger import router as messenger_router
+from hermes.routes.preferences import router as preferences_router
 from hermes.routes.sandbox import router as sandbox_router
 from hermes.routes.workspace import router as workspace_router
 from hermes.routes.workspaces import router as workspaces_router
@@ -44,18 +47,6 @@ from hermes.tool_catalog import build_tool_catalog
 from hermes.upstream import build_fallback_client, rebuild_upstream_from_db
 
 configure_logging()
-
-SIGNAL_SYSTEM_PROMPT = (
-    "You are Hermes, a personal AI assistant for Martin, reached via Signal "
-    "Note-to-Self. Be concise — usually one to three short sentences. Match "
-    "Martin's preference for terse, technical communication."
-)
-
-TELEGRAM_SYSTEM_PROMPT = (
-    "You are Hermes, a personal AI assistant for Martin, reached via a "
-    "Telegram bot. Be concise — usually one to three short sentences. Match "
-    "Martin's preference for terse, technical communication."
-)
 
 
 def build_upstream_client(llm_url: str, llm_api_key: str) -> httpx.AsyncClient:
@@ -137,6 +128,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         app.state.db = await init_db(settings.db_path)
 
+        # Plan 29-A: seed the default persona + per-channel prompt rows
+        # before anything that resolves system prompts can run (workers,
+        # scheduler, /api/chat). Idempotent — re-runs on existing DBs
+        # only insert what's missing.
+        await ensure_personas_backfill(app.state.db)
+
         # Plan 25: backfill workspaces from HERMES_WORKSPACE_ROOTS. The env
         # is the bootstrap mechanism; the DB is the source of truth from
         # this point on. Idempotent — already-seeded slugs are skipped, so
@@ -206,7 +203,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     upstream=app.state.upstream,
                     db=db,
                     conversation_id=conversation_id,
-                    system_prompt=SIGNAL_SYSTEM_PROMPT,
+                    system_prompt=await get_effective_system_prompt(
+                        "signal", db
+                    ),
                     model=model,
                     metrics=metrics,
                 )
@@ -258,7 +257,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     upstream=app.state.upstream,
                     db=db,
                     conversation_id=conversation_id,
-                    system_prompt=TELEGRAM_SYSTEM_PROMPT,
+                    system_prompt=await get_effective_system_prompt(
+                        "telegram", db
+                    ),
                     model=model,
                     metrics=metrics,
                 )
@@ -397,6 +398,7 @@ app.include_router(sandbox_router)
 app.include_router(diagnostics_router)
 app.include_router(insights_router)
 app.include_router(logs_router)
+app.include_router(preferences_router)
 
 
 @app.get("/healthz")

@@ -357,6 +357,45 @@ tool_approvals = Table(
 )
 
 
+# Plan 29-A: Personas + Channel-Prompts.
+# Personas = identity ("who speaks"); channel_prompts = per-channel format
+# overlay ("how the channel behaves"). The effective system prompt at run
+# time is `persona.prompt + "\n\n" + channel.prompt`; channel rows may pin
+# their own default persona (FK ON DELETE SET NULL) and fall back to the
+# global is_default persona when NULL. The single-default invariant is
+# enforced by triggers in schema.sql (`AFTER INSERT/UPDATE` flip every
+# other row's is_default to 0 when a row becomes the new default).
+personas = Table(
+    "personas",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", Text, nullable=False, unique=True),
+    Column("prompt", Text, nullable=False),
+    # 0 | 1 — single-default trigger keeps at most one row with 1.
+    Column("is_default", Integer, nullable=False, server_default="0"),
+    Column("created_at", Integer, nullable=False),
+    Column("updated_at", Integer, nullable=False),
+)
+
+
+# One row per channel key in `hermes.personas.CHANNEL_REGISTRY`. Seeded
+# idempotently on boot. `default_persona_id` is FK ON DELETE SET NULL so
+# deleting a non-default persona clears any channel that pinned it; the
+# resolver then falls back to the global default persona.
+channel_prompts = Table(
+    "channel_prompts",
+    metadata,
+    Column("channel", Text, primary_key=True),
+    Column("prompt", Text, nullable=False),
+    Column(
+        "default_persona_id",
+        Integer,
+        ForeignKey("personas.id", ondelete="SET NULL"),
+    ),
+    Column("updated_at", Integer, nullable=False),
+)
+
+
 messenger_accounts = Table(
     "messenger_accounts",
     metadata,

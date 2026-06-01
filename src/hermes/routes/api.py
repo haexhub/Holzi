@@ -41,6 +41,7 @@ from hermes.events import (
     to_sse,
 )
 from hermes.logging import logger
+from hermes.personas import get_effective_system_prompt
 from hermes.repository import (
     agent_tasks,
     attachments,
@@ -60,11 +61,6 @@ from hermes.sandbox import WorkspaceCrash
 from hermes.tool_catalog import build_tool_catalog
 
 router = APIRouter(prefix="/api")
-
-WEB_SYSTEM_PROMPT = (
-    "You are Hermes, a personal AI assistant for Martin, talking through the "
-    "web UI. Be concise and direct."
-)
 
 WEB_CHANNEL = "web"
 
@@ -390,7 +386,9 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
                         upstream=upstream,
                         db=db,
                         conversation_id=convo.id,
-                        system_prompt=WEB_SYSTEM_PROMPT,
+                        system_prompt=await get_effective_system_prompt(
+                            WEB_CHANNEL, db
+                        ),
                         model=model,
                         tools=tools,
                         on_chunk=on_chunk,

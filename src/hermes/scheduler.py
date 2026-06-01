@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import run_agent
 from hermes.logging import logger
+from hermes.personas import get_effective_system_prompt
 from hermes.repository import agent_tasks as agent_tasks_repo
 from hermes.repository import conversations as conversations_repo
 from hermes.repository import llm_credentials as llm_credentials_repo
@@ -27,11 +28,6 @@ DEFAULT_CONVERSATION_SWEEP_INTERVAL_SECONDS = 3600
 # (or feature them separately) — the agent itself sees the same web-style
 # system prompt regardless.
 TASK_CHANNEL = "task"
-
-TASK_SYSTEM_PROMPT = (
-    "You are Hermes running a scheduled agent task on behalf of Martin. "
-    "Execute the user prompt below; be concise. Use tools when needed."
-)
 
 
 # A factory the scheduler calls per-run to obtain the upstream httpx client.
@@ -184,7 +180,9 @@ class AgentTaskScheduler:
                     upstream=self._upstream_provider(),
                     db=self.db,
                     conversation_id=convo.id,
-                    system_prompt=TASK_SYSTEM_PROMPT,
+                    system_prompt=await get_effective_system_prompt(
+                        TASK_CHANNEL, self.db
+                    ),
                     model=model,
                     tools=self._tool_factory(),
                     metrics=metrics,

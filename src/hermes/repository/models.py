@@ -145,6 +145,32 @@ class Workspace:
 
 
 @dataclass(frozen=True, slots=True)
+class Persona:
+    """A row from `personas` (Plan 29-A). `is_default` is the global
+    fallback persona; at most one row may have it set (DB trigger)."""
+
+    id: int
+    name: str
+    prompt: str
+    is_default: bool
+    created_at: int
+    updated_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelPromptRow:
+    """A row from `channel_prompts` (Plan 29-A). One row per registered
+    channel key — seeded idempotently on boot from
+    `hermes.personas.CHANNEL_REGISTRY`. `default_persona_id` may be NULL
+    (resolver then falls back to the globally-default persona)."""
+
+    channel: str
+    prompt: str
+    default_persona_id: int | None
+    updated_at: int
+
+
+@dataclass(frozen=True, slots=True)
 class MessengerAccount:
     """A row from `messenger_accounts`. `bot_token_*` ciphertext columns
     are only populated for telegram rows; signal rows leave them NULL and
