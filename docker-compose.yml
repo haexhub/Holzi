@@ -24,9 +24,19 @@ services:
       dockerfile: Dockerfile
     container_name: hermes-server
     restart: unless-stopped
+    # Shared service uid — keeps named volume ownership consistent with the
+    # proxy so resolver writeback (OAuth-refresh) and WAL sidecar updates
+    # don't hit SQLITE_READONLY. See docker-compose.local.yml for the full
+    # rationale.
+    user: "1001:1001"
     env_file:
       - .env
     environment:
+      # uv needs a writable HOME / cache dir; uid 1001 isn't in /etc/passwd
+      # inside the image. /tmp works because the venv is already built into
+      # /app/.venv at image-build time — uv only touches the cache on init.
+      HOME: /tmp
+      UV_CACHE_DIR: /tmp/uv-cache
       HERMES_DB_PATH: /data/hermes.db
       HERMES_LLM_URL: ${HERMES_LLM_URL:-http://haex-claude-proxy:8080}
       HERMES_SIGNAL_URL: ${HERMES_SIGNAL_URL:-http://signal-cli-rest-api:8080}
@@ -62,6 +72,10 @@ services:
     image: haex-claude-proxy:latest
     container_name: haex-claude-proxy
     restart: unless-stopped
+    # Override the image's USER=node (uid 1000) to the shared service uid so
+    # the proxy writes to mounted volumes with the same ownership the rest of
+    # the stack uses.
+    user: "1001:1001"
     environment:
       PROXY_RESOLVER: file
       PROXY_CREDENTIALS_HOME: /data/claude
