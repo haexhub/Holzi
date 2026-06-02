@@ -45,3 +45,19 @@ def _reset_app_db_path(monkeypatch, tmp_path: Path) -> None:
     """
     fresh = str(tmp_path / "hermes.db")
     monkeypatch.setattr(hermes_config.settings, "db_path", fresh)
+
+
+@pytest.fixture(autouse=True)
+def _empty_capability_index(monkeypatch) -> None:
+    """Globally pin the capability index to empty for the test suite.
+
+    `get_effective_system_prompt` reads the on-disk capability index and
+    injects it between persona and channel. Tests across the suite assert
+    on the exact composed string, so we pin the index loader to empty by
+    default — the file's content otherwise leaks into every prompt
+    assertion. Tests that specifically want to verify injection re-patch
+    `capabilities.load_capability_index` with a non-empty value.
+    """
+    from hermes import capabilities
+
+    monkeypatch.setattr(capabilities, "load_capability_index", lambda: "")

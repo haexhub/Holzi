@@ -14,18 +14,6 @@ from hermes.repository import channels as channels_repo
 from hermes.repository import personas as personas_repo
 
 
-@pytest.fixture(autouse=True)
-def _empty_capability_index(monkeypatch) -> None:
-    """Keep persona/channel composition tests focused on those two parts.
-
-    The resolver also injects the capability index from disk; tests in
-    this file that don't care about it pin the loader to empty so prompt
-    assertions stay tight. The two index-specific tests below override
-    this with a non-empty value.
-    """
-    monkeypatch.setattr(capabilities, "load_capability_index", lambda: "")
-
-
 @pytest.mark.asyncio
 async def test_unknown_channel_raises_key_error(conn: AsyncEngine) -> None:
     await ensure_backfill(conn)
