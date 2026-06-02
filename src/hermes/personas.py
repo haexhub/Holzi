@@ -140,7 +140,7 @@ async def get_effective_system_prompt(
 
     index = capabilities.load_capability_index()
     parts: list[str] = []
-    if persona is not None:
+    if persona is not None and persona.prompt.strip():
         parts.append(persona.prompt)
     if index:
         parts.append(index)

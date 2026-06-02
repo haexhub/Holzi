@@ -98,6 +98,24 @@ async def test_default_persona_is_named_hermes_after_backfill(
 
 
 @pytest.mark.asyncio
+async def test_whitespace_only_persona_prompt_is_omitted_from_composition(
+    conn: AsyncEngine,
+) -> None:
+    # A user could edit a persona via /api/personas and save an
+    # all-whitespace prompt. The composer should treat that as "no
+    # persona contribution" rather than producing a leading blank block.
+    await ensure_backfill(conn)
+    blanked = await personas_repo.create(
+        conn, name="Blank", prompt="   \n  ", is_default=True
+    )
+    assert blanked is not None  # for type-narrowing; create returns a row
+
+    prompt = await get_effective_system_prompt("web", conn)
+
+    assert prompt == CHANNEL_REGISTRY["web"]["default_prompt"]
+
+
+@pytest.mark.asyncio
 async def test_capability_index_is_injected_between_persona_and_channel(
     conn: AsyncEngine, monkeypatch
 ) -> None:

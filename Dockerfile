@@ -31,6 +31,11 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy source and install the project itself.
 COPY src/ ./src/
+# User-guide markdown is read at runtime by hermes.capabilities (injected
+# into the system prompt + served by the read_user_guide tool). Resolved
+# relative to the package via `Path(__file__).parents[2]`, so the docs
+# need to sit at /app/docs/ next to /app/src/.
+COPY docs/user-guide/ ./docs/user-guide/
 RUN uv sync --frozen --no-dev
 
 EXPOSE 8082
