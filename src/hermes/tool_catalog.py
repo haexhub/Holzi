@@ -7,6 +7,7 @@ from hermes.tools.cross_channel import build_cross_channel_tools
 from hermes.tools.external import build_external_tools
 from hermes.tools.memory import build_memory_tools
 from hermes.tools.productivity import build_productivity_tools
+from hermes.tools.user_guide import build_user_guide_tools
 
 
 def build_tool_catalog(
@@ -36,4 +37,5 @@ def build_tool_catalog(
         )
         + build_productivity_tools(db)
         + build_external_tools(external_http, brave_api_key)
+        + build_user_guide_tools()
     )
