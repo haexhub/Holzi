@@ -24,6 +24,7 @@ from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes import capabilities
 from hermes.repository import channels as channels_repo
 from hermes.repository import personas as personas_repo
 
@@ -101,12 +102,19 @@ async def get_effective_system_prompt(
 ) -> str:
     """Compose the system prompt the agent should run with for `channel`.
 
-    Composition order: `persona.prompt + "\\n\\n" + channel.prompt`.
+    Composition order:
+    `persona.prompt + "\\n\\n" + capability_index + "\\n\\n" + channel.prompt`.
+
+    Any of the first two components may be empty/missing and is then
+    skipped — the separator stays consistent between the parts that
+    actually appear.
+
     Persona resolution:
     1. `channel_prompts.default_persona_id` if set and the row exists.
     2. Otherwise the globally-default persona (`personas.is_default = 1`).
     3. If neither exists (theoretically impossible after backfill, but
-       robust against a corrupted DB), return the channel prompt alone.
+       robust against a corrupted DB), the channel prompt is returned
+       with the index alone (or by itself if there is no index).
 
     Raises `KeyError` for channel keys not in `CHANNEL_REGISTRY` — the
     call-site is buggy if it passes one. Channel rows are guaranteed to
@@ -129,7 +137,12 @@ async def get_effective_system_prompt(
         persona = await personas_repo.get(engine, persona_id)
     if persona is None:
         persona = await personas_repo.get_default(engine)
-    if persona is None:
-        return channel_prompt
 
-    return f"{persona.prompt}\n\n{channel_prompt}"
+    index = capabilities.load_capability_index()
+    parts: list[str] = []
+    if persona is not None:
+        parts.append(persona.prompt)
+    if index:
+        parts.append(index)
+    parts.append(channel_prompt)
+    return "\n\n".join(parts)

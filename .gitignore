@@ -69,7 +69,6 @@ frontend/.output/
 # Claude / agent caches
 .claude/
 .playwright-mcp/
-docs/
 
 # Git worktrees
 .worktrees/
