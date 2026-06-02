@@ -74,9 +74,22 @@ services:
       dockerfile: Dockerfile
     container_name: hermes-server
     restart: unless-stopped
+    # Run as the shared service uid so the named hermes-data volume is owned
+    # by the same uid that haex-claude-proxy uses for resolver writeback.
+    # Without this, hermes (root) creates /data/* with mode 644/755 root:root
+    # and the proxy (uid 1001) can't update -wal / -shm or persist OAuth-
+    # refresh writes — surfaces as `upstream_http_error 502` in /api/chat.
+    user: "1001:1001"
     env_file:
       - .env
     environment:
+      # uv resolves HOME from /etc/passwd; uid 1001 has no entry inside the
+      # image, so $HOME defaults to "/" and uv's cache-init writes to /.cache
+      # (Permission denied). Point both at /tmp — uv only needs a scratch
+      # location at runtime, and the venv itself lives in /app/.venv (built
+      # into the image, world-readable).
+      HOME: /tmp
+      UV_CACHE_DIR: /tmp/uv-cache
       HERMES_DB_PATH: /data/hermes.db
       HERMES_LLM_URL: ${HERMES_LLM_URL:-http://haex-claude-proxy:8080}
       HERMES_SIGNAL_URL: ${HERMES_SIGNAL_URL:-http://signal-cli-rest-api:8080}
@@ -132,6 +145,9 @@ services:
     image: haex-claude-proxy:${HAEX_CLAUDE_PROXY_TAG:-dev}
     container_name: haex-claude-proxy
     restart: unless-stopped
+    # Override the image's USER=node (uid 1000) to the shared service uid so
+    # the proxy writes to /data with the same ownership hermes-server uses.
+    user: "1001:1001"
     environment:
       # SQLite-Resolver liest die aktive llm_credentials-Zeile aus Hermes's
       # DB (geteiltes hermes-data-Volume) und entschlüsselt mit dem geteilten
@@ -155,7 +171,7 @@ services:
       # Per-Spawn-HOMEs für die `claude` CLI landen hier — tmpfs verhindert
       # plaintext-Credentials auf disk, auch wenn das Plugin nach Spawn-Exit
       # selbst aufräumt.
-      - /run/credentials:mode=700,uid=1000
+      - /run/credentials:mode=700,uid=1001
     networks:
       - hermes-local
 
