@@ -32,9 +32,11 @@ from hermes.routes.diagnostics import router as diagnostics_router
 from hermes.routes.insights import router as insights_router
 from hermes.routes.llm import router as llm_router
 from hermes.routes.logs import router as logs_router
+from hermes.routes.mcp_health import router as mcp_health_router
 from hermes.routes.messenger import router as messenger_router
 from hermes.routes.preferences import router as preferences_router
 from hermes.routes.sandbox import router as sandbox_router
+from hermes.routes.tools import router as tools_router
 from hermes.routes.workspace import router as workspace_router
 from hermes.routes.workspaces import router as workspaces_router
 from hermes.run_tracker import track_run
@@ -399,6 +401,8 @@ app.include_router(diagnostics_router)
 app.include_router(insights_router)
 app.include_router(logs_router)
 app.include_router(preferences_router)
+app.include_router(tools_router)
+app.include_router(mcp_health_router)
 
 
 @app.get("/healthz")
