@@ -29,7 +29,12 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from contextlib import (
+    AbstractAsyncContextManager,
+    AsyncExitStack,
+    asynccontextmanager,
+    suppress,
+)
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -49,7 +54,7 @@ McpStatus = Literal["starting", "ready", "crashed", "disabled"]
 # object (must expose `initialize()`, `list_tools()`, `call_tool()`).
 ConnectFn = Callable[
     [Any, McpServerSecrets],
-    "AbstractAsyncContextManager[Any]",  # noqa: F821 — Any to keep tests stub-friendly
+    AbstractAsyncContextManager[Any],
 ]
 
 
@@ -59,7 +64,10 @@ class McpServerHandle:
 
     The session reference is reassigned by `restart_server`; tool handlers
     look it up by `server_id` rather than capturing a snapshot, so the
-    catalog stays correct across restarts.
+    catalog stays correct across restarts. `_stop_event` / `_ready_event`
+    are eagerly constructed for every handle (even the "disabled" branch
+    that never spawns a task) so call sites can use them unconditionally
+    without `Optional` narrowing — saves a half-dozen `assert is not None`s.
     """
 
     id: int
@@ -72,8 +80,8 @@ class McpServerHandle:
     # Internals: the per-server lifecycle task and a signal that the
     # context-manager-entered session is ready to call.
     _task: asyncio.Task[None] | None = None
-    _stop_event: asyncio.Event | None = None
-    _ready_event: asyncio.Event | None = None
+    _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+    _ready_event: asyncio.Event = field(default_factory=asyncio.Event)
     _session: Any | None = None
 
 
@@ -150,8 +158,6 @@ class McpServerManager:
             name=row.name,
             transport=row.transport,
             status="starting",
-            _stop_event=asyncio.Event(),
-            _ready_event=asyncio.Event(),
         )
         self._handles[server_id] = handle
 
@@ -171,8 +177,7 @@ class McpServerManager:
         handle = self._handles.pop(server_id, None)
         if handle is None:
             return
-        if handle._stop_event is not None:
-            handle._stop_event.set()
+        handle._stop_event.set()
         if handle._task is not None:
             with suppress(asyncio.CancelledError):
                 await handle._task

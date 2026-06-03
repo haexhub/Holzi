@@ -28,6 +28,7 @@ from hermes.logging import logger
 from hermes.mcp_manager import McpServerHandle, McpServerManager
 from hermes.repository import mcp_servers as repo
 from hermes.repository.models import McpServer
+from hermes.tool_catalog import build_tool_catalog
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
@@ -421,8 +422,6 @@ def _refresh_catalog(request: Request) -> None:
     """Re-assemble `app.state.tool_catalog` so the next request observes
     the new MCP tool set. Single-worker invariant — no locking required.
     """
-    from hermes.tool_catalog import build_tool_catalog
-
     state = request.app.state
     state.tool_catalog = build_tool_catalog(
         db=state.db,

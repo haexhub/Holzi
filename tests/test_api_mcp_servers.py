@@ -289,6 +289,9 @@ async def test_update_preserves_credentials_when_undefined(
 async def test_update_clears_credentials_with_explicit_null(
     client: httpx.AsyncClient,
 ) -> None:
+    from hermes.main import app as _app
+    from hermes.repository import mcp_servers as _repo
+
     create = await client.post(
         "/api/mcp/servers",
         headers=AUTH,
@@ -301,12 +304,65 @@ async def test_update_clears_credentials_with_explicit_null(
         },
     )
     server_id = create.json()["id"]
+    # Confirm the ciphertext landed before we ask for the clear, otherwise
+    # the post-PUT assertion is trivially true (no creds to clear in the
+    # first place).
+    before = await _repo.get(_app.state.db, server_id)
+    assert before is not None
+    assert before.credentials_iv is not None
+
     patch = await client.put(
         f"/api/mcp/servers/{server_id}",
         headers=AUTH,
         json={"credentials": None},
     )
     assert patch.status_code == 200, patch.text
+
+    # Sentinel boundary: `credentials: null` MUST clear the persisted
+    # ciphertext tripel. The API response can't show this directly (the
+    # ciphertext is redacted on read), so verify against the repo.
+    after = await _repo.get(_app.state.db, server_id)
+    assert after is not None
+    assert after.credentials_iv is None
+    assert after.credentials_tag is None
+    assert after.credentials_data is None
+
+
+async def test_update_keeps_credentials_when_field_omitted(
+    client: httpx.AsyncClient,
+) -> None:
+    """Sentinel boundary: omitting `credentials` from a PUT must leave the
+    stored ciphertext intact. Mirrors the typical edit-display-name flow
+    where the user never types into the credentials field."""
+    from hermes.main import app as _app
+    from hermes.repository import mcp_servers as _repo
+
+    create = await client.post(
+        "/api/mcp/servers",
+        headers=AUTH,
+        json={
+            "name": "omit-cred",
+            "display_name": "Omit",
+            "transport": "http",
+            "url": "https://x",
+            "credentials": "stays-put",
+        },
+    )
+    server_id = create.json()["id"]
+    before = await _repo.get(_app.state.db, server_id)
+    assert before is not None
+    iv_before = before.credentials_iv
+
+    patch = await client.put(
+        f"/api/mcp/servers/{server_id}",
+        headers=AUTH,
+        json={"display_name": "Omit v2"},
+    )
+    assert patch.status_code == 200
+
+    after = await _repo.get(_app.state.db, server_id)
+    assert after is not None
+    assert after.credentials_iv == iv_before  # untouched
 
 
 async def test_update_unknown_404(client: httpx.AsyncClient) -> None:
