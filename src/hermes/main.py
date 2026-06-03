@@ -13,7 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import Receive, Scope, Send
 
 from hermes import __version__
-from hermes.agent import run_agent
+from hermes.agent import Tool, run_agent
 from hermes.auth import bearer_auth_middleware
 from hermes.config import conversation_scratch_root, settings
 from hermes.crypto import Encryptor, resolve_master_key
@@ -289,10 +289,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # never touch a route — wiring the manager's change hook covers both.
         # The manager fires this after every start/stop/restart (single
         # worker; no locking). `list_tools` reads the result live.
+        # Shared `list_tools` provider for every catalog build below. Reads
+        # app.state.tool_catalog live at call time (not during a build), so
+        # the self-reference inside _reassemble_catalog is safe — by the time
+        # list_tools runs, the assignment has landed — and a freshly-installed
+        # server shows up without a stale closure.
+        def _live_catalog() -> list[Tool]:
+            return app.state.tool_catalog
+
         def _reassemble_catalog() -> None:
-            # The `tool_catalog_provider` lambda reads app.state.tool_catalog
-            # live at list_tools call time (not during this build), so the
-            # self-reference is safe — by then the assignment below has landed.
             app.state.tool_catalog = build_tool_catalog(
                 db=app.state.db,
                 signal_client=app.state.signal_client,
@@ -301,7 +306,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 brave_api_key=app.state.brave_api_key,
                 mcp_manager=app.state.mcp_servers_manager,
                 encryptor=app.state.encryptor,
-                tool_catalog_provider=lambda: app.state.tool_catalog,
+                tool_catalog_provider=_live_catalog,
                 current_channel=None,
             )
 
@@ -326,7 +331,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             brave_api_key=app.state.brave_api_key,
             mcp_manager=app.state.mcp_servers_manager,
             encryptor=app.state.encryptor,
-            tool_catalog_provider=lambda: app.state.tool_catalog,
+            tool_catalog_provider=_live_catalog,
             current_channel=None,
         )
 
@@ -345,7 +350,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 brave_api_key=app.state.brave_api_key,
                 mcp_manager=app.state.mcp_servers_manager,
                 encryptor=app.state.encryptor,
-                tool_catalog_provider=lambda: app.state.tool_catalog,
+                tool_catalog_provider=_live_catalog,
                 current_channel="task",
             ),
             fallback_model=settings.model,
