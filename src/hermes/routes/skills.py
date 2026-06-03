@@ -25,10 +25,12 @@ from hermes.repository.models import Skill
 router = APIRouter(prefix="/api")
 
 
-# `^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$` — 1..64 kebab-case. Plan 33
-# spec says 1..64 but a one-char slug collapses to a single letter that
-# is hard to read in a list; we keep the 1..64 cap but the regex still
-# allows a single alphanumeric.
+# `^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$` — 1..64 chars, kebab-case.
+# Matches the Plan 33 spec verbatim. The regex deliberately allows a
+# single alphanumeric character: it's hard to read in a long list, but
+# the user gets to pick their own slugs and an artificial 2-char floor
+# would frustrate experimentation. UNIQUE(slug) at the DB layer still
+# prevents collisions.
 _SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 
 _BODY_MAX_LEN = 16 * 1024
