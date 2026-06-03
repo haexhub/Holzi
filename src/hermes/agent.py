@@ -493,11 +493,12 @@ def _redact_persisted_tool_calls(
 
     Each call's `function.arguments` is a JSON string the model produced.
     For a tool that declares a `redact_arguments` redactor (e.g.
-    `mcp_install`), parse it, redact, and re-serialise. Calls whose tool has
-    no redactor — or whose arguments don't parse — are passed through
-    unchanged (an unparseable call never executes, so there's nothing to
-    re-show, and the malformed string is left exactly as the model emitted
-    it).
+    `mcp_install`), normalise its arguments (a JSON string *or*, on some
+    non-streaming providers, an already-decoded dict — both valid shapes per
+    `_parse_tool_arguments`), redact, and re-serialise. Calls whose tool has no
+    redactor pass through unchanged. For a redacted tool whose string arguments
+    don't parse, a `{"_redacted": true}` placeholder is persisted instead — a
+    malformed blob is never written raw, since it could still embed the secret.
     """
     out: list[dict[str, Any]] = []
     for tc in tool_calls:
@@ -507,11 +508,17 @@ def _redact_persisted_tool_calls(
         if redactor is None:
             out.append(tc)
             continue
-        try:
-            parsed = json.loads(fn.get("arguments") or "{}")
-        except (json.JSONDecodeError, TypeError):
-            out.append(tc)
-            continue
+        raw = fn.get("arguments")
+        if isinstance(raw, dict):
+            parsed = raw
+        else:
+            try:
+                parsed = json.loads(raw or "{}")
+            except (json.JSONDecodeError, TypeError):
+                out.append(
+                    {**tc, "function": {**fn, "arguments": json.dumps({"_redacted": True})}}
+                )
+                continue
         out.append(
             {**tc, "function": {**fn, "arguments": json.dumps(redactor(parsed))}}
         )

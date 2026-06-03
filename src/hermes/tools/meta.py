@@ -29,7 +29,6 @@ raw plaintext only ever flows through the repo / manager write path.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
@@ -134,11 +133,22 @@ def _server_summary(row: Any, handle: Any) -> dict[str, Any]:
 async def _cleanup_failed_install(
     mcp_manager: McpServerManager, db: AsyncEngine, server_id: int
 ) -> None:
-    """Best-effort teardown so a failed install leaves no zombie row."""
-    with contextlib.suppress(Exception):
+    """Best-effort teardown so a failed install leaves no zombie row. Cleanup
+    failures are logged rather than raised — the caller still surfaces the
+    original startup error — but a stranded row/lifecycle task won't disappear
+    silently; the warning lands in /settings/logs for follow-up."""
+    try:
         await mcp_manager.stop_server(server_id)
-    with contextlib.suppress(Exception):
+    except Exception as exc:  # noqa: BLE001 — log, never mask the startup error
+        logger.warning(
+            "mcp_install_cleanup_stop_failed", server_id=server_id, error=str(exc)
+        )
+    try:
         await mcp_repo.delete(db, server_id)
+    except Exception as exc:  # noqa: BLE001 — log, never mask the startup error
+        logger.warning(
+            "mcp_install_cleanup_delete_failed", server_id=server_id, error=str(exc)
+        )
 
 
 # ---------------------------------------------------------------------------

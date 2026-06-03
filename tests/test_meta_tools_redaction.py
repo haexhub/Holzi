@@ -29,11 +29,11 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 
-from hermes.agent import ApprovalDecision
+from hermes.agent import ApprovalDecision, Tool, _redact_persisted_tool_calls
 from hermes.crypto import Encryptor
 from hermes.main import app
 from hermes.repository import messages
-from hermes.tools.meta import build_meta_tools
+from hermes.tools.meta import build_meta_tools, redact_mcp_install_params
 
 VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -319,3 +319,72 @@ async def test_mcp_install_log_line_is_redacted(conn, monkeypatch) -> None:
     assert invoked["params"]["env"] == {"GITHUB_TOKEN": "[redacted]"}
     # The env KEY stays visible for transparency.
     assert "GITHUB_TOKEN" in blob
+
+
+# --- _redact_persisted_tool_calls: never persist raw args (any shape) ------
+
+
+async def _noop_handler(args: dict[str, Any]) -> str:  # pragma: no cover
+    return "ok"
+
+
+def _install_tool() -> Tool:
+    return Tool(
+        name="mcp_install",
+        description="d",
+        parameters_schema={},
+        handler=_noop_handler,
+        requires_approval=True,
+        redact_arguments=redact_mcp_install_params,
+    )
+
+
+def test_persisted_tool_calls_redact_dict_shaped_arguments() -> None:
+    """Some non-streaming providers hand `function.arguments` as a dict, not a
+    JSON string — it must still be redacted before persistence."""
+    call = {
+        "id": "c1",
+        "type": "function",
+        "function": {
+            "name": "mcp_install",
+            "arguments": {
+                "name": "github",
+                "transport": "http",
+                "url": "https://x",
+                "credentials": SECRET_CRED,
+                "env": {"GITHUB_TOKEN": SECRET_ENV},
+            },
+        },
+    }
+    out = _redact_persisted_tool_calls([call], {"mcp_install": _install_tool()})
+    blob = json.dumps(out)
+    assert SECRET_CRED not in blob
+    assert SECRET_ENV not in blob
+    args = json.loads(out[0]["function"]["arguments"])
+    assert args["credentials"].startswith("[redacted")
+    assert args["env"] == {"GITHUB_TOKEN": "[redacted]"}
+
+
+def test_persisted_tool_calls_placeholder_for_unparseable_secret_args() -> None:
+    """A malformed args string for a secret-bearing tool is replaced with a
+    placeholder — never persisted raw (it could still embed the secret)."""
+    call = {
+        "id": "c2",
+        "type": "function",
+        "function": {
+            "name": "mcp_install",
+            "arguments": '{"credentials": "' + SECRET_CRED + '"',  # truncated JSON
+        },
+    }
+    out = _redact_persisted_tool_calls([call], {"mcp_install": _install_tool()})
+    assert SECRET_CRED not in json.dumps(out)
+    assert json.loads(out[0]["function"]["arguments"]) == {"_redacted": True}
+
+
+def test_persisted_tool_calls_pass_through_non_redacted_tools() -> None:
+    tool = Tool(
+        name="save_note", description="d", parameters_schema={}, handler=_noop_handler
+    )
+    call = {"id": "c", "function": {"name": "save_note", "arguments": '{"k": "v"}'}}
+    out = _redact_persisted_tool_calls([call], {"save_note": tool})
+    assert out[0] is call  # untouched passthrough
