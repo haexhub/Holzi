@@ -171,6 +171,33 @@ class ChannelPromptRow:
 
 
 @dataclass(frozen=True, slots=True)
+class McpServer:
+    """A row from `mcp_servers` (Plan 32).
+
+    `env_keys` is the projection of the stored JSON env-map down to just
+    the variable names — values may be secrets and are never returned to
+    callers. `credentials_*` are the raw AES-GCM ciphertext tripel; the
+    manager decrypts when it constructs the per-transport client. Route
+    layer never decrypts and never exposes the plaintext value.
+    """
+
+    id: int
+    name: str
+    display_name: str
+    transport: str  # 'http' | 'stdio'
+    url: str | None
+    command_argv: list[str] | None
+    env_keys: list[str]
+    credentials_iv: str | None
+    credentials_tag: str | None
+    credentials_data: str | None
+    enabled: bool
+    last_error: str | None
+    created_at: int
+    updated_at: int
+
+
+@dataclass(frozen=True, slots=True)
 class MessengerAccount:
     """A row from `messenger_accounts`. `bot_token_*` ciphertext columns
     are only populated for telegram rows; signal rows leave them NULL and

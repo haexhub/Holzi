@@ -45,7 +45,7 @@ def _to_info(t: Tool) -> ToolInfo:
         requires_approval=t.requires_approval,
         risk_reason=t.risk_reason,
         parameters_schema=t.parameters_schema,
-        source="builtin",
+        source=t.source,
     )
 
 

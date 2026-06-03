@@ -82,6 +82,11 @@ class Tool:
     # human-readable explanation shown on the approval card.
     requires_approval: bool = False
     risk_reason: str | None = None
+    # Plan 31 reserved this; Plan 32 first writes non-default values:
+    # `"mcp:<server-name>"` for tools contributed by registered external
+    # MCP servers. Free-form string so future tool families (Anthropic
+    # skills, OpenAPI imports, …) don't need a schema migration.
+    source: str = "builtin"
 
 
 def _raise_if_cancelled(cancel_event: asyncio.Event | None) -> None:

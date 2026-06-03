@@ -19,6 +19,7 @@ from hermes.config import conversation_scratch_root, settings
 from hermes.crypto import Encryptor, resolve_master_key
 from hermes.db import init_db
 from hermes.logging import configure_logging, logger
+from hermes.mcp_manager import McpServerManager
 from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
 from hermes.personas import ensure_backfill as ensure_personas_backfill
@@ -33,6 +34,7 @@ from hermes.routes.insights import router as insights_router
 from hermes.routes.llm import router as llm_router
 from hermes.routes.logs import router as logs_router
 from hermes.routes.mcp_health import router as mcp_health_router
+from hermes.routes.mcp_servers import router as mcp_servers_router
 from hermes.routes.messenger import router as messenger_router
 from hermes.routes.preferences import router as preferences_router
 from hermes.routes.sandbox import router as sandbox_router
@@ -123,6 +125,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.scheduler = None
     app.state.conversation_sweeper = None
     app.state.tool_catalog = []
+    # Plan 32: external-MCP-server lifecycle manager. Distinct from
+    # `app.state.mcp_manager` (the inbound StreamableHTTP server used by
+    # Cline/HaexChat); this one drives outbound clients to registered
+    # external MCP servers and merges their tools into the catalog.
+    app.state.mcp_servers_manager = None
     # Sandbox runtime (Plan 11b-a). None when no sandbox socket is configured.
     app.state.sandbox_manager = None
     app.state.sandbox_backend = None
@@ -271,6 +278,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.telegram_agent_runner_factory = telegram_agent_runner
         await rebuild_telegram_worker_from_db(app)
 
+        # Plan 32: spin up registered external MCP servers BEFORE the
+        # catalog is assembled so their tools land in `app.state.tool_catalog`
+        # on first read. Boot failures per server don't take the lifespan
+        # down — the manager marks the offending server as "crashed" and
+        # the catalog skips it.
+        app.state.mcp_servers_manager = McpServerManager(
+            app.state.db,
+            encryptor=app.state.encryptor,
+        )
+        await app.state.mcp_servers_manager.start_all_enabled()
+
         # MCP and the /mcp/manifest surface use a current_channel=None catalog
         # — external callers (Cline, HaexChat) don't carry a single
         # "current channel" notion. /api/chat rebuilds per request with
@@ -282,6 +300,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             signal_self_number=app.state.signal_self_number,
             external_http=app.state.external_http,
             brave_api_key=app.state.brave_api_key,
+            mcp_manager=app.state.mcp_servers_manager,
             current_channel=None,
         )
 
@@ -298,6 +317,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 signal_self_number=app.state.signal_self_number,
                 external_http=app.state.external_http,
                 brave_api_key=app.state.brave_api_key,
+                mcp_manager=app.state.mcp_servers_manager,
                 current_channel="task",
             ),
             fallback_model=settings.model,
@@ -373,6 +393,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.sandbox_manager.shutdown()
         if app.state.sandbox_backend is not None:
             await app.state.sandbox_backend.aclose()
+        if app.state.mcp_servers_manager is not None:
+            await app.state.mcp_servers_manager.stop_all()
         if app.state.signal_worker is not None:
             await app.state.signal_worker.stop()
         if app.state.signal_http is not None:
@@ -403,6 +425,7 @@ app.include_router(logs_router)
 app.include_router(preferences_router)
 app.include_router(tools_router)
 app.include_router(mcp_health_router)
+app.include_router(mcp_servers_router)
 
 
 @app.get("/healthz")
