@@ -12,6 +12,8 @@ projection happen at request time so Plan 32 can drop MCP-sourced tools
 into the catalog with their own `source="mcp:<server-name>"` and have them
 appear in the response without further changes here.
 """
+from typing import Any
+
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
@@ -25,7 +27,7 @@ class ToolInfo(BaseModel):
     description: str
     requires_approval: bool
     risk_reason: str | None
-    parameters_schema: dict
+    parameters_schema: dict[str, Any]
     # Free-form so Plan 32 can extend with `"mcp:<server-name>"` without
     # breaking the OpenAPI schema contract this endpoint commits to today.
     source: str
