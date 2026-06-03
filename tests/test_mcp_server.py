@@ -29,7 +29,7 @@ _ECHO_TOOL = Tool(
 
 
 async def test_build_mcp_server_returns_named_server() -> None:
-    server = build_mcp_server([_ECHO_TOOL])
+    server = build_mcp_server(lambda: [_ECHO_TOOL])
     assert server.name == "hermes"
 
 
@@ -149,6 +149,59 @@ async def test_mcp_endpoint_lists_tools_via_jsonrpc(
     assert "cross_channel_send" in tool_names
 
 
+async def test_mcp_endpoint_reflects_runtime_catalog_changes(
+    client: httpx.AsyncClient,
+) -> None:
+    """Plan 32-A: the inbound /mcp server reads the catalog live, so a tool
+    added after mount (e.g. via mcp_install) shows up without a restart."""
+    sentinel = Tool(
+        name="sentinel__probe",
+        description="runtime-added probe",
+        parameters_schema={"type": "object"},
+        handler=_echo_handler,
+        source="mcp:sentinel",
+    )
+    # Rebind the catalog (what the route + meta-tools do) — the live provider
+    # must reflect it on the already-mounted /mcp server.
+    app.state.tool_catalog = [*app.state.tool_catalog, sentinel]
+
+    init = await client.post(
+        "/mcp/",
+        headers={**AUTH, "Accept": "application/json, text/event-stream"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "0.0.0"},
+            },
+        },
+    )
+    session_id = init.headers.get("mcp-session-id") or ""
+    await client.post(
+        "/mcp/",
+        headers={
+            **AUTH,
+            "Accept": "application/json, text/event-stream",
+            "mcp-session-id": session_id,
+        },
+        json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+    )
+    listing = await client.post(
+        "/mcp/",
+        headers={
+            **AUTH,
+            "Accept": "application/json, text/event-stream",
+            "mcp-session-id": session_id,
+        },
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    )
+    names = {t["name"] for t in listing.json()["result"]["tools"]}
+    assert "sentinel__probe" in names
+
+
 # ---------------------------------------------------------------------------
 # Tool-catalog hygiene + arguments validation
 # ---------------------------------------------------------------------------
@@ -160,7 +213,7 @@ def test_build_mcp_server_rejects_duplicate_tool_names() -> None:
         handler=_echo_handler,
     )
     with pytest.raises(ValueError, match="duplicate tool name"):
-        build_mcp_server([_ECHO_TOOL, duplicate])
+        build_mcp_server(lambda: [_ECHO_TOOL, duplicate])
 
 
 async def test_mcp_endpoint_rejects_non_object_arguments(

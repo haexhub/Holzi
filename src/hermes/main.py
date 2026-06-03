@@ -412,7 +412,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.sandbox_manager.start_health_watcher()
             logger.info("sandbox_manager_ready", network=settings.sandbox_network)
 
-        async with mcp_session_manager(app.state.tool_catalog) as mcp_mgr:
+        # Bind the inbound /mcp server to the live catalog (not a snapshot) so
+        # servers installed at runtime via the UI or the `mcp_install`
+        # meta-tool show up without a process restart.
+        async with mcp_session_manager(_live_catalog) as mcp_mgr:
             app.state.mcp_manager = mcp_mgr
             yield
     finally:
