@@ -1,17 +1,56 @@
+import asyncio
 import json
 import time
+from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
+from websockets.exceptions import ConnectionClosed
 
 from hermes.repository import conversations, messages
 from hermes.signal.client import SignalClient
-from hermes.signal.worker import SignalWorker
+from hermes.signal.worker import SignalWorker, _extract_self_text
 
 SELF_NUMBER = "+491701234567"
 OTHER_NUMBER = "+491709999999"
+
+FIXTURES = Path(__file__).parent / "fixtures" / "signal_envelopes"
+
+
+def _load_fixture(name: str) -> dict[str, Any]:
+    return json.loads((FIXTURES / name).read_text())
+
+
+class FakeSignalClient:
+    """Stream-based stand-in for SignalClient. Each entry in `scripts` is one
+    receive_stream() session: yield the listed envelopes, then optionally
+    raise `raise_at_end` (e.g. ConnectionClosed to exercise reconnect, or
+    CancelledError to terminate _run cleanly in a test)."""
+
+    def __init__(self, scripts: list[dict[str, Any]]) -> None:
+        self._scripts = list(scripts)
+        self.sends: list[dict[str, Any]] = []
+        self.connect_count = 0
+
+    async def receive_stream(self) -> AsyncIterator[dict[str, Any]]:
+        self.connect_count += 1
+        if not self._scripts:
+            # No more scripts → simulate idle stream by sleeping forever.
+            # Tests that hit this branch are malformed (worker should have
+            # been stopped via _stop or CancelledError before reaching it).
+            await asyncio.Event().wait()
+            return
+        script = self._scripts.pop(0)
+        for env in script.get("envelopes", []):
+            yield env
+        if (exc := script.get("raise_at_end")) is not None:
+            raise exc
+
+    async def send(self, *, recipient: str, message: str) -> None:
+        self.sends.append({"recipient": recipient, "message": message})
 
 
 def _make_signal_client(send_capture: list[dict[str, Any]] | None = None) -> SignalClient:
@@ -51,9 +90,7 @@ def _echoing_agent_runner():
         msgs = await messages.list_by_conversation(db, conversation_id)
         last_user = next((m for m in reversed(msgs) if m.role == "user"), None)
         reply = f"agent says: {last_user.content if last_user else ''}"
-        await messages.append(
-            db, conversation_id=conversation_id, role="assistant", content=reply
-        )
+        await messages.append(db, conversation_id=conversation_id, role="assistant", content=reply)
         return reply
 
     return runner
@@ -213,3 +250,96 @@ async def test_process_envelope_touches_conversation_even_when_agent_fails(
     assert refreshed is not None
     assert refreshed.updated_at == current_ts
     assert refreshed.updated_at > initial_updated_at
+
+
+async def test_worker_processes_envelope_from_stream(conn: AsyncEngine) -> None:
+    envelope = _envelope(SELF_NUMBER, "hello via stream")
+    client = FakeSignalClient([{"envelopes": [envelope], "raise_at_end": asyncio.CancelledError()}])
+    worker = SignalWorker(client, conn, SELF_NUMBER, agent_runner=_echoing_agent_runner())
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker._run()
+
+    convos = await conversations.list_by_channel(conn, "signal")
+    assert len(convos) == 1
+    assert client.sends == [{"recipient": SELF_NUMBER, "message": "agent says: hello via stream"}]
+
+
+async def test_worker_reconnects_after_connection_closed(
+    conn: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    envelope = _envelope(SELF_NUMBER, "after reconnect")
+    client = FakeSignalClient(
+        [
+            # First session: drops immediately, mimicking signal-cli-rest-api restart.
+            {"raise_at_end": ConnectionClosed(None, None)},
+            # Second session: yields one envelope, then bails out via CancelledError
+            # to terminate _run cleanly.
+            {"envelopes": [envelope], "raise_at_end": asyncio.CancelledError()},
+        ]
+    )
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr("hermes.signal.worker._sleep", fake_sleep)
+
+    worker = SignalWorker(client, conn, SELF_NUMBER, agent_runner=_echoing_agent_runner())
+    with pytest.raises(asyncio.CancelledError):
+        await worker._run()
+
+    # One reconnect → one backoff sleep at the initial 1s step.
+    assert sleep_calls == [1.0]
+    assert client.connect_count == 2
+    # Envelope from the second session got processed.
+    convos = await conversations.list_by_channel(conn, "signal")
+    assert len(convos) == 1
+    assert client.sends == [{"recipient": SELF_NUMBER, "message": "agent says: after reconnect"}]
+
+
+# --- _extract_self_text: envelope-shape + security-boundary coverage ---
+
+
+def test_extract_self_text_sync_message() -> None:
+    """Note-to-Self from the primary device: syncMessage.sentMessage with
+    source == destination == self_number → text returned (Path A, normal case)."""
+    envelope = _load_fixture("note_to_self_sync.json")
+    assert _extract_self_text(envelope, SELF_NUMBER) == "hello via note to self"
+
+
+def test_extract_self_text_data_message() -> None:
+    """DM from same number on a different Signal install: dataMessage with
+    matching source → text returned (Path B, rare)."""
+    envelope = _load_fixture("note_to_self_data.json")
+    assert _extract_self_text(envelope, SELF_NUMBER) == ("hello from same number different device")
+
+
+def test_extract_self_text_rejects_other_source() -> None:
+    """The auth gate: source != self_number → None even if every other field
+    looks valid. Plan 28's whole security model rests on this check."""
+    envelope = _load_fixture("note_to_self_sync.json")
+    envelope["envelope"]["source"] = OTHER_NUMBER
+    envelope["envelope"]["sourceNumber"] = OTHER_NUMBER
+    assert _extract_self_text(envelope, SELF_NUMBER) is None
+
+
+def test_extract_self_text_rejects_other_destination() -> None:
+    """syncMessage from self addressed to someone *else* — the user sent a
+    message to another contact from their primary device. The agent must
+    not pick this up; only sync envelopes destined back to self are valid."""
+    envelope = _load_fixture("note_to_self_sync.json")
+    envelope["envelope"]["syncMessage"]["sentMessage"]["destination"] = OTHER_NUMBER
+    assert _extract_self_text(envelope, SELF_NUMBER) is None
+
+
+def test_extract_self_text_returns_none_when_both_paths_empty() -> None:
+    """Self-sourced envelope without syncMessage *and* without dataMessage —
+    e.g. typing-indicator, receipt, or InvalidMessageStructureException
+    edge case. Skip silently."""
+    envelope: dict[str, Any] = {
+        "envelope": {"source": SELF_NUMBER, "sourceNumber": SELF_NUMBER},
+        "account": SELF_NUMBER,
+    }
+    assert _extract_self_text(envelope, SELF_NUMBER) is None

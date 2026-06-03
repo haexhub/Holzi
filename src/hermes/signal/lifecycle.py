@@ -16,6 +16,7 @@ The rebuild function compares the active DB row to `signal_self_number`
 and only restarts the worker when the number actually changes — calls
 on every CRUD mutation are cheap when nothing relevant changed.
 """
+
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
