@@ -235,6 +235,7 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
         signal_self_number=request.app.state.signal_self_number,
         external_http=request.app.state.external_http,
         brave_api_key=request.app.state.brave_api_key,
+        mcp_manager=request.app.state.mcp_servers_manager,
         current_channel=WEB_CHANNEL,
     )
 

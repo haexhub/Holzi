@@ -421,3 +421,43 @@ messenger_accounts = Table(
     Column("created_at", Integer, nullable=False),
     Column("updated_at", Integer, nullable=False),
 )
+
+
+# Plan 32: registered external MCP servers the agent can pull extra tools
+# from. Two transports today: `http` (StreamableHTTP, `url` set) and
+# `stdio` (local subprocess, `command_argv` set). `env_json` carries
+# stdio environment variables as an opaque JSON map; values may be
+# secrets and are NEVER returned raw — the API surface only exposes
+# `env_keys`. Credentials (e.g. a bearer token for HTTP transport) use
+# the same AES-GCM tripel as `llm_credentials`. `last_error` mirrors the
+# Plan 11b crashed-sandbox pattern: the manager fills it on a failed
+# start/handshake and clears it on a successful restart.
+mcp_servers = Table(
+    "mcp_servers",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    # Kebab-case slug, unique. Used as `mcp:<name>` source on every
+    # tool the server contributes.
+    Column("name", Text, nullable=False, unique=True),
+    Column("display_name", Text, nullable=False),
+    # 'http' | 'stdio'
+    Column("transport", Text, nullable=False),
+    # http: full URL; stdio: NULL.
+    Column("url", Text),
+    # stdio: JSON-encoded argv list; http: NULL.
+    Column("command_argv", Text),
+    # stdio: JSON-encoded env map (may contain secrets); http: NULL.
+    # The API redacts this to `env_keys` on the way out.
+    Column("env_json", Text),
+    # AES-GCM tripel, same shape as llm_credentials.api_key_*.
+    Column("credentials_iv", Text),
+    Column("credentials_tag", Text),
+    Column("credentials_data", Text),
+    Column("enabled", Integer, nullable=False, server_default="1"),
+    # Lifecycle manager fills this with the last start/handshake error.
+    Column("last_error", Text),
+    Column("created_at", Integer, nullable=False),
+    Column("updated_at", Integer, nullable=False),
+)
+
+Index("idx_mcp_servers_enabled", mcp_servers.c.enabled)
