@@ -5,6 +5,8 @@ from typing import Any
 import httpx
 import websockets
 
+from hermes.logging import logger
+
 
 class SignalClient:
     def __init__(self, http: httpx.AsyncClient, number: str) -> None:
@@ -32,9 +34,23 @@ class SignalClient:
         async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
             async for raw in ws:
                 payload_text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
-                payload = json.loads(payload_text)
+                try:
+                    payload = json.loads(payload_text)
+                except json.JSONDecodeError as exc:
+                    logger.debug(
+                        "signal_ws_malformed_json",
+                        error=str(exc),
+                    )
+                    continue
                 if isinstance(payload, dict):
                     yield payload
+                else:
+                    # signal-cli is contracted to emit JSON objects;
+                    # arrays / scalars are upstream misbehaviour.
+                    logger.debug(
+                        "signal_ws_unexpected_payload",
+                        payload_type=type(payload).__name__,
+                    )
 
     async def send(self, *, recipient: str, message: str) -> None:
         response = await self.http.post(
