@@ -1,0 +1,17 @@
+{
+  "envelope": {
+    "source": "+491701234567",
+    "sourceNumber": "+491701234567",
+    "sourceUuid": "00000000-0000-0000-0000-000000000001",
+    "sourceName": "Self",
+    "sourceDevice": 2,
+    "timestamp": 1735689600000,
+    "dataMessage": {
+      "timestamp": 1735689600000,
+      "message": "hello from same number different device",
+      "expiresInSeconds": 0,
+      "viewOnce": false
+    }
+  },
+  "account": "+491701234567"
+}
