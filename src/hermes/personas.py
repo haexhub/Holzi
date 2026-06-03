@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from hermes import capabilities
 from hermes.repository import channels as channels_repo
 from hermes.repository import personas as personas_repo
+from hermes.repository import skills as skills_repo
 
 # Single source of truth for known channels. Key = exact string used as
 # the channel identifier by the call-sites and persisted in the
@@ -102,12 +103,16 @@ async def get_effective_system_prompt(
 ) -> str:
     """Compose the system prompt the agent should run with for `channel`.
 
-    Composition order:
-    `persona.prompt + "\\n\\n" + capability_index + "\\n\\n" + channel.prompt`.
+    Composition order (Plan 33 extends 29-A by inserting skills between
+    persona and capability_index):
 
-    Any of the first two components may be empty/missing and is then
-    skipped — the separator stays consistent between the parts that
-    actually appear.
+    `persona.prompt + skills_block + capability_index + channel.prompt`
+
+    `skills_block` is the join of every active (enabled=1) skill body
+    attached to the resolved persona, in `ordering` order. Any of the
+    first three components may be empty/missing and is then skipped —
+    the separator stays consistent between the parts that actually
+    appear.
 
     Persona resolution:
     1. `channel_prompts.default_persona_id` if set and the row exists.
@@ -138,10 +143,22 @@ async def get_effective_system_prompt(
     if persona is None:
         persona = await personas_repo.get_default(engine)
 
+    skills_block = ""
+    if persona is not None:
+        attached = await skills_repo.list_for_persona(engine, persona.id)
+        active_bodies = [
+            skill.body_markdown
+            for skill, _ordering, enabled in attached
+            if enabled and skill.body_markdown.strip()
+        ]
+        skills_block = "\n\n".join(active_bodies)
+
     index = capabilities.load_capability_index()
     parts: list[str] = []
     if persona is not None and persona.prompt.strip():
         parts.append(persona.prompt)
+    if skills_block:
+        parts.append(skills_block)
     if index:
         parts.append(index)
     parts.append(channel_prompt)

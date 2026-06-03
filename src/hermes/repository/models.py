@@ -171,6 +171,25 @@ class ChannelPromptRow:
 
 
 @dataclass(frozen=True, slots=True)
+class Skill:
+    """A row from `skills` (Plan 33).
+
+    The `description` / `when_to_use` fields are the Anthropic-skill
+    frontmatter promoted to columns; `body_markdown` is the prompt
+    content the resolver mixes into the effective system prompt.
+    """
+
+    id: int
+    slug: str
+    name: str
+    description: str
+    when_to_use: str | None
+    body_markdown: str
+    created_at: int
+    updated_at: int
+
+
+@dataclass(frozen=True, slots=True)
 class McpServer:
     """A row from `mcp_servers` (Plan 32).
 
