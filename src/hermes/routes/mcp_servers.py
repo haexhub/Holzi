@@ -430,5 +430,7 @@ def _refresh_catalog(request: Request) -> None:
         external_http=state.external_http,
         brave_api_key=state.brave_api_key,
         mcp_manager=state.mcp_servers_manager,
+        encryptor=state.encryptor,
+        tool_catalog_provider=lambda: state.tool_catalog,
         current_channel=None,
     )

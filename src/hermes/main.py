@@ -283,9 +283,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # on first read. Boot failures per server don't take the lifespan
         # down — the manager marks the offending server as "crashed" and
         # the catalog skips it.
+        # Plan 32-A: keep `app.state.tool_catalog` fresh whenever the MCP
+        # fleet changes. routes/mcp_servers.py rebuilds it on its own CRUD
+        # path, but the agent-driven `mcp_install` / `mcp_restart` meta-tools
+        # never touch a route — wiring the manager's change hook covers both.
+        # The manager fires this after every start/stop/restart (single
+        # worker; no locking). `list_tools` reads the result live.
+        def _reassemble_catalog() -> None:
+            # The `tool_catalog_provider` lambda reads app.state.tool_catalog
+            # live at list_tools call time (not during this build), so the
+            # self-reference is safe — by then the assignment below has landed.
+            app.state.tool_catalog = build_tool_catalog(
+                db=app.state.db,
+                signal_client=app.state.signal_client,
+                signal_self_number=app.state.signal_self_number,
+                external_http=app.state.external_http,
+                brave_api_key=app.state.brave_api_key,
+                mcp_manager=app.state.mcp_servers_manager,
+                encryptor=app.state.encryptor,
+                tool_catalog_provider=lambda: app.state.tool_catalog,
+                current_channel=None,
+            )
+
         app.state.mcp_servers_manager = McpServerManager(
             app.state.db,
             encryptor=app.state.encryptor,
+            on_catalog_change=_reassemble_catalog,
         )
         await app.state.mcp_servers_manager.start_all_enabled()
 
@@ -293,7 +316,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # — external callers (Cline, HaexChat) don't carry a single
         # "current channel" notion. /api/chat rebuilds per request with
         # current_channel="web" via build_tool_catalog() for the recursion
-        # guard.
+        # guard. (Explicit build covers the zero-enabled-servers case, where
+        # start_all_enabled never fires _reassemble_catalog.)
         app.state.tool_catalog = build_tool_catalog(
             db=app.state.db,
             signal_client=app.state.signal_client,
@@ -301,6 +325,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             external_http=app.state.external_http,
             brave_api_key=app.state.brave_api_key,
             mcp_manager=app.state.mcp_servers_manager,
+            encryptor=app.state.encryptor,
+            tool_catalog_provider=lambda: app.state.tool_catalog,
             current_channel=None,
         )
 
@@ -318,6 +344,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 external_http=app.state.external_http,
                 brave_api_key=app.state.brave_api_key,
                 mcp_manager=app.state.mcp_servers_manager,
+                encryptor=app.state.encryptor,
+                tool_catalog_provider=lambda: app.state.tool_catalog,
                 current_channel="task",
             ),
             fallback_model=settings.model,
