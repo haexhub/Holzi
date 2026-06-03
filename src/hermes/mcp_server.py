@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -11,15 +11,33 @@ from hermes.agent import Tool
 
 SERVER_NAME = "hermes"
 
+# Provider returning the *current* tool catalog. The inbound /mcp server is
+# mounted once for the process lifetime but the catalog changes at runtime
+# (MCP servers installed via the UI or the `mcp_install` meta-tool), so the
+# handlers read through this callable rather than snapshotting at mount time —
+# otherwise `/mcp` would serve a stale tool set until restart.
+ToolProvider = Callable[[], list[Tool]]
 
-def build_mcp_server(tools: list[Tool]) -> Server:
-    """Construct a low-level MCP Server bound to the given Hermes tool catalog."""
-    server: Server = Server(SERVER_NAME)
+
+def _unique_lookup(tools: list[Tool]) -> dict[str, Tool]:
     lookup: dict[str, Tool] = {}
     for t in tools:
         if t.name in lookup:
             raise ValueError(f"duplicate tool name in MCP catalog: {t.name!r}")
         lookup[t.name] = t
+    return lookup
+
+
+def build_mcp_server(tools_provider: ToolProvider) -> Server:
+    """Construct a low-level MCP Server bound to the live Hermes tool catalog.
+
+    `tools_provider` is read on every `list_tools` / `call_tool` so a server
+    installed at runtime shows up without remounting. Uniqueness is validated
+    once at build (catches a programming error early); the per-call lookup
+    tolerates the catalog growing afterwards.
+    """
+    server: Server = Server(SERVER_NAME)
+    _unique_lookup(tools_provider())  # fail fast on a duplicate at boot
 
     @server.list_tools()
     async def _list_tools() -> list[types.Tool]:
@@ -29,12 +47,12 @@ def build_mcp_server(tools: list[Tool]) -> Server:
                 description=t.description,
                 inputSchema=t.parameters_schema,
             )
-            for t in tools
+            for t in tools_provider()
         ]
 
     @server.call_tool()
     async def _call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
-        tool = lookup.get(name)
+        tool = {t.name: t for t in tools_provider()}.get(name)
         if tool is None:
             return [types.TextContent(type="text", text=f"error: unknown tool {name!r}")]
         if arguments is None:
@@ -56,10 +74,11 @@ def build_mcp_server(tools: list[Tool]) -> Server:
 
 @asynccontextmanager
 async def mcp_session_manager(
-    tools: list[Tool],
+    tools_provider: ToolProvider,
 ) -> AsyncIterator[StreamableHTTPSessionManager]:
-    """Lifespan helper that boots a streamable-HTTP MCP session manager."""
-    server = build_mcp_server(tools)
+    """Lifespan helper that boots a streamable-HTTP MCP session manager bound
+    to the live catalog via `tools_provider`."""
+    server = build_mcp_server(tools_provider)
     manager = StreamableHTTPSessionManager(
         server,
         stateless=True,

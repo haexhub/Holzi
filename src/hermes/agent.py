@@ -87,6 +87,12 @@ class Tool:
     # MCP servers. Free-form string so future tool families (Anthropic
     # skills, OpenAPI imports, …) don't need a schema migration.
     source: str = "builtin"
+    # Plan 32-A: optional redactor applied to this tool's parsed arguments
+    # before they are shown (approval card, tool-call event) or persisted
+    # (messages.meta_json). The *raw* arguments still reach the handler so
+    # it can act on the real secrets. `mcp_install` sets this to mask its
+    # `credentials` / `env` values; tools without secrets leave it None.
+    redact_arguments: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
 
 def _raise_if_cancelled(cancel_event: asyncio.Event | None) -> None:
@@ -200,7 +206,13 @@ async def run_agent(
                 "tool_calls": tool_calls,
             }
         )
-        assistant_meta: dict[str, Any] = {"tool_calls": tool_calls}
+        # Persist a redacted copy of the tool_calls so secret-bearing args
+        # (e.g. mcp_install credentials) never land in the DB. The raw
+        # tool_calls stay in `request_messages` above — the LLM generated
+        # them and needs them verbatim for the next round.
+        assistant_meta: dict[str, Any] = {
+            "tool_calls": _redact_persisted_tool_calls(tool_calls, tool_lookup)
+        }
         if reasoning_text:
             assistant_meta["reasoning"] = reasoning_text
         await messages.append(
@@ -217,6 +229,14 @@ async def run_agent(
             args, arg_error = _parse_tool_arguments(call)
             tool = tool_lookup.get(name)
 
+            # Plan 32-A: redacted view of the arguments for everything that
+            # leaves the process or hits the DB (approval card, tool-call
+            # event, persisted meta). The raw `args` still flow to the
+            # handler below so it can act on the real secrets.
+            display_args = args
+            if tool is not None and tool.redact_arguments is not None and arg_error is None:
+                display_args = tool.redact_arguments(args)
+
             # Approval gate: a requires_approval tool pauses here until the
             # caller's on_approval callback returns a decision. Skipped when
             # no callback is wired (Signal/MCP) or the arguments were already
@@ -231,7 +251,7 @@ async def run_agent(
                 and arg_error is None
             ):
                 decision = await on_approval(
-                    call["id"], name, args, tool.risk_reason or ""
+                    call["id"], name, display_args, tool.risk_reason or ""
                 )
                 _raise_if_cancelled(cancel_event)
                 if decision.decision == "deny":
@@ -242,7 +262,7 @@ async def run_agent(
                 status, result = "error", _denied_tool_result(denied_reason)
             else:
                 if on_tool_call is not None:
-                    await on_tool_call(call["id"], name, args)
+                    await on_tool_call(call["id"], name, display_args)
                 status, result = await _execute_tool_call(
                     call, tool_lookup, args, arg_error
                 )
@@ -265,7 +285,7 @@ async def run_agent(
                     {
                         "tool_call_id": call["id"],
                         "name": name,
-                        "arguments": args,
+                        "arguments": display_args,
                         "status": status,
                     }
                 ),
@@ -463,6 +483,46 @@ def _history_row_to_request_message(
         block = _render_attachments(atts)
         content = f"{content}\n\n{block}" if content else block
     return {"role": m.role, "content": content}
+
+
+def _redact_persisted_tool_calls(
+    tool_calls: list[dict[str, Any]], tool_lookup: dict[str, Tool]
+) -> list[dict[str, Any]]:
+    """Return a copy of the OpenAI-format `tool_calls` with secret-bearing
+    arguments masked, for persistence into `messages.meta_json`.
+
+    Each call's `function.arguments` is a JSON string the model produced.
+    For a tool that declares a `redact_arguments` redactor (e.g.
+    `mcp_install`), normalise its arguments (a JSON string *or*, on some
+    non-streaming providers, an already-decoded dict — both valid shapes per
+    `_parse_tool_arguments`), redact, and re-serialise. Calls whose tool has no
+    redactor pass through unchanged. For a redacted tool whose string arguments
+    don't parse, a `{"_redacted": true}` placeholder is persisted instead — a
+    malformed blob is never written raw, since it could still embed the secret.
+    """
+    out: list[dict[str, Any]] = []
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        tool = tool_lookup.get(fn.get("name", ""))
+        redactor = tool.redact_arguments if tool is not None else None
+        if redactor is None:
+            out.append(tc)
+            continue
+        raw = fn.get("arguments")
+        if isinstance(raw, dict):
+            parsed = raw
+        else:
+            try:
+                parsed = json.loads(raw or "{}")
+            except (json.JSONDecodeError, TypeError):
+                out.append(
+                    {**tc, "function": {**fn, "arguments": json.dumps({"_redacted": True})}}
+                )
+                continue
+        out.append(
+            {**tc, "function": {**fn, "arguments": json.dumps(redactor(parsed))}}
+        )
+    return out
 
 
 def _format_tools(tools: list[Tool]) -> list[dict[str, Any]]:

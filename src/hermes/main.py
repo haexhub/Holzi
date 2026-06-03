@@ -13,7 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import Receive, Scope, Send
 
 from hermes import __version__
-from hermes.agent import run_agent
+from hermes.agent import Tool, run_agent
 from hermes.auth import bearer_auth_middleware
 from hermes.config import conversation_scratch_root, settings
 from hermes.crypto import Encryptor, resolve_master_key
@@ -283,9 +283,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # on first read. Boot failures per server don't take the lifespan
         # down — the manager marks the offending server as "crashed" and
         # the catalog skips it.
+        # Plan 32-A: keep `app.state.tool_catalog` fresh whenever the MCP
+        # fleet changes. routes/mcp_servers.py rebuilds it on its own CRUD
+        # path, but the agent-driven `mcp_install` / `mcp_restart` meta-tools
+        # never touch a route — wiring the manager's change hook covers both.
+        # The manager fires this after every start/stop/restart (single
+        # worker; no locking). `list_tools` reads the result live.
+        # Shared `list_tools` provider for every catalog build below. Reads
+        # app.state.tool_catalog live at call time (not during a build), so
+        # the self-reference inside _reassemble_catalog is safe — by the time
+        # list_tools runs, the assignment has landed — and a freshly-installed
+        # server shows up without a stale closure.
+        def _live_catalog() -> list[Tool]:
+            return app.state.tool_catalog
+
+        def _reassemble_catalog() -> None:
+            app.state.tool_catalog = build_tool_catalog(
+                db=app.state.db,
+                signal_client=app.state.signal_client,
+                signal_self_number=app.state.signal_self_number,
+                external_http=app.state.external_http,
+                brave_api_key=app.state.brave_api_key,
+                mcp_manager=app.state.mcp_servers_manager,
+                encryptor=app.state.encryptor,
+                tool_catalog_provider=_live_catalog,
+                current_channel=None,
+            )
+
         app.state.mcp_servers_manager = McpServerManager(
             app.state.db,
             encryptor=app.state.encryptor,
+            on_catalog_change=_reassemble_catalog,
         )
         await app.state.mcp_servers_manager.start_all_enabled()
 
@@ -293,7 +321,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # — external callers (Cline, HaexChat) don't carry a single
         # "current channel" notion. /api/chat rebuilds per request with
         # current_channel="web" via build_tool_catalog() for the recursion
-        # guard.
+        # guard. (Explicit build covers the zero-enabled-servers case, where
+        # start_all_enabled never fires _reassemble_catalog.)
         app.state.tool_catalog = build_tool_catalog(
             db=app.state.db,
             signal_client=app.state.signal_client,
@@ -301,6 +330,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             external_http=app.state.external_http,
             brave_api_key=app.state.brave_api_key,
             mcp_manager=app.state.mcp_servers_manager,
+            encryptor=app.state.encryptor,
+            tool_catalog_provider=_live_catalog,
             current_channel=None,
         )
 
@@ -318,6 +349,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 external_http=app.state.external_http,
                 brave_api_key=app.state.brave_api_key,
                 mcp_manager=app.state.mcp_servers_manager,
+                encryptor=app.state.encryptor,
+                tool_catalog_provider=_live_catalog,
                 current_channel="task",
             ),
             fallback_model=settings.model,
@@ -379,7 +412,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.sandbox_manager.start_health_watcher()
             logger.info("sandbox_manager_ready", network=settings.sandbox_network)
 
-        async with mcp_session_manager(app.state.tool_catalog) as mcp_mgr:
+        # Bind the inbound /mcp server to the live catalog (not a snapshot) so
+        # servers installed at runtime via the UI or the `mcp_install`
+        # meta-tool show up without a process restart.
+        async with mcp_session_manager(_live_catalog) as mcp_mgr:
             app.state.mcp_manager = mcp_mgr
             yield
     finally:
