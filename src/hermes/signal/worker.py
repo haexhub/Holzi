@@ -86,7 +86,7 @@ class SignalWorker:
         logger.info("signal_worker_stopped")
 
     async def process_envelope(self, envelope: dict[str, Any], *, now: int | None = None) -> None:
-        text = _extract_note_to_self_text(envelope, self.self_number)
+        text = _extract_self_text(envelope, self.self_number)
         if text is None:
             return
 
@@ -113,12 +113,45 @@ class SignalWorker:
         return await conversations.create(self.db, channel="signal", ts=now)
 
 
-def _extract_note_to_self_text(envelope: dict[str, Any], self_number: str) -> str | None:
+def _extract_self_text(envelope: dict[str, Any], self_number: str) -> str | None:
+    """Extract the message text from a self-sourced envelope.
+
+    The auth gate is `envelope.source == self_number` — Signal's identity-key
+    signing makes that field unspoofable, so a self-sourced envelope is the
+    only path we trust to drive the agent. No allowlist UI, no shared secret.
+
+    Two envelope shapes carry self-sourced text:
+
+    * **Path A — Note-to-Self from the primary device.** signal-cli surfaces
+      this as `syncMessage.sentMessage` with `destination == self_number`.
+      This is the normal case after Plan 28.
+    * **Path B — direct message from the same number on another device.**
+      Rare (would require the user to DM their own number from a second
+      Signal install); shows up as `dataMessage.message`.
+
+    Anything else (different source, sync to a different destination, empty
+    text, unknown envelope variant) → return None and skip silently.
+    """
     inner = envelope.get("envelope") or {}
     if inner.get("source") != self_number:
         return None
+
+    # Path A: syncMessage.sentMessage (Note-to-Self via linked secondary).
+    sync = inner.get("syncMessage") or {}
+    sent = sync.get("sentMessage") or {}
+    if sent:
+        if sent.get("destination") != self_number:
+            # Self-sourced sync that was not addressed back to self — e.g.
+            # the user sent a message to someone else; we shouldn't act on it.
+            return None
+        text = sent.get("message")
+        if isinstance(text, str) and text:
+            return text
+        return None
+
+    # Path B: dataMessage from the same number on a different device.
     data = inner.get("dataMessage") or {}
     text = data.get("message")
-    if not isinstance(text, str) or not text:
-        return None
-    return text
+    if isinstance(text, str) and text:
+        return text
+    return None
