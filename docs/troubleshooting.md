@@ -157,10 +157,12 @@ either:
   `HERMES_CONTAINER_SOCKET=/run/user/1000/podman/podman.sock`
   (matching `id -u`) explicitly in `.env`.
 
-Also see the **"Persistent sandbox-crash log"** under
-`/settings/diagnostics` (Plan 20-A) — entries in
-`sandbox_crashes` show the exact Podman error that took the runtime
-down.
+Also see the **"Sandbox-Abstürze"** section on the
+`/settings/diagnostics` page (Plan 20-A) — it's a separate widget
+backed by the dedicated `GET /api/sandbox/crashes` endpoint (the
+`sandbox_crashes` table), rendered alongside the subsystem grid from
+`GET /api/diagnostics`. Entries show the exact Podman exit code that
+took the sandbox down.
 
 ## Workspace browser empty / `/settings/workspaces` shows nothing
 
