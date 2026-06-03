@@ -38,6 +38,7 @@ from hermes.routes.mcp_servers import router as mcp_servers_router
 from hermes.routes.messenger import router as messenger_router
 from hermes.routes.preferences import router as preferences_router
 from hermes.routes.sandbox import router as sandbox_router
+from hermes.routes.skills import router as skills_router
 from hermes.routes.tools import router as tools_router
 from hermes.routes.workspace import router as workspace_router
 from hermes.routes.workspaces import router as workspaces_router
@@ -459,6 +460,7 @@ app.include_router(diagnostics_router)
 app.include_router(insights_router)
 app.include_router(logs_router)
 app.include_router(preferences_router)
+app.include_router(skills_router)
 app.include_router(tools_router)
 app.include_router(mcp_health_router)
 app.include_router(mcp_servers_router)

@@ -461,3 +461,60 @@ mcp_servers = Table(
 )
 
 Index("idx_mcp_servers_enabled", mcp_servers.c.enabled)
+
+
+# Plan 33: reusable prompt building blocks ("skills" in the Anthropic
+# sense — Markdown body with frontmatter-style metadata). Each row is a
+# self-contained prompt module that personas can activate independently.
+# The resolver in `hermes.personas` mixes the active bodies into the
+# composed system prompt between persona and channel.
+#
+# Frontmatter fields (`description`, `when_to_use`) are stored as
+# discrete columns rather than parsed YAML — the edit UI exposes them as
+# separate inputs so neither side ever has to round-trip through YAML.
+# `slug` is the stable kebab-case identifier (1..64 chars, validated at
+# the route layer); `name` is the rename-friendly display label.
+skills = Table(
+    "skills",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("slug", Text, nullable=False, unique=True),
+    Column("name", Text, nullable=False),
+    Column("description", Text, nullable=False),
+    # Optional `when_to_use` frontmatter field — guidance the user
+    # writes for themselves, never injected into the prompt.
+    Column("when_to_use", Text),
+    Column("body_markdown", Text, nullable=False),
+    Column("created_at", Integer, nullable=False),
+    Column("updated_at", Integer, nullable=False),
+)
+
+
+# Per-persona skill activation. `ordering` drives composition order in
+# the resolver (LLMs are order-sensitive); `enabled` is a soft toggle so
+# the user can mute a skill without forgetting the association.
+# Both FKs CASCADE: deleting either side removes the link row.
+persona_skills = Table(
+    "persona_skills",
+    metadata,
+    Column(
+        "persona_id",
+        Integer,
+        ForeignKey("personas.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "skill_id",
+        Integer,
+        ForeignKey("skills.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("ordering", Integer, nullable=False, server_default="0"),
+    Column("enabled", Integer, nullable=False, server_default="1"),
+)
+
+Index(
+    "idx_persona_skills_persona",
+    persona_skills.c.persona_id,
+    persona_skills.c.ordering,
+)
