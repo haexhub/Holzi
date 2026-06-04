@@ -31,6 +31,7 @@ from hermes import capabilities
 from hermes.repository import channels as channels_repo
 from hermes.repository import personas as personas_repo
 from hermes.repository import skills as skills_repo
+from hermes.repository.models import Persona
 
 # Single source of truth for known channels. Key = exact string used as
 # the channel identifier by the call-sites and persisted in the
@@ -178,21 +179,58 @@ async def ensure_backfill(engine: AsyncEngine) -> None:
     await channels_repo.ensure_seeded(engine)
 
 
+def _persona_sections(persona: Persona) -> list[tuple[str, str]]:
+    """Hardcoded section order Soul → Identity → Agents.
+
+    The resolver filters out tuples whose body is empty after `.strip()`
+    so the section header isn't rendered for an empty fragment. Order is
+    deliberately not configurable — every persona renders sections in
+    the same sequence so prompt-engineering effects are stable.
+    """
+    return [
+        ("## Soul", persona.soul),
+        ("## Identity", persona.identity),
+        ("## Agents", persona.agents),
+    ]
+
+
 async def get_effective_system_prompt(
     channel: str, engine: AsyncEngine
 ) -> str:
     """Compose the system prompt the agent should run with for `channel`.
 
-    Composition order (Plan 33 extends 29-A by inserting skills between
-    persona and capability_index):
+    Composition order (Plan 36 extends 33 by splitting persona into
+    three labelled fragments):
 
-    `persona.prompt + skills_block + capability_index + channel.prompt`
+    ```
+    ## Soul
+    <persona.soul>
+
+    ## Identity
+    <persona.identity>
+
+    ## Agents
+    <persona.agents>
+
+    <skills_block>
+
+    <capability_index>
+
+    <channel.prompt>
+    ```
+
+    Persona-section rules:
+    - Each section is rendered as ``"## Header\\n<body>"``.
+    - Sections with empty (post-`.strip()`) body are omitted entirely —
+      no leading header without body, no double separator.
+    - Order is fixed Soul → Identity → Agents regardless of how the
+      `Persona` dataclass was constructed.
 
     `skills_block` is the join of every active (enabled=1) skill body
-    attached to the resolved persona, in `ordering` order. Any of the
-    first three components may be empty/missing and is then skipped —
-    the separator stays consistent between the parts that actually
-    appear.
+    attached to the resolved persona, in `ordering` order. `index`,
+    `skills_block`, and the persona-section group may each be empty and
+    are then skipped; the ``"\\n\\n"`` separator stays consistent between
+    the parts that actually appear.
 
     Persona resolution:
     1. `channel_prompts.default_persona_id` if set and the row exists.
@@ -235,8 +273,16 @@ async def get_effective_system_prompt(
 
     index = capabilities.load_capability_index()
     parts: list[str] = []
-    if persona is not None and persona.prompt.strip():
-        parts.append(persona.prompt)
+
+    if persona is not None:
+        persona_parts: list[str] = []
+        for header, body in _persona_sections(persona):
+            body = body.strip()
+            if body:
+                persona_parts.append(f"{header}\n{body}")
+        if persona_parts:
+            parts.append("\n\n".join(persona_parts))
+
     if skills_block:
         parts.append(skills_block)
     if index:
