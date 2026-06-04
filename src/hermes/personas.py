@@ -22,6 +22,7 @@ go through this single function.
 """
 from typing import Final
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import capabilities
@@ -62,6 +63,45 @@ DEFAULT_PERSONA_PROMPT: Final[str] = (
     "Du bist Hermes, ein persönlicher KI-Assistent für Martin. "
     "Sei direkt, präzise und technisch."
 )
+
+# Plan 36: persona prompt split into three typed fragments. The default
+# constants exist alongside DEFAULT_PERSONA_PROMPT until Task 5 reshapes
+# `ensure_backfill` to seed the new columns.
+DEFAULT_PERSONA_SOUL: Final[str] = (
+    "Du bist direkt, präzise und technisch. Keine Floskeln, keine "
+    "Höflichkeitswulst — der User ist Senior-Engineer."
+)
+DEFAULT_PERSONA_IDENTITY: Final[str] = (
+    "Du bist Hermes, ein persönlicher KI-Assistent."
+)
+DEFAULT_PERSONA_AGENTS: Final[str] = (
+    "Du befolgst Test-Driven-Development: erst die Tests, dann die "
+    "Implementierung. Du fragst nach, bevor du destruktive Aktionen "
+    "ausführst."
+)
+
+
+async def _migrate_prompt_to_fragments(engine: AsyncEngine) -> None:
+    """One-shot Plan 36 migration: copy `personas.prompt` into `identity`
+    and drop the old column.
+
+    Idempotent — on a fresh DB the column never existed, on an
+    already-migrated DB the PRAGMA check returns no `prompt` row, and
+    this is a no-op. The new columns (`soul`/`identity`/`agents`) are
+    expected to already exist on the table at call time;
+    `metadata.create_all` adds them on every boot via `schema.py`. Safe
+    to delete after every deployed box has booted once on Plan-36 code.
+    """
+    async with engine.connect() as conn:
+        cols = (await conn.execute(text("PRAGMA table_info(personas)"))).all()
+        has_prompt = any(row.name == "prompt" for row in cols)
+    if not has_prompt:
+        return
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE personas SET identity = prompt WHERE identity = ''")
+        )
+        await conn.execute(text("ALTER TABLE personas DROP COLUMN prompt"))
 
 
 async def ensure_backfill(engine: AsyncEngine) -> None:

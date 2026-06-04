@@ -364,12 +364,40 @@ personas = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("name", Text, nullable=False, unique=True),
-    Column("prompt", Text, nullable=False),
+    # Plan 36: prompt-Blob aufgesplittet in drei Fragments. Jede
+    # Spalte ist NOT NULL DEFAULT '' — Backfill (siehe Lifespan)
+    # kopiert den alten `prompt` in `identity`.
+    Column("soul", Text, nullable=False, server_default=""),
+    Column("identity", Text, nullable=False, server_default=""),
+    Column("agents", Text, nullable=False, server_default=""),
     # 0 | 1 — single-default trigger keeps at most one row with 1.
     Column("is_default", Integer, nullable=False, server_default="0"),
     Column("created_at", Integer, nullable=False),
     Column("updated_at", Integer, nullable=False),
 )
+
+
+# Plan 36: Audit-Trail. Eine Row pro Persona-Write. `snapshot_json`
+# enthält `{name, soul, identity, agents}` zum Zeitpunkt des Writes
+# (NICHT `is_default` — das ist eine Sortier-Eigenschaft, keine
+# Identität). `author` ist heute fix `'user'`; Wave C ersetzt mit
+# echter user_id.
+persona_history = Table(
+    "persona_history",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column(
+        "persona_id",
+        Integer,
+        ForeignKey("personas.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("author", Text, nullable=False, server_default="user"),
+    Column("snapshot_json", Text, nullable=False),
+    Column("created_at", Integer, nullable=False),
+)
+
+Index("idx_persona_history_persona", persona_history.c.persona_id)
 
 
 # One row per channel key in `hermes.personas.CHANNEL_REGISTRY`. Seeded

@@ -146,15 +146,39 @@ class Workspace:
 
 @dataclass(frozen=True, slots=True)
 class Persona:
-    """A row from `personas` (Plan 29-A). `is_default` is the global
-    fallback persona; at most one row may have it set (DB trigger)."""
+    """A row from `personas` (Plan 29-A → fragments per Plan 36).
+
+    The original single `prompt` column was split into three typed
+    fragments (`soul`, `identity`, `agents`); the resolver composes
+    them at runtime. `is_default` is the global fallback persona; at
+    most one row may have it set (DB trigger).
+    """
 
     id: int
     name: str
-    prompt: str
+    soul: str
+    identity: str
+    agents: str
     is_default: bool
     created_at: int
     updated_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class PersonaHistory:
+    """A row from `persona_history` (Plan 36).
+
+    `snapshot_json` is the raw JSON string of
+    `{name, soul, identity, agents}`; the repo layer parses it for
+    callers that need fields. `author` is fixed `'user'` today —
+    Wave C swaps it for a real user_id.
+    """
+
+    id: int
+    persona_id: int
+    author: str
+    snapshot_json: str
+    created_at: int
 
 
 @dataclass(frozen=True, slots=True)
