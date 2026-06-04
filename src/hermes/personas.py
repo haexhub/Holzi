@@ -20,6 +20,8 @@ chosen persona's prompt with the chosen channel's prompt at runtime —
 the four call-sites that used to inline `*_SYSTEM_PROMPT` constants now
 go through this single function.
 """
+import json
+import time
 from typing import Final
 
 from sqlalchemy import text
@@ -82,25 +84,77 @@ DEFAULT_PERSONA_AGENTS: Final[str] = (
 
 
 async def _migrate_prompt_to_fragments(engine: AsyncEngine) -> None:
-    """One-shot Plan 36 migration: copy `personas.prompt` into `identity`
-    and drop the old column.
+    """One-shot lifespan migration: bring `personas` up to the Plan-36
+    shape (soul/identity/agents) from the pre-Plan-36 single-`prompt`
+    shape.
 
-    Idempotent — on a fresh DB the column never existed, on an
-    already-migrated DB the PRAGMA check returns no `prompt` row, and
-    this is a no-op. The new columns (`soul`/`identity`/`agents`) are
-    expected to already exist on the table at call time;
-    `metadata.create_all` adds them on every boot via `schema.py`. Safe
-    to delete after every deployed box has booted once on Plan-36 code.
+    Plan-36 changes the `personas` table from a single `prompt` text
+    column to three typed fragments (`soul`, `identity`, `agents`).
+    SQLAlchemy's `metadata.create_all` issues `CREATE TABLE IF NOT
+    EXISTS` and does NOT alter existing tables, so on a legacy DB the
+    three new columns are missing — this helper adds them, copies the
+    old `prompt` into `identity`, writes a baseline `persona_history`
+    row per migrated persona (so the audit trail is complete from
+    day-one), and finally drops the `prompt` column.
+
+    Idempotent: a single `PRAGMA table_info(personas)` check on the
+    `prompt` column drives the whole branch — present means "legacy
+    DB, run migration"; absent means "already on Plan-36 shape, no-op".
+    Safe to delete once every deployed box has booted on Plan-36 code
+    (tracked as a follow-up; see Plan 36 Risk Register).
+
+    The `WHERE identity = ''` guard on the UPDATE prevents clobbering
+    any `identity` content a user may have written between two boot
+    cycles in the theoretical "partial migration → crash → restart"
+    scenario.
     """
     async with engine.connect() as conn:
         cols = (await conn.execute(text("PRAGMA table_info(personas)"))).all()
         has_prompt = any(row.name == "prompt" for row in cols)
     if not has_prompt:
         return
+
     async with engine.begin() as conn:
+        # ALTER TABLE ADD COLUMN is idempotent only through the PRAGMA
+        # guard above; SQLite has no "ADD COLUMN IF NOT EXISTS".
+        for col in ("soul", "identity", "agents"):
+            await conn.execute(
+                text(
+                    f"ALTER TABLE personas ADD COLUMN {col} "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+            )
         await conn.execute(
             text("UPDATE personas SET identity = prompt WHERE identity = ''")
         )
+        # Baseline history row per migrated persona so the Verlauf-Tab
+        # shows the migrated-from state. author='migration' distinguishes
+        # this from user-edit ('user') and seed ('system') rows. The
+        # snapshot reflects the POST-migration values (i.e. soul='',
+        # identity=<legacy prompt>, agents='').
+        now = int(time.time())
+        rows = (
+            await conn.execute(
+                text("SELECT id, name, soul, identity, agents FROM personas")
+            )
+        ).all()
+        for row in rows:
+            snapshot = json.dumps(
+                {
+                    "name": row.name,
+                    "soul": row.soul,
+                    "identity": row.identity,
+                    "agents": row.agents,
+                }
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO persona_history "
+                    "(persona_id, author, snapshot_json, created_at) "
+                    "VALUES (:pid, 'migration', :snap, :ts)"
+                ),
+                {"pid": row.id, "snap": snapshot, "ts": now},
+            )
         await conn.execute(text("ALTER TABLE personas DROP COLUMN prompt"))
 
 
