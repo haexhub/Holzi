@@ -78,8 +78,7 @@ async def test_diagnostics_default_state_flags_missing_setup(
     client: httpx.AsyncClient,
 ) -> None:
     """Fresh boot: no LLM credential, no workspace roots, no sandbox socket
-    → warnings, but db + scheduler are ok. Messenger is an optional bridge,
-    so its absence stays `ok` and doesn't pollute the overall badge."""
+    → warnings, but db + scheduler are ok."""
     body = (await client.get("/api/diagnostics", headers=AUTH)).json()
 
     assert _check(body, "database")["status"] == "ok"

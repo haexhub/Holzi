@@ -859,7 +859,7 @@ async def test_retry_rejects_non_web_conversation(
         f"/api/conversations/{convo.id}/retry", headers=AUTH
     )
     assert response.status_code == 400
-    # The signal thread is untouched.
+    # The task conversation is untouched.
     msgs = await messages.list_by_conversation(app.state.db, convo.id)
     assert [(m.role, m.content) for m in msgs] == [
         ("user", "hi"),
