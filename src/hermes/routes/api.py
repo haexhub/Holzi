@@ -231,14 +231,11 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
 
     tools = build_tool_catalog(
         db=db,
-        signal_client=request.app.state.signal_client,
-        signal_self_number=request.app.state.signal_self_number,
         external_http=request.app.state.external_http,
         brave_api_key=request.app.state.brave_api_key,
         mcp_manager=request.app.state.mcp_servers_manager,
         encryptor=request.app.state.encryptor,
         tool_catalog_provider=lambda: request.app.state.tool_catalog,
-        current_channel=WEB_CHANNEL,
     )
 
     # Per-request cancellation handle. The registry on app.state maps

@@ -425,12 +425,9 @@ def _refresh_catalog(request: Request) -> None:
     state = request.app.state
     state.tool_catalog = build_tool_catalog(
         db=state.db,
-        signal_client=state.signal_client,
-        signal_self_number=state.signal_self_number,
         external_http=state.external_http,
         brave_api_key=state.brave_api_key,
         mcp_manager=state.mcp_servers_manager,
         encryptor=state.encryptor,
         tool_catalog_provider=lambda: state.tool_catalog,
-        current_channel=None,
     )

@@ -268,17 +268,17 @@ async def test_reset_channel_prompt_restores_default(
     client: httpx.AsyncClient,
 ) -> None:
     await client.put(
-        "/api/channels/signal",
+        "/api/channels/task",
         headers=AUTH,
-        json={"prompt": "Custom signal prompt."},
+        json={"prompt": "Custom task prompt."},
     )
 
     response = await client.post(
-        "/api/channels/signal/reset", headers=AUTH
+        "/api/channels/task/reset", headers=AUTH
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["prompt"] == CHANNEL_REGISTRY["signal"]["default_prompt"]
+    assert body["prompt"] == CHANNEL_REGISTRY["task"]["default_prompt"]
     assert body["is_default_prompt"] is True
 
 

@@ -1,10 +1,10 @@
 """GET /api/tools — read-only inventory of the agent's tool catalog (Plan 31).
 
-Surfaces what `app.state.tool_catalog` (assembled once in the lifespan with
-`current_channel=None`) currently exposes. The `/settings/skills` page
-renders this as a flat alphabetical list with `parameters_schema` viewers
-and approval badges; Plan 29-E will reuse it as the data source for the
-persona tool-allowlist multi-select.
+Surfaces what `app.state.tool_catalog` (assembled once in the lifespan)
+currently exposes. The `/settings/skills` page renders this as a flat
+alphabetical list with `parameters_schema` viewers and approval badges;
+Plan 29-E will reuse it as the data source for the persona
+tool-allowlist multi-select.
 
 The endpoint never builds the catalog itself — it reads the same list MCP
 exposes, so the two surfaces can never drift. Sorting and the `source`

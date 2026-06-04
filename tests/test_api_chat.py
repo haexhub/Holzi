@@ -367,18 +367,19 @@ async def test_api_chat_streams_text_chunks_incrementally(
 async def test_api_chat_rejects_non_web_conversation(
     client: httpx.AsyncClient,
 ) -> None:
-    """Channel semantics: /api/chat must not inject web messages into Signal threads."""
-    signal_convo = await conversations.create(app.state.db, channel="signal", ts=1000)
+    """Channel semantics: /api/chat is web-only and must not write into
+    conversations belonging to other channels (e.g. scheduled-task runs)."""
+    task_convo = await conversations.create(app.state.db, channel="task", ts=1000)
     _install_upstream_responses([_assistant_oneshot("never reached")])
 
     response = await client.post(
         "/api/chat",
         headers=AUTH,
-        json={"message": "hijack", "conversation_id": signal_convo.id},
+        json={"message": "hijack", "conversation_id": task_convo.id},
     )
     assert response.status_code == 400
-    # Nothing should have been written into the signal conversation.
-    msgs = await messages.list_by_conversation(app.state.db, signal_convo.id)
+    # Nothing should have been written into the task conversation.
+    msgs = await messages.list_by_conversation(app.state.db, task_convo.id)
     assert msgs == []
 
 
@@ -718,59 +719,6 @@ async def test_api_chat_cancel_endpoint_sets_event_and_returns_204(
         app.state.chat_runs.pop("unit-test-run", None)
 
 
-async def test_api_chat_cross_channel_send_filters_web_target(
-    client: httpx.AsyncClient,
-) -> None:
-    """cross_channel_send should refuse to write back to the channel the
-    /api/chat request itself uses (recursion guard)."""
-    # Make the agent call cross_channel_send(channel='web', ...) and observe
-    # the error the tool returns in the second LLM round-trip.
-    tool_call = {
-        "id": "call_loop",
-        "type": "function",
-        "function": {
-            "name": "cross_channel_send",
-            "arguments": json.dumps({"channel": "web", "message": "hello me"}),
-        },
-    }
-    first_resp = {
-        "id": "x",
-        "model": "claude-opus-4-7",
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [tool_call],
-                },
-                "finish_reason": "tool_calls",
-            }
-        ],
-    }
-    seen = _install_upstream_responses([first_resp, _assistant_oneshot("done")])
-
-    # cross_channel_send is approval-gated (Plan 09); allow it so the agent
-    # reaches the recursion guard this test is about.
-    resolver = asyncio.create_task(_resolve_first_pending_approval("allow_once"))
-    async with client.stream(
-        "POST", "/api/chat", headers=AUTH, json={"message": "loop me"}
-    ) as response:
-        body = b""
-        async for chunk in response.aiter_bytes():
-            body += chunk
-        assert response.status_code == 200
-    await resolver
-
-    # The tool result that came back to the LLM in the second iteration
-    # should contain an error mentioning the current channel.
-    second_req = seen[1]
-    tool_msgs = [m for m in second_req["messages"] if m.get("role") == "tool"]
-    assert len(tool_msgs) == 1
-    assert "web" in tool_msgs[0]["content"]
-    assert "error" in tool_msgs[0]["content"].lower()
-
-
 # ---------------------------------------------------------------------------
 # POST /api/conversations/{id}/retry
 # ---------------------------------------------------------------------------
@@ -894,7 +842,7 @@ async def test_retry_rejects_conversation_without_user_message(
 async def test_retry_rejects_non_web_conversation(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="signal", ts=1000)
+    convo = await conversations.create(app.state.db, channel="task", ts=1000)
     await messages.append(
         app.state.db, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -1064,7 +1012,7 @@ async def test_edit_rejects_message_from_other_conversation(
 async def test_edit_rejects_non_web_conversation(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="signal", ts=1000)
+    convo = await conversations.create(app.state.db, channel="task", ts=1000)
     user = await messages.append(
         app.state.db, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -1337,7 +1285,13 @@ async def test_api_chat_emits_approval_required_and_resumes_on_allow(
     _install_upstream_responses(
         [
             _tool_call_first_response(
-                "cross_channel_send", {"channel": "signal", "message": "hi"}
+                "mcp_install",
+                {
+                    "name": "test-mcp",
+                    "display_name": "Test",
+                    "transport": "http",
+                    "url": "http://example.invalid/mcp",
+                },
             ),
             _assistant_oneshot("done"),
         ]
@@ -1362,8 +1316,13 @@ async def test_api_chat_emits_approval_required_and_resumes_on_allow(
 
     approval = next(d for n, d in events if n == "approval_required")
     assert approval["call_id"] == "call_evt"
-    assert approval["name"] == "cross_channel_send"
-    assert approval["arguments"] == {"channel": "signal", "message": "hi"}
+    assert approval["name"] == "mcp_install"
+    assert approval["arguments"] == {
+        "name": "test-mcp",
+        "display_name": "Test",
+        "transport": "http",
+        "url": "http://example.invalid/mcp",
+    }
     assert approval["approval_id"]
     assert approval["reason"]
 
@@ -1379,7 +1338,13 @@ async def test_api_chat_deny_skips_tool_and_feeds_denied_result(
     seen = _install_upstream_responses(
         [
             _tool_call_first_response(
-                "cross_channel_send", {"channel": "signal", "message": "hi"}
+                "mcp_install",
+                {
+                    "name": "test-mcp",
+                    "display_name": "Test",
+                    "transport": "http",
+                    "url": "http://example.invalid/mcp",
+                },
             ),
             _assistant_oneshot("ok, won't send"),
         ]

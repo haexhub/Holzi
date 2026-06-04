@@ -22,7 +22,7 @@ conversations = Table(
     "conversations",
     metadata,
     Column("id", Integer, primary_key=True),
-    # 'signal' | 'web' | 'vscode' | 'telegram'
+    # 'web' | 'task' (extend via hermes.personas.CHANNEL_REGISTRY)
     Column("channel", Text, nullable=False),
     Column("external_id", Text),
     Column("title", Text),
@@ -204,14 +204,8 @@ llm_credentials = Table(
 )
 
 
-# Messenger inboxes. One row per (provider) account. Signal stores only
-# the discovered phone number — the actual linking secret lives in the
-# signal-cli container's volume, not here. Telegram stores an AES-GCM
-# encrypted bot token (same hex-string pattern as llm_credentials so the
-# whole DB stays text-only). The partial unique index in schema.sql
-# enforces "at most one active account per provider".
-# Persistent chat-run history. One row per /api/chat (and per signal /
-# telegram worker turn) — the in-memory `app.state.chat_runs` cancel
+# Persistent chat-run history. One row per /api/chat call (or per task
+# scheduler firing) — the in-memory `app.state.chat_runs` cancel
 # registry from Plan 03 becomes a thin index over rows whose status is
 # still 'running'. Failure rows carry enough context (code + message +
 # trace) for a "Recent failures" panel and post-hoc debugging without
@@ -232,9 +226,9 @@ agent_runs = Table(
         ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=False,
     ),
-    # 'web' | 'signal' | 'telegram' | 'vscode' — kept as Text instead of
-    # an enum because the channel set is shared with conversations and
-    # evolves there.
+    # 'web' | 'task' (see hermes.personas.CHANNEL_REGISTRY) — kept as
+    # Text instead of an enum because the channel set is shared with
+    # conversations and evolves there.
     Column("channel", Text, nullable=False),
     Column("model", Text, nullable=False),
     # unix epoch seconds.
@@ -258,8 +252,8 @@ agent_runs = Table(
     Column("input_tokens", Integer),
     Column("output_tokens", Integer),
     # Set when this run was triggered by an `agent_tasks` row (scheduled or
-    # run-now). NULL for plain /api/chat or signal/telegram-driven runs. SET
-    # NULL on delete: a deleted task shouldn't drag its run history with it.
+    # run-now). NULL for plain /api/chat-driven runs. SET NULL on delete:
+    # a deleted task shouldn't drag its run history with it.
     Column(
         "agent_task_id",
         Integer,
@@ -392,33 +386,6 @@ channel_prompts = Table(
         Integer,
         ForeignKey("personas.id", ondelete="SET NULL"),
     ),
-    Column("updated_at", Integer, nullable=False),
-)
-
-
-messenger_accounts = Table(
-    "messenger_accounts",
-    metadata,
-    Column("id", Integer, primary_key=True),
-    # 'signal' | 'telegram'
-    Column("provider", Text, nullable=False),
-    # 0 | 1 — at most one row per provider may be active (partial uq idx).
-    Column("is_active", Integer, nullable=False, server_default="0"),
-    # Signal: E.164 discovered after QR-link-as-secondary completes.
-    Column("phone_number", Text),
-    # Telegram-only display fields. bot_username comes from getMe after
-    # the token is validated; user-facing label only — the token itself
-    # lives in bot_token_*.
-    Column("bot_username", Text),
-    # Telegram bot token ciphertext. Hex strings, same pattern as
-    # llm_credentials.api_key_*.
-    Column("bot_token_iv", Text),
-    Column("bot_token_tag", Text),
-    Column("bot_token_data", Text),
-    # Optional allowlist of chat ids the bot may respond to. JSON array
-    # of stringified ints. NULL = respond to any chat the bot is in.
-    Column("allowed_chat_ids", Text),
-    Column("created_at", Integer, nullable=False),
     Column("updated_at", Integer, nullable=False),
 )
 

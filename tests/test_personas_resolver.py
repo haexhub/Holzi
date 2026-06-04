@@ -38,9 +38,9 @@ async def test_custom_channel_prompt_composes_with_default_persona(
     conn: AsyncEngine,
 ) -> None:
     await ensure_backfill(conn)
-    await channels_repo.update(conn, "signal", prompt="single-line only")
+    await channels_repo.update(conn, "task", prompt="single-line only")
 
-    prompt = await get_effective_system_prompt("signal", conn)
+    prompt = await get_effective_system_prompt("task", conn)
     assert prompt == f"{DEFAULT_PERSONA_PROMPT}\n\nsingle-line only"
 
 
@@ -73,15 +73,15 @@ async def test_deleting_channel_persona_falls_back_to_global_default(
     custom = await personas_repo.create(
         conn, name="Custom", prompt="custom voice", is_default=False
     )
-    await channels_repo.update(conn, "telegram", default_persona_id=custom.id)
+    await channels_repo.update(conn, "web", default_persona_id=custom.id)
 
     deleted = await personas_repo.delete(conn, custom.id)
     assert deleted is True
 
-    prompt = await get_effective_system_prompt("telegram", conn)
+    prompt = await get_effective_system_prompt("web", conn)
     expected = (
         f"{DEFAULT_PERSONA_PROMPT}\n\n"
-        f"{CHANNEL_REGISTRY['telegram']['default_prompt']}"
+        f"{CHANNEL_REGISTRY['web']['default_prompt']}"
     )
     assert prompt == expected
 

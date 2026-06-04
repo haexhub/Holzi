@@ -6,8 +6,8 @@ This module is the single source of truth for two intertwined concepts:
   prompt + an `is_default` flag. CRUD lives in
   `hermes.repository.personas`.
 - **Channel prompts** (DB rows in `channel_prompts`) — the *how* of each
-  channel: format/length/tone overlay for `web`, `task`, `signal`,
-  `telegram`. CRUD lives in `hermes.repository.channels`.
+  channel: format/length/tone overlay for `web` and `task` today. CRUD
+  lives in `hermes.repository.channels`.
 
 `CHANNEL_REGISTRY` enumerates the channels the codebase knows about and
 provides the default prompt text used when a channel row is first
@@ -50,20 +50,6 @@ CHANNEL_REGISTRY: Final[dict[str, dict[str, str]]] = {
             "Du führst einen geplanten Task autonom aus. Es gibt keinen "
             "User am anderen Ende. Antworte knapp und fokussiert auf das "
             "Resultat."
-        ),
-    },
-    "signal": {
-        "label": "Signal",
-        "default_prompt": (
-            "Du antwortest über Signal Note-to-Self. 1–3 kurze Sätze, "
-            "kein Markdown, keine Tabellen, kein Code-Fence ohne Not."
-        ),
-    },
-    "telegram": {
-        "label": "Telegram",
-        "default_prompt": (
-            "Du antwortest über einen Telegram-Bot. 1–3 kurze Sätze, "
-            "kein Markdown, keine Tabellen, kein Code-Fence ohne Not."
         ),
     },
 }

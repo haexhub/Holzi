@@ -9,12 +9,11 @@ to load the full detail file.
 
 Keep these terms in their original form regardless of the user's
 language: **Workspaces**, **Notes**, **Tasks**, **Personas**,
-**Channels**, **Signal**, **Telegram**, **Sandbox**, **Hermes**.
+**Channels**, **Sandbox**, **Hermes**.
 
 ## Topics
 
 - `workspaces` — Project files Hermes can read.
-- `messengers` — Signal and Telegram channels.
 - `memory` — Persistent notes Hermes can search and write to.
 - `tasks` — One-shot or recurring scheduled agent runs.
 

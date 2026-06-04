@@ -78,7 +78,6 @@ async def test_mcp_manifest_returns_catalog(client: httpx.AsyncClient) -> None:
         "save_note",
         "get_note",
         "find_notes",
-        "cross_channel_send",
     } <= names
 
 
@@ -146,7 +145,7 @@ async def test_mcp_endpoint_lists_tools_via_jsonrpc(
     body = list_response.json()
     tool_names = {t["name"] for t in body["result"]["tools"]}
     assert "recall_memory" in tool_names
-    assert "cross_channel_send" in tool_names
+    assert "save_note" in tool_names
 
 
 async def test_mcp_endpoint_reflects_runtime_catalog_changes(

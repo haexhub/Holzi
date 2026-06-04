@@ -1,19 +1,16 @@
 import os
 import time
-import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import Receive, Scope, Send
 
 from hermes import __version__
-from hermes.agent import Tool, run_agent
+from hermes.agent import Tool
 from hermes.auth import bearer_auth_middleware
 from hermes.config import conversation_scratch_root, settings
 from hermes.crypto import Encryptor, resolve_master_key
@@ -23,8 +20,6 @@ from hermes.mcp_manager import McpServerManager
 from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
 from hermes.personas import ensure_backfill as ensure_personas_backfill
-from hermes.personas import get_effective_system_prompt
-from hermes.repository import llm_credentials as llm_credentials_repo
 from hermes.repository import sandbox_crashes as sandbox_crashes_repo
 from hermes.repository import workspaces as workspaces_repo
 from hermes.routes.api import router as api_router
@@ -35,19 +30,15 @@ from hermes.routes.llm import router as llm_router
 from hermes.routes.logs import router as logs_router
 from hermes.routes.mcp_health import router as mcp_health_router
 from hermes.routes.mcp_servers import router as mcp_servers_router
-from hermes.routes.messenger import router as messenger_router
 from hermes.routes.preferences import router as preferences_router
 from hermes.routes.sandbox import router as sandbox_router
 from hermes.routes.skills import router as skills_router
 from hermes.routes.tools import router as tools_router
 from hermes.routes.workspace import router as workspace_router
 from hermes.routes.workspaces import router as workspaces_router
-from hermes.run_tracker import track_run
 from hermes.sandbox import WorkspaceCrash
 from hermes.sandbox.factory import build_sandbox_manager
 from hermes.scheduler import AgentTaskScheduler, ConversationSweepScheduler
-from hermes.signal.lifecycle import rebuild_signal_worker_from_db
-from hermes.telegram.lifecycle import rebuild_telegram_worker_from_db
 from hermes.tool_catalog import build_tool_catalog
 from hermes.upstream import build_fallback_client, rebuild_upstream_from_db
 
@@ -94,7 +85,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         version=__version__,
         db_path=settings.db_path,
         llm_url=settings.llm_url,
-        signal_enabled=bool(settings.signal_number),
         model=settings.model,
     )
     app.state.db = None
@@ -114,13 +104,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.encryptor = None
     app.state.oauth_driver = None
     app.state.upstream = None
-    app.state.signal_http = None
-    app.state.signal_client = None
-    app.state.signal_self_number = None
-    app.state.signal_worker = None
-    app.state.telegram_worker = None
-    app.state.telegram_bot_username = None
-    app.state.telegram_allowed_chat_ids = None
     app.state.external_http = None
     app.state.brave_api_key = None
     app.state.scheduler = None
@@ -187,97 +170,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             fallback_llm_api_key=settings.llm_api_key,
         )
 
-        # Always create the signal-cli-rest-api http client — the /link
-        # endpoints under /api/messenger need it even when no number is
-        # linked yet. The actual worker only spins up once a row in
-        # messenger_accounts is marked active.
-        app.state.signal_http = httpx.AsyncClient(base_url=settings.signal_url, timeout=60.0)
-
-        async def signal_agent_runner(
-            db: AsyncEngine, conversation_id: int
-        ) -> str:
-            model = (
-                await llm_credentials_repo.get_active_model(db)
-            ) or settings.model
-            run_id = uuid.uuid4().hex
-            metrics: dict[str, Any] = {}
-            async with track_run(
-                db,
-                run_id=run_id,
-                conversation_id=conversation_id,
-                channel="signal",
-                model=model,
-                metrics=metrics,
-            ):
-                return await run_agent(
-                    upstream=app.state.upstream,
-                    db=db,
-                    conversation_id=conversation_id,
-                    system_prompt=await get_effective_system_prompt(
-                        "signal", db
-                    ),
-                    model=model,
-                    metrics=metrics,
-                )
-
-        # Registered on app.state so the hot-reload path in
-        # signal/lifecycle.py can rebuild the worker on activate/delete.
-        app.state.signal_agent_runner_factory = signal_agent_runner
-
-        # Start the worker if an active signal account already exists in
-        # the DB. Legacy fallback: if HERMES_SIGNAL_NUMBER is set but no
-        # DB row exists, materialise one — keeps existing env-driven
-        # local-dev setups working until the UI link flow takes over.
-        if settings.signal_number:
-            from hermes.repository import messenger as _messenger_repo
-
-            existing = await _messenger_repo.get_by_phone(
-                app.state.db, settings.signal_number
-            )
-            if existing is None:
-                created = await _messenger_repo.create_signal(
-                    app.state.db, settings.signal_number
-                )
-                await _messenger_repo.activate(app.state.db, created.id)
-                logger.info(
-                    "signal_env_account_seeded", phone_number=settings.signal_number
-                )
-        await rebuild_signal_worker_from_db(app)
-
         app.state.external_http = httpx.AsyncClient(timeout=20.0)
         app.state.brave_api_key = settings.brave_api_key or None
-
-        async def telegram_agent_runner(
-            db: AsyncEngine, conversation_id: int
-        ) -> str:
-            model = (
-                await llm_credentials_repo.get_active_model(db)
-            ) or settings.model
-            run_id = uuid.uuid4().hex
-            metrics: dict[str, Any] = {}
-            async with track_run(
-                db,
-                run_id=run_id,
-                conversation_id=conversation_id,
-                channel="telegram",
-                model=model,
-                metrics=metrics,
-            ):
-                return await run_agent(
-                    upstream=app.state.upstream,
-                    db=db,
-                    conversation_id=conversation_id,
-                    system_prompt=await get_effective_system_prompt(
-                        "telegram", db
-                    ),
-                    model=model,
-                    metrics=metrics,
-                )
-
-        # Telegram worker hot-reload depends on external_http, so this
-        # has to come after the external_http create above.
-        app.state.telegram_agent_runner_factory = telegram_agent_runner
-        await rebuild_telegram_worker_from_db(app)
 
         # Plan 32: spin up registered external MCP servers BEFORE the
         # catalog is assembled so their tools land in `app.state.tool_catalog`
@@ -301,14 +195,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         def _reassemble_catalog() -> None:
             app.state.tool_catalog = build_tool_catalog(
                 db=app.state.db,
-                signal_client=app.state.signal_client,
-                signal_self_number=app.state.signal_self_number,
                 external_http=app.state.external_http,
                 brave_api_key=app.state.brave_api_key,
                 mcp_manager=app.state.mcp_servers_manager,
                 encryptor=app.state.encryptor,
                 tool_catalog_provider=_live_catalog,
-                current_channel=None,
             )
 
         app.state.mcp_servers_manager = McpServerManager(
@@ -318,22 +209,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         await app.state.mcp_servers_manager.start_all_enabled()
 
-        # MCP and the /mcp/manifest surface use a current_channel=None catalog
-        # — external callers (Cline, HaexChat) don't carry a single
-        # "current channel" notion. /api/chat rebuilds per request with
-        # current_channel="web" via build_tool_catalog() for the recursion
-        # guard. (Explicit build covers the zero-enabled-servers case, where
-        # start_all_enabled never fires _reassemble_catalog.)
+        # Explicit build covers the zero-enabled-servers case, where
+        # start_all_enabled never fires _reassemble_catalog.
         app.state.tool_catalog = build_tool_catalog(
             db=app.state.db,
-            signal_client=app.state.signal_client,
-            signal_self_number=app.state.signal_self_number,
             external_http=app.state.external_http,
             brave_api_key=app.state.brave_api_key,
             mcp_manager=app.state.mcp_servers_manager,
             encryptor=app.state.encryptor,
             tool_catalog_provider=_live_catalog,
-            current_channel=None,
         )
 
         # Plan 16: scheduler drives `agent_tasks` (replaces the old reminder
@@ -345,14 +229,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             upstream_provider=lambda: app.state.upstream,
             tool_factory=lambda: build_tool_catalog(
                 db=app.state.db,
-                signal_client=app.state.signal_client,
-                signal_self_number=app.state.signal_self_number,
                 external_http=app.state.external_http,
                 brave_api_key=app.state.brave_api_key,
                 mcp_manager=app.state.mcp_servers_manager,
                 encryptor=app.state.encryptor,
                 tool_catalog_provider=_live_catalog,
-                current_channel="task",
             ),
             fallback_model=settings.model,
         )
@@ -432,12 +313,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.sandbox_backend.aclose()
         if app.state.mcp_servers_manager is not None:
             await app.state.mcp_servers_manager.stop_all()
-        if app.state.signal_worker is not None:
-            await app.state.signal_worker.stop()
-        if app.state.signal_http is not None:
-            await app.state.signal_http.aclose()
-        if app.state.telegram_worker is not None:
-            await app.state.telegram_worker.stop()
         if app.state.external_http is not None:
             await app.state.external_http.aclose()
         if app.state.upstream is not None:
@@ -452,7 +327,6 @@ app.add_middleware(BaseHTTPMiddleware, dispatch=bearer_auth_middleware)
 app.include_router(chat_router)
 app.include_router(api_router)
 app.include_router(llm_router)
-app.include_router(messenger_router)
 app.include_router(workspace_router)
 app.include_router(workspaces_router)
 app.include_router(sandbox_router)

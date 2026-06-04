@@ -5,8 +5,6 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import Tool
-from hermes.signal.client import SignalClient
-from hermes.tools.cross_channel import build_cross_channel_tools
 from hermes.tools.external import build_external_tools
 from hermes.tools.memory import build_memory_tools
 from hermes.tools.meta import build_meta_tools
@@ -21,22 +19,13 @@ if TYPE_CHECKING:  # pragma: no cover
 def build_tool_catalog(
     *,
     db: AsyncEngine,
-    signal_client: SignalClient | None,
-    signal_self_number: str | None,
     external_http: httpx.AsyncClient | None,
     brave_api_key: str | None,
     mcp_manager: "McpServerManager | None" = None,
     encryptor: "Encryptor | None" = None,
     tool_catalog_provider: Callable[[], list[Tool]] | None = None,
-    current_channel: str | None = None,
 ) -> list[Tool]:
     """Assemble the full Hermes tool catalog.
-
-    `current_channel` is forwarded to cross_channel_send so it can refuse to
-    write back into the channel that produced the agent request (the
-    recursion guard). For the MCP/manifest endpoints `current_channel` stays
-    None — they're consumed by external callers (Cline, HaexChat, ...) that
-    don't have a single "current channel" notion.
 
     `mcp_manager` is the Plan-32 external-MCP-server lifecycle manager.
     Its `aggregate_tools()` output is appended after the built-ins; tools
@@ -55,12 +44,6 @@ def build_tool_catalog(
     provider = tool_catalog_provider if tool_catalog_provider is not None else (lambda: [])
     builtin: list[Tool] = (
         build_memory_tools(db)
-        + build_cross_channel_tools(
-            db,
-            signal_client,
-            signal_self_number,
-            current_channel=current_channel,
-        )
         + build_productivity_tools(db)
         + build_external_tools(external_http, brave_api_key)
         + build_user_guide_tools()

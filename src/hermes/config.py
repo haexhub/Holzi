@@ -35,8 +35,6 @@ class Settings(BaseSettings):
     # Claude Max), OpenAI direct, OpenRouter, Ollama, a LiteLLM proxy, ...
     llm_url: str = "http://haex-claude-proxy:8080"
     llm_api_key: str = ""
-    signal_url: str = "http://signal-cli-rest-api:8080"
-    signal_number: str = ""
     model: str = "claude-opus-4-7"
     brave_api_key: str = ""
     # Default conversation TTL — 30 days from the last user message.
