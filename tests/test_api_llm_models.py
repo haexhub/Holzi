@@ -100,6 +100,7 @@ async def test_models_unknown_credential_returns_404(
         "/api/llm/credentials/9999/models", headers=AUTH
     )
     assert r.status_code == 404
+    assert r.json()["detail"] == "LLM_CREDENTIAL_NOT_FOUND"
 
 
 async def test_models_provider_error_becomes_502(
@@ -113,7 +114,9 @@ async def test_models_provider_error_becomes_502(
         f"/api/llm/credentials/{cred['id']}/models", headers=AUTH
     )
     assert r.status_code == 502
-    assert "401" in r.json()["detail"]
+    body = r.json()
+    assert body["detail"]["code"] == "LLM_PROVIDER_FAILED"
+    assert "401" in body["detail"]["params"]["message"]
 
 
 async def test_models_requires_auth(client: httpx.AsyncClient) -> None:

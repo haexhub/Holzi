@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from hermes.config import settings
+from hermes.errors import ErrorCode
 from hermes.logging import redact_secrets, redact_secrets_in_text
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
@@ -88,20 +89,23 @@ async def api_logs(
     if tail <= 0 or tail > MAX_TAIL:
         raise HTTPException(
             status_code=400,
-            detail=f"tail must be between 1 and {MAX_TAIL}",
+            detail={
+                "code": ErrorCode.REQUEST_TAIL_OUT_OF_RANGE.value,
+                "params": {"max": MAX_TAIL},
+            },
         )
     if min_level not in _LEVELS:
         raise HTTPException(
             status_code=400,
-            detail=f"min_level must be one of {sorted(_LEVELS)}",
+            detail={
+                "code": ErrorCode.REQUEST_INVALID_MIN_LEVEL.value,
+                "params": {"allowed": sorted(_LEVELS)},
+            },
         )
     if not settings.log_file:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "log tailing disabled — set HERMES_LOG_FILE to enable the "
-                "rotating file handler"
-            ),
+            detail=ErrorCode.LOGS_DISABLED.value,
         )
     path = Path(settings.log_file)
     if not path.exists():

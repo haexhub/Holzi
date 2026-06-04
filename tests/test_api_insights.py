@@ -84,6 +84,9 @@ async def test_insights_requires_auth(client: httpx.AsyncClient) -> None:
 async def test_insights_rejects_unknown_period(client: httpx.AsyncClient) -> None:
     response = await client.get("/api/insights?period=99d", headers=AUTH)
     assert response.status_code == 400
+    body = response.json()
+    assert body["detail"]["code"] == "REQUEST_INVALID_PERIOD"
+    assert "7d" in body["detail"]["params"]["allowed"]
 
 
 async def test_insights_default_period_is_7d(client: httpx.AsyncClient) -> None:

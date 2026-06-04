@@ -220,6 +220,9 @@ async def test_oauth_start_rolls_back_row_on_spawn_failure(
 
     r = await client.post("/api/llm/credentials/oauth/start", headers=AUTH)
     assert r.status_code == 500
+    body = r.json()
+    assert body["detail"]["code"] == "LLM_OAUTH_START_FAILED"
+    assert "spawn failed" in body["detail"]["params"]["message"]
     # The placeholder row should have been deleted.
     rows = await repo.list_all(app.state.db)
     assert [r for r in rows if r.mode == "oauth_claude"] == []
@@ -296,6 +299,10 @@ async def test_oauth_code_rejects_bad_code(client: httpx.AsyncClient) -> None:
     await fail
     # 400-class — caller can retry with a fresh /oauth/start.
     assert r.status_code in (400, 422), r.text
+    if r.status_code == 400:
+        body = r.json()
+        assert body["detail"]["code"] == "LLM_OAUTH_CODE_REJECTED"
+        assert "verification code invalid" in body["detail"]["params"]["message"]
 
 
 async def test_oauth_code_unknown_id_returns_404(client: httpx.AsyncClient) -> None:
@@ -306,6 +313,7 @@ async def test_oauth_code_unknown_id_returns_404(client: httpx.AsyncClient) -> N
         headers=AUTH,
     )
     assert r.status_code == 404
+    assert r.json()["detail"] == "LLM_OAUTH_FLOW_NOT_FOUND"
 
 
 # ─── /oauth/{id}/status ───────────────────────────────────────────────
@@ -350,6 +358,7 @@ async def test_oauth_status_unknown_id_returns_404(client: httpx.AsyncClient) ->
     _install_driver(_FakeClaudeSession())
     r = await client.get("/api/llm/credentials/oauth/12345/status", headers=AUTH)
     assert r.status_code == 404
+    assert r.json()["detail"] == "LLM_OAUTH_FLOW_NOT_FOUND"
 
 
 # ─── /oauth/{id}/cancel ────────────────────────────────────────────────
@@ -383,3 +392,4 @@ async def test_oauth_cancel_unknown_id_returns_404(
         "/api/llm/credentials/oauth/9999/cancel", headers=AUTH
     )
     assert r.status_code == 404
+    assert r.json()["detail"] == "LLM_OAUTH_FLOW_NOT_FOUND"

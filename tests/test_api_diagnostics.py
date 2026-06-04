@@ -57,9 +57,10 @@ async def test_diagnostics_returns_all_checks(client: httpx.AsyncClient) -> None
     ids = {c["id"] for c in body["checks"]}
     assert ids == CHECK_IDS
     for check in body["checks"]:
-        assert set(check.keys()) >= {"id", "label", "status", "message"}
+        assert set(check.keys()) >= {"id", "status", "code", "params"}
         assert check["status"] in {"ok", "warning", "error"}
-        assert isinstance(check["message"], str)
+        assert isinstance(check["code"], str)
+        assert isinstance(check["params"], dict)
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +115,9 @@ async def test_diagnostics_with_active_llm_credential_does_not_leak_secrets(
     llm = _check(body, "llm")
 
     assert llm["status"] == "ok"
+    assert llm["code"] == "DIAG_LLM_ACTIVE"
     # The display name and provider are public-ish identification — fine.
-    assert "openai" in llm["message"].lower() or "openai" in str(llm).lower()
+    assert "openai" in str(llm).lower()
     # The plaintext key and the ciphertext blob must NEVER appear anywhere
     # in the response.
     raw = response.text
@@ -149,9 +151,11 @@ async def test_diagnostics_with_workspaces_configured(
     response = await client.get("/api/diagnostics", headers=AUTH)
     workspace = _check(response.json(), "workspace")
     assert workspace["status"] == "ok"
-    # `display_name` is what the user sees on /settings/workspaces.
-    assert "Holzi" in workspace["message"]
-    assert "2 workspace" in workspace["message"]
+    assert workspace["code"] == "DIAG_WORKSPACE_CONFIGURED"
+    # `display_name` is what the user sees on /settings/workspaces — it
+    # lands verbatim in params for the FE i18n template to interpolate.
+    assert "Holzi" in workspace["params"]["names"]
+    assert workspace["params"]["count"] == 2
 
 
 async def test_diagnostics_truncates_long_workspace_list(
@@ -169,15 +173,18 @@ async def test_diagnostics_truncates_long_workspace_list(
             display_name=f"Workspace {i:02d}",
         )
     response = await client.get("/api/diagnostics", headers=AUTH)
-    msg = _check(response.json(), "workspace")["message"]
-    assert "20 workspace(s)" in msg
+    workspace = _check(response.json(), "workspace")
+    assert workspace["code"] == "DIAG_WORKSPACE_CONFIGURED"
+    params = workspace["params"]
+    assert params["count"] == 20
     # list_active orders by display_name asc — first three names appear.
-    assert "Workspace 00" in msg
-    assert "Workspace 02" in msg
-    # The 20th row is dropped (only first three rendered) + the ellipsis
-    # signals there is more.
-    assert "Workspace 19" not in msg
-    assert "…" in msg
+    names = params["names"]
+    assert "Workspace 00" in names
+    assert "Workspace 02" in names
+    # Only the first three are surfaced; the rest are dropped and a flag
+    # tells the FE template to render the truncation ellipsis itself.
+    assert "Workspace 19" not in names
+    assert params["truncated"] == 1
 
 
 async def test_diagnostics_with_env_set_but_empty_table_still_warns(
@@ -194,9 +201,12 @@ async def test_diagnostics_with_env_set_but_empty_table_still_warns(
     response = await client.get("/api/diagnostics", headers=AUTH)
     workspace = _check(response.json(), "workspace")
     assert workspace["status"] == "warning"
-    # Copy points at the UI surface, never the env name.
-    assert "/settings/workspaces" in workspace["message"]
-    assert "HERMES_WORKSPACE_ROOTS" not in workspace["message"]
+    # Plan 25-A: request-time path is DB-only — the empty-table code is
+    # what surfaces, regardless of whatever the env says.
+    assert workspace["code"] == "DIAG_WORKSPACE_NONE"
+    # `params` deliberately carries no env name — that's a backend
+    # implementation detail and would just leak deploy-shape into the API.
+    assert "HERMES_WORKSPACE_ROOTS" not in response.text
 
 
 async def test_diagnostics_excludes_archived_workspaces(
@@ -224,9 +234,13 @@ async def test_diagnostics_truncates_long_workspace_display_name(
         app.state.db, workspace_id="big", display_name=long_name
     )
     response = await client.get("/api/diagnostics", headers=AUTH)
-    msg = _check(response.json(), "workspace")["message"]
-    assert len(msg) < 200
-    assert "\n" not in msg
+    params = _check(response.json(), "workspace")["params"]
+    name = params["names"][0]
+    # Defence-in-depth: even with a 500-char + multiline display_name, the
+    # entry that lands in `params` must be a bounded single line — the FE
+    # i18n template trusts the backend not to ship runaway text.
+    assert len(name) < 200
+    assert "\n" not in name
 
 
 # ---------------------------------------------------------------------------
@@ -291,10 +305,10 @@ async def test_diagnostics_truncates_long_display_name(
     await llm_repo.activate(app.state.db, cred.id)
 
     response = await client.get("/api/diagnostics", headers=AUTH)
-    msg = _check(response.json(), "llm")["message"]
-    # Length cap (48) + the surrounding "active credential: … (model …)"
-    # chrome stays under a comfortable ceiling.
-    assert len(msg) < 120
-    assert "\n" not in msg
+    params = _check(response.json(), "llm")["params"]
+    # Length cap (48) means the display name lands single-line and bounded
+    # in `params`, regardless of what was stored.
+    assert len(params["display"]) <= 48
+    assert "\n" not in params["display"]
 
 

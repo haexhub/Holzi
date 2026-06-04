@@ -116,6 +116,7 @@ async def test_delete_removes_row(client: httpx.AsyncClient) -> None:
     assert response.status_code == 204
     again = await client.delete(f"/api/llm/credentials/{created['id']}", headers=AUTH)
     assert again.status_code == 404
+    assert again.json()["detail"] == "LLM_CREDENTIAL_NOT_FOUND"
 
 
 async def test_activate_flips_is_active_and_clears_others(client: httpx.AsyncClient) -> None:
@@ -149,6 +150,7 @@ async def test_activate_flips_is_active_and_clears_others(client: httpx.AsyncCli
 async def test_activate_missing_row_returns_404(client: httpx.AsyncClient) -> None:
     response = await client.patch("/api/llm/credentials/9999/activate", headers=AUTH)
     assert response.status_code == 404
+    assert response.json()["detail"] == "LLM_CREDENTIAL_NOT_FOUND"
 
 
 async def test_activate_rejects_pending_oauth_credential(
@@ -165,7 +167,9 @@ async def test_activate_rejects_pending_oauth_credential(
         f"/api/llm/credentials/{cred.id}/activate", headers=AUTH
     )
     assert r.status_code == 409, r.text
-    assert "pending" in r.text
+    body = r.json()
+    assert body["detail"]["code"] == "LLM_OAUTH_NOT_AUTHORIZED"
+    assert body["detail"]["params"]["state"] == "pending"
 
     listed = (await client.get("/api/llm/credentials", headers=AUTH)).json()
     assert all(row["is_active"] is False for row in listed)
@@ -235,6 +239,7 @@ async def test_patch_model_unknown_id_returns_404(client: httpx.AsyncClient) -> 
         headers=AUTH,
     )
     assert response.status_code == 404
+    assert response.json()["detail"] == "LLM_CREDENTIAL_NOT_FOUND"
 
 
 async def test_patch_model_rejects_blank(client: httpx.AsyncClient) -> None:

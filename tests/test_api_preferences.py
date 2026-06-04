@@ -84,6 +84,9 @@ async def test_create_persona_duplicate_name_returns_409(
         json={"name": "Twin", "prompt": "second"},
     )
     assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "PERSONA_NAME_CONFLICT"
+    assert detail["params"]["name"] == "Twin"
 
 
 async def test_create_persona_blank_prompt_returns_422(
@@ -140,6 +143,9 @@ async def test_update_persona_missing_returns_404(
         json={"prompt": "x"},
     )
     assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["code"] == "PERSONA_NOT_FOUND"
+    assert detail["params"]["id"] == 99999
 
 
 async def test_delete_default_persona_returns_422(
@@ -152,6 +158,7 @@ async def test_delete_default_persona_returns_422(
         f"/api/personas/{default_id}", headers=AUTH
     )
     assert response.status_code == 422
+    assert response.json()["detail"] == "PERSONA_DEFAULT_DELETE"
 
 
 async def test_delete_non_default_clears_channel_assignment(
@@ -227,6 +234,9 @@ async def test_update_channel_unknown_channel_returns_404(
         json={"prompt": "x"},
     )
     assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["code"] == "CHANNEL_NOT_FOUND"
+    assert detail["params"]["channel"] == "discord"
 
 
 async def test_update_channel_unknown_persona_returns_422(
@@ -238,6 +248,9 @@ async def test_update_channel_unknown_persona_returns_422(
         json={"default_persona_id": 99999},
     )
     assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "PERSONA_REF_INVALID"
+    assert detail["params"]["id"] == 99999
 
 
 async def test_update_channel_persona_null_clears_assignment(
@@ -289,3 +302,6 @@ async def test_reset_unknown_channel_returns_404(
         "/api/channels/discord/reset", headers=AUTH
     )
     assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["code"] == "CHANNEL_NOT_FOUND"
+    assert detail["params"]["channel"] == "discord"

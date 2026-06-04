@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.errors import ErrorCode
 from hermes.repository import skills as skills_repo
 from hermes.repository.models import Skill
 
@@ -104,9 +105,7 @@ async def create_skill(
     if not _SLUG_RE.match(body.slug):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                "slug must match ^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
-            ),
+            detail=ErrorCode.SKILL_INVALID_SLUG.value,
         )
     try:
         skill = await skills_repo.create(
@@ -120,7 +119,10 @@ async def create_skill(
     except IntegrityError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"skill slug already exists: {body.slug}",
+            detail={
+                "code": ErrorCode.SKILL_SLUG_CONFLICT.value,
+                "params": {"slug": body.slug},
+            },
         ) from exc
     return _skill_to_dict(skill)
 
@@ -140,7 +142,10 @@ async def update_skill(
     if updated is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"skill {skill_id} not found",
+            detail={
+                "code": ErrorCode.SKILL_NOT_FOUND.value,
+                "params": {"id": skill_id},
+            },
         )
     return _skill_to_dict(updated)
 
@@ -151,6 +156,9 @@ async def delete_skill(skill_id: int, request: Request) -> Response:
     if not deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"skill {skill_id} not found",
+            detail={
+                "code": ErrorCode.SKILL_NOT_FOUND.value,
+                "params": {"id": skill_id},
+            },
         )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

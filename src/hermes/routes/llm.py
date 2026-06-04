@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.config import settings
 from hermes.crypto import Encryptor
+from hermes.errors import ErrorCode
 from hermes.logging import logger
 from hermes.oauth import (
     ClaudeOAuthDriver,
@@ -124,7 +125,9 @@ async def create_credential(
 async def delete_credential(request: Request, cred_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
     if not await repo.delete(db, cred_id):
-        raise HTTPException(status_code=404, detail="credential not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.LLM_CREDENTIAL_NOT_FOUND.value
+        )
     await _refresh_upstream(request)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -163,7 +166,9 @@ async def update_credential_model(
     db: AsyncEngine = request.app.state.db
     updated = await repo.set_model(db, cred_id, body.model)
     if updated is None:
-        raise HTTPException(status_code=404, detail="credential not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.LLM_CREDENTIAL_NOT_FOUND.value
+        )
     # No upstream rebuild needed — the model is consulted per request
     # by the agent, the httpx client isn't keyed on the model. Drop the
     # cached provider model list so a refresh after a UI add picks up
@@ -186,7 +191,9 @@ async def list_credential_models(
     db: AsyncEngine = request.app.state.db
     cred = await repo.get(db, cred_id)
     if cred is None:
-        raise HTTPException(status_code=404, detail="credential not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.LLM_CREDENTIAL_NOT_FOUND.value
+        )
     http: httpx.AsyncClient = request.app.state.external_http
     encryptor: Encryptor = request.app.state.encryptor
     try:
@@ -195,7 +202,13 @@ async def list_credential_models(
         # 502 mirrors the chat-route's "upstream unreachable" semantics;
         # 401-from-provider also bubbles up as 502 so the UI can show
         # "talk to the provider, not us".
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": ErrorCode.LLM_PROVIDER_FAILED.value,
+                "params": {"message": str(exc)},
+            },
+        ) from exc
     return {"models": [_choice_to_response(m) for m in models]}
 
 
@@ -210,7 +223,9 @@ async def activate_credential(request: Request, cred_id: int) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
     cred = await repo.get(db, cred_id)
     if cred is None:
-        raise HTTPException(status_code=404, detail="credential not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.LLM_CREDENTIAL_NOT_FOUND.value
+        )
     # OAuth credentials only make sense once the code-submit step actually
     # produced a ciphertext. Activating a 'pending' / 'expired' row used to
     # leave the proxy without a usable token, surfacing as a confusing 503
@@ -218,18 +233,22 @@ async def activate_credential(request: Request, cred_id: int) -> dict[str, Any]:
     if cred.mode == "oauth_claude" and cred.oauth_status != "authorized":
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"oauth credential is in state '{cred.oauth_status}', "
-                "complete the OAuth flow before activating"
-            ),
+            detail={
+                "code": ErrorCode.LLM_OAUTH_NOT_AUTHORIZED.value,
+                "params": {"state": cred.oauth_status or "pending"},
+            },
         )
     if not await repo.activate(db, cred_id):
-        raise HTTPException(status_code=404, detail="credential not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.LLM_CREDENTIAL_NOT_FOUND.value
+        )
     cred = await repo.get(db, cred_id)
     if cred is None:
         # Race with a concurrent delete — vanishingly unlikely on a
         # single-user instance, but explicit > KeyError.
-        raise HTTPException(status_code=404, detail="credential vanished")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.LLM_CREDENTIAL_VANISHED.value
+        )
     await _refresh_upstream(request)
     return _to_response(cred)
 
@@ -305,7 +324,11 @@ async def oauth_start(request: Request) -> dict[str, Any]:
         remove_oauth_temp_home(cred.id)
         await repo.delete(db, cred.id)
         raise HTTPException(
-            status_code=500, detail=f"failed to start OAuth flow: {exc}"
+            status_code=500,
+            detail={
+                "code": ErrorCode.LLM_OAUTH_START_FAILED.value,
+                "params": {"message": str(exc)},
+            },
         ) from exc
     return {"id": cred.id, "url": url}
 
@@ -325,11 +348,16 @@ async def oauth_submit_code(
 
     row = await repo.get(db, cred_id)
     if row is None or row.mode != "oauth_claude":
-        raise HTTPException(status_code=404, detail="oauth flow not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.LLM_OAUTH_FLOW_NOT_FOUND.value
+        )
     if row.oauth_status != "pending":
         raise HTTPException(
             status_code=400,
-            detail=f"oauth flow is in state '{row.oauth_status}', not 'pending'",
+            detail={
+                "code": ErrorCode.LLM_OAUTH_NOT_PENDING.value,
+                "params": {"state": row.oauth_status or "unknown"},
+            },
         )
 
     try:
@@ -338,7 +366,13 @@ async def oauth_submit_code(
         # Bad code / CLI crash / timeout. The row stays as pending — the
         # caller can hit /oauth/start again to recycle it.
         logger.info("oauth_code_rejected", cred_id=cred_id, error=str(exc))
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": ErrorCode.LLM_OAUTH_CODE_REJECTED.value,
+                "params": {"message": str(exc)},
+            },
+        ) from exc
 
     home = oauth_temp_home(cred_id)
     creds = await read_credentials_raw_and_expiry(home)
@@ -346,7 +380,7 @@ async def oauth_submit_code(
         remove_oauth_temp_home(cred_id)
         raise HTTPException(
             status_code=500,
-            detail="claude CLI exited 0 but wrote no credentials file",
+            detail=ErrorCode.LLM_OAUTH_NO_CREDENTIALS.value,
         )
 
     blob = encryptor.encrypt(creds.raw)
@@ -358,7 +392,9 @@ async def oauth_submit_code(
     )
     remove_oauth_temp_home(cred_id)
     if updated is None:
-        raise HTTPException(status_code=404, detail="credential vanished")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.LLM_CREDENTIAL_VANISHED.value
+        )
     return _to_response(updated)
 
 
@@ -370,7 +406,9 @@ async def oauth_status(request: Request, cred_id: int) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
     row = await repo.get(db, cred_id)
     if row is None or row.mode != "oauth_claude":
-        raise HTTPException(status_code=404, detail="oauth flow not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.LLM_OAUTH_FLOW_NOT_FOUND.value
+        )
     return {"id": row.id, "status": row.oauth_status or "pending"}
 
 
@@ -384,7 +422,9 @@ async def oauth_cancel(request: Request, cred_id: int) -> Response:
 
     row = await repo.get(db, cred_id)
     if row is None or row.mode != "oauth_claude":
-        raise HTTPException(status_code=404, detail="oauth flow not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.LLM_OAUTH_FLOW_NOT_FOUND.value
+        )
     with contextlib.suppress(OAuthDriverError):
         await driver.cancel(cred_id)
     remove_oauth_temp_home(cred_id)

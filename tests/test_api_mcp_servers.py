@@ -209,7 +209,8 @@ async def test_create_rejects_invalid_slug(client: httpx.AsyncClient) -> None:
             "url": "https://x",
         },
     )
-    assert resp.status_code in (400, 422)
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "MCP_SERVER_INVALID_NAME"
 
 
 async def test_create_rejects_missing_url_for_http(
@@ -224,7 +225,8 @@ async def test_create_rejects_missing_url_for_http(
             "transport": "http",
         },
     )
-    assert resp.status_code in (400, 422)
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "MCP_HTTP_REQUIRES_URL"
 
 
 async def test_create_rejects_missing_argv_for_stdio(
@@ -239,7 +241,8 @@ async def test_create_rejects_missing_argv_for_stdio(
             "transport": "stdio",
         },
     )
-    assert resp.status_code in (400, 422)
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "MCP_STDIO_REQUIRES_COMMAND"
 
 
 async def test_create_409_on_duplicate(client: httpx.AsyncClient) -> None:
@@ -253,6 +256,9 @@ async def test_create_409_on_duplicate(client: httpx.AsyncClient) -> None:
     assert first.status_code == 201
     second = await client.post("/api/mcp/servers", headers=AUTH, json=body)
     assert second.status_code == 409
+    detail = second.json()["detail"]
+    assert detail["code"] == "MCP_SERVER_NAME_CONFLICT"
+    assert detail["params"]["name"] == "dup-srv"
 
 
 # --- update ----------------------------------------------------------------
@@ -372,6 +378,7 @@ async def test_update_unknown_404(client: httpx.AsyncClient) -> None:
         json={"display_name": "ghost"},
     )
     assert patch.status_code == 404
+    assert patch.json()["detail"] == "MCP_SERVER_NOT_FOUND"
 
 
 # --- delete + restart ------------------------------------------------------
@@ -399,6 +406,7 @@ async def test_delete_removes_server(client: httpx.AsyncClient) -> None:
 async def test_delete_unknown_404(client: httpx.AsyncClient) -> None:
     resp = await client.delete("/api/mcp/servers/99999", headers=AUTH)
     assert resp.status_code == 404
+    assert resp.json()["detail"] == "MCP_SERVER_NOT_FOUND"
 
 
 async def test_restart_endpoint(client: httpx.AsyncClient) -> None:

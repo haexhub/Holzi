@@ -97,6 +97,9 @@ async def test_create_duplicate_slug_returns_409(
         json=_skill_body(name="Different name"),
     )
     assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "SKILL_SLUG_CONFLICT"
+    assert detail["params"]["slug"] == "code-style-typescript"
 
 
 async def test_create_skill_validates_slug_format(
@@ -107,6 +110,7 @@ async def test_create_skill_validates_slug_format(
             "/api/skills", headers=AUTH, json=_skill_body(slug=bad_slug)
         )
         assert response.status_code == 422, bad_slug
+        assert response.json()["detail"] == "SKILL_INVALID_SLUG", bad_slug
 
 
 async def test_create_skill_accepts_single_char_slug(
@@ -166,6 +170,9 @@ async def test_update_unknown_skill_returns_404(
         json={"body_markdown": "x"},
     )
     assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["code"] == "SKILL_NOT_FOUND"
+    assert detail["params"]["id"] == 99999
 
 
 async def test_delete_skill_returns_204(client: httpx.AsyncClient) -> None:
@@ -182,6 +189,9 @@ async def test_delete_unknown_skill_returns_404(
 ) -> None:
     response = await client.delete("/api/skills/99999", headers=AUTH)
     assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["code"] == "SKILL_NOT_FOUND"
+    assert detail["params"]["id"] == 99999
 
 
 async def test_list_skills_returns_inserted(client: httpx.AsyncClient) -> None:
@@ -225,6 +235,9 @@ async def test_get_persona_skills_unknown_persona_returns_404(
 ) -> None:
     response = await client.get("/api/personas/99999/skills", headers=AUTH)
     assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["code"] == "PERSONA_NOT_FOUND"
+    assert detail["params"]["id"] == 99999
 
 
 async def test_set_persona_skills_inserts_in_order(
@@ -308,6 +321,7 @@ async def test_set_persona_skills_with_unknown_skill_returns_422(
         },
     )
     assert response.status_code == 422
+    assert response.json()["detail"] == "PERSONA_SKILL_ACTIVATION_INVALID"
 
 
 async def test_set_persona_skills_unknown_persona_returns_404(
@@ -319,6 +333,9 @@ async def test_set_persona_skills_unknown_persona_returns_404(
         json={"items": []},
     )
     assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["code"] == "PERSONA_NOT_FOUND"
+    assert detail["params"]["id"] == 99999
 
 
 async def test_delete_skill_cascades_persona_link(

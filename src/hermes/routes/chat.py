@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.errors import ErrorCode
 from hermes.repository import conversations, messages
 from hermes.repository.models import Conversation
 
@@ -20,7 +21,9 @@ async def chat_completions(request: Request) -> Response:
     try:
         body = await request.json()
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.REQUEST_INVALID_JSON.value
+        ) from exc
     is_stream = bool(body.get("stream", False))
 
     db: AsyncEngine = request.app.state.db
@@ -48,11 +51,15 @@ async def _resolve_conversation(
     try:
         conv_id = int(header)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail="invalid X-Hermes-Session") from exc
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.CHAT_INVALID_SESSION.value
+        ) from exc
 
     convo = await conversations.get(db, conv_id)
     if convo is None:
-        raise HTTPException(status_code=404, detail="unknown session")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.CHAT_SESSION_NOT_FOUND.value
+        )
     return convo
 
 
@@ -85,9 +92,13 @@ async def _oneshot_forward(
     try:
         upstream_resp = await upstream.post(CHAT_PATH, json=body)
     except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail="upstream timeout") from exc
+        raise HTTPException(
+            status_code=504, detail=ErrorCode.CHAT_UPSTREAM_TIMEOUT.value
+        ) from exc
     except httpx.RequestError as exc:
-        raise HTTPException(status_code=502, detail="upstream unreachable") from exc
+        raise HTTPException(
+            status_code=502, detail=ErrorCode.CHAT_UPSTREAM_UNREACHABLE.value
+        ) from exc
 
     if upstream_resp.status_code >= 400:
         return Response(
@@ -101,7 +112,7 @@ async def _oneshot_forward(
         data = upstream_resp.json()
     except json.JSONDecodeError as exc:
         raise HTTPException(
-            status_code=502, detail="upstream returned non-JSON body"
+            status_code=502, detail=ErrorCode.CHAT_UPSTREAM_NON_JSON.value
         ) from exc
     assistant_content = _extract_assistant_from_oneshot(data)
     if assistant_content:
@@ -129,16 +140,25 @@ async def _stream_forward(
     try:
         upstream_resp = await upstream.send(request, stream=True)
     except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail="upstream timeout") from exc
+        raise HTTPException(
+            status_code=504, detail=ErrorCode.CHAT_UPSTREAM_TIMEOUT.value
+        ) from exc
     except httpx.RequestError as exc:
-        raise HTTPException(status_code=502, detail="upstream unreachable") from exc
+        raise HTTPException(
+            status_code=502, detail=ErrorCode.CHAT_UPSTREAM_UNREACHABLE.value
+        ) from exc
 
     if upstream_resp.status_code >= 400:
         error_body = await upstream_resp.aread()
         await upstream_resp.aclose()
         raise HTTPException(
             status_code=upstream_resp.status_code,
-            detail=error_body.decode("utf-8", errors="replace"),
+            detail={
+                "code": ErrorCode.CHAT_UPSTREAM_ERROR.value,
+                "params": {
+                    "message": error_body.decode("utf-8", errors="replace"),
+                },
+            },
         )
 
     async def gen() -> AsyncIterator[bytes]:

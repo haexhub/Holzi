@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.config import settings
+from hermes.errors import ErrorCode
 from hermes.repository import workspaces as workspaces_repo
 from hermes.sandbox import (
     DirEntry,
@@ -291,7 +292,7 @@ def _require_sandbox_manager(request: Request) -> Any:
     if mgr is None:
         raise HTTPException(
             status_code=503,
-            detail="sandbox runtime not configured",
+            detail=ErrorCode.SANDBOX_NOT_CONFIGURED.value,
         )
     return mgr
 
@@ -299,7 +300,9 @@ def _require_sandbox_manager(request: Request) -> Any:
 async def _require_known_root(request: Request, root: str) -> None:
     db: AsyncEngine = request.app.state.db
     if root not in await _active_root_slugs(db):
-        raise HTTPException(status_code=404, detail="unknown workspace root")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.WORKSPACE_ROOT_NOT_FOUND.value
+        )
 
 
 def _normalise_relative(path: str) -> str:
@@ -321,13 +324,19 @@ def _normalise_relative(path: str) -> str:
     # rather than silently stripping (which would hide real bugs in callers)
     # we refuse and force the caller to fix the request.
     if path.startswith("/"):
-        raise HTTPException(status_code=400, detail="invalid path")
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.WORKSPACE_INVALID_PATH.value
+        )
     if path.startswith("-"):
-        raise HTTPException(status_code=400, detail="invalid path")
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.WORKSPACE_INVALID_PATH.value
+        )
     segments = path.split("/")
     for segment in segments:
         if segment in ("", ".", ".."):
-            raise HTTPException(status_code=400, detail="invalid path")
+            raise HTTPException(
+            status_code=400, detail=ErrorCode.WORKSPACE_INVALID_PATH.value
+        )
     # Defence in depth: even after segment-level checks, verify the joined
     # path normalises to a child of `/workspace`. PurePosixPath collapses
     # any residue (it won't here, but the assertion is cheap).
@@ -336,7 +345,9 @@ def _normalise_relative(path: str) -> str:
     try:
         normalised.relative_to(WORKSPACE_MOUNT)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail="invalid path") from exc
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.WORKSPACE_INVALID_PATH.value
+        ) from exc
     return "/".join(segments)
 
 
@@ -493,7 +504,7 @@ async def _stat_entry(
     except SandboxError as exc:
         if "not a directory" in str(exc):
             raise HTTPException(
-                status_code=400, detail="parent is not a directory"
+                status_code=400, detail=ErrorCode.WORKSPACE_PARENT_NOT_DIRECTORY.value
             ) from exc
         raise
     return next((e for e in siblings if e.name == name), None)
@@ -540,12 +551,14 @@ async def api_workspace_tree(
     try:
         entries: list[DirEntry] = await mgr.list_dir(handle, abs_path)
     except SandboxFileNotFound as exc:
-        raise HTTPException(status_code=404, detail="path not found") from exc
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.WORKSPACE_PATH_NOT_FOUND.value
+        ) from exc
     except SandboxNotRunning as exc:
         # Sandbox crashed mid-request. Mirrors the chat-stream's 503 surface
         # so the frontend can offer a Restart action via the same path.
         raise HTTPException(
-            status_code=503, detail="workspace sandbox not running"
+            status_code=503, detail=ErrorCode.WORKSPACE_SANDBOX_NOT_RUNNING.value
         ) from exc
     except SandboxError as exc:
         # "is not a directory" lands here — the API distinguishes 400 (the
@@ -554,9 +567,11 @@ async def api_workspace_tree(
         message = str(exc)
         if "not a directory" in message:
             raise HTTPException(
-                status_code=400, detail="path is not a directory"
+                status_code=400, detail=ErrorCode.WORKSPACE_PATH_NOT_DIRECTORY.value
             ) from exc
-        raise HTTPException(status_code=500, detail="list_dir failed") from exc
+        raise HTTPException(
+            status_code=500, detail=ErrorCode.WORKSPACE_LIST_FAILED.value
+        ) from exc
 
     return {
         "root": root,
@@ -578,7 +593,9 @@ async def api_workspace_file(
     if rel == "":
         # `/file` with an empty path would point at the workspace root —
         # callers should hit `/tree` for that, not `/file`.
-        raise HTTPException(status_code=400, detail="path is a directory")
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.WORKSPACE_PATH_IS_DIRECTORY.value
+        )
     abs_path = _absolute_in_sandbox(rel)
     parent_rel, _, name = rel.rpartition("/")
     parent_abs = _absolute_in_sandbox(parent_rel)
@@ -591,10 +608,12 @@ async def api_workspace_file(
     try:
         siblings: list[DirEntry] = await mgr.list_dir(handle, parent_abs)
     except SandboxFileNotFound as exc:
-        raise HTTPException(status_code=404, detail="path not found") from exc
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.WORKSPACE_PATH_NOT_FOUND.value
+        ) from exc
     except SandboxNotRunning as exc:
         raise HTTPException(
-            status_code=503, detail="workspace sandbox not running"
+            status_code=503, detail=ErrorCode.WORKSPACE_SANDBOX_NOT_RUNNING.value
         ) from exc
     except SandboxError as exc:
         message = str(exc)
@@ -602,16 +621,20 @@ async def api_workspace_file(
             # The parent itself is a file — the caller asked for a child of
             # something that can't have children.
             raise HTTPException(
-                status_code=404, detail="path not found"
+                status_code=404, detail=ErrorCode.WORKSPACE_PATH_NOT_FOUND.value
             ) from exc
-        raise HTTPException(status_code=500, detail="list_dir failed") from exc
+        raise HTTPException(
+            status_code=500, detail=ErrorCode.WORKSPACE_LIST_FAILED.value
+        ) from exc
 
     target = next((e for e in siblings if e.name == name), None)
     if target is None:
-        raise HTTPException(status_code=404, detail="path not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.WORKSPACE_PATH_NOT_FOUND.value
+        )
     if target.entry_type == "dir":
         raise HTTPException(
-            status_code=400, detail="path is a directory, use /tree"
+            status_code=400, detail=ErrorCode.WORKSPACE_PATH_IS_DIRECTORY_USE_TREE.value
         )
     if target.entry_type == "other":
         # Symlinks/sockets/etc. — surface as a binary placeholder so the UI
@@ -650,11 +673,11 @@ async def api_workspace_file(
             data = await mgr.read_file(handle, abs_path)
         except SandboxFileNotFound as exc:
             raise HTTPException(
-                status_code=404, detail="path not found"
+                status_code=404, detail=ErrorCode.WORKSPACE_PATH_NOT_FOUND.value
             ) from exc
         except SandboxNotRunning as exc:
             raise HTTPException(
-                status_code=503, detail="workspace sandbox not running"
+                status_code=503, detail=ErrorCode.WORKSPACE_SANDBOX_NOT_RUNNING.value
             ) from exc
         except SandboxFileTooLarge:
             return {
@@ -700,10 +723,12 @@ async def api_workspace_file(
     try:
         data = await mgr.read_file(handle, abs_path)
     except SandboxFileNotFound as exc:
-        raise HTTPException(status_code=404, detail="path not found") from exc
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.WORKSPACE_PATH_NOT_FOUND.value
+        ) from exc
     except SandboxNotRunning as exc:
         raise HTTPException(
-            status_code=503, detail="workspace sandbox not running"
+            status_code=503, detail=ErrorCode.WORKSPACE_SANDBOX_NOT_RUNNING.value
         ) from exc
     except SandboxFileTooLarge:
         # The runtime's hard 10 MiB cap kicked in before we could even
@@ -763,7 +788,7 @@ def _reject_binary_content(content: str) -> None:
     if "\x00" in content:
         raise HTTPException(
             status_code=400,
-            detail="content contains NUL bytes; binary files cannot be edited as text",
+            detail=ErrorCode.WORKSPACE_FILE_NUL_BYTES.value,
         )
 
 
@@ -780,15 +805,15 @@ async def _ensure_parent_dir(
         await mgr.list_dir(handle, parent_abs)
     except SandboxFileNotFound as exc:
         raise HTTPException(
-            status_code=404, detail="parent directory not found"
+            status_code=404, detail=ErrorCode.WORKSPACE_PARENT_NOT_FOUND.value
         ) from exc
     except SandboxError as exc:
         if "not a directory" in str(exc):
             raise HTTPException(
-                status_code=400, detail="parent is not a directory"
+                status_code=400, detail=ErrorCode.WORKSPACE_PARENT_NOT_DIRECTORY.value
             ) from exc
         raise HTTPException(
-            status_code=500, detail="list_dir failed"
+            status_code=500, detail=ErrorCode.WORKSPACE_LIST_FAILED.value
         ) from exc
 
 
@@ -800,7 +825,9 @@ async def api_workspace_file_create(
     mgr = _require_sandbox_manager(request)
     rel = _normalise_relative(body.path)
     if rel == "":
-        raise HTTPException(status_code=400, detail="path is a directory")
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.WORKSPACE_PATH_IS_DIRECTORY.value
+        )
     _reject_binary_content(body.content)
 
     handle = await mgr.get_workspace(body.root)
@@ -815,15 +842,19 @@ async def api_workspace_file_create(
             # Mirror Plan 13's contract: create is the "doesn't exist yet"
             # path; the UI should show the conflict and route the user to
             # update if they want to overwrite.
-            raise HTTPException(status_code=409, detail="path already exists")
+            raise HTTPException(
+                status_code=409, detail=ErrorCode.WORKSPACE_PATH_EXISTS.value
+            )
         data = body.content.encode("utf-8")
         await mgr.write_file(handle, abs_path, data)
     except SandboxNotRunning as exc:
         raise HTTPException(
-            status_code=503, detail="workspace sandbox not running"
+            status_code=503, detail=ErrorCode.WORKSPACE_SANDBOX_NOT_RUNNING.value
         ) from exc
     except SandboxFileTooLarge as exc:
-        raise HTTPException(status_code=413, detail="file too large") from exc
+        raise HTTPException(
+            status_code=413, detail=ErrorCode.WORKSPACE_FILE_TOO_LARGE.value
+        ) from exc
 
     committed = await _git_commit(
         mgr,
@@ -848,7 +879,9 @@ async def api_workspace_file_update(
     mgr = _require_sandbox_manager(request)
     rel = _normalise_relative(body.path)
     if rel == "":
-        raise HTTPException(status_code=400, detail="path is a directory")
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.WORKSPACE_PATH_IS_DIRECTORY.value
+        )
     _reject_binary_content(body.content)
 
     handle = await mgr.get_workspace(body.root)
@@ -857,10 +890,12 @@ async def api_workspace_file_update(
     try:
         existing = await _stat_entry(mgr, handle, rel)
         if existing is None:
-            raise HTTPException(status_code=404, detail="path not found")
+            raise HTTPException(
+            status_code=404, detail=ErrorCode.WORKSPACE_PATH_NOT_FOUND.value
+        )
         if existing.entry_type != "file":
             raise HTTPException(
-                status_code=400, detail="path is not a regular file"
+                status_code=400, detail=ErrorCode.WORKSPACE_PATH_NOT_REGULAR.value
             )
         # Re-read the on-disk bytes to compute the *current* sha. The
         # base_sha check is the only thing protecting against a concurrent
@@ -871,18 +906,22 @@ async def api_workspace_file_update(
         if current_sha != body.base_sha:
             raise HTTPException(
                 status_code=409,
-                detail="base_sha mismatch; file changed on disk",
+                detail=ErrorCode.WORKSPACE_FILE_SHA_MISMATCH.value,
             )
         data = body.content.encode("utf-8")
         await mgr.write_file(handle, abs_path, data)
     except SandboxFileNotFound as exc:
-        raise HTTPException(status_code=404, detail="path not found") from exc
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.WORKSPACE_PATH_NOT_FOUND.value
+        ) from exc
     except SandboxNotRunning as exc:
         raise HTTPException(
-            status_code=503, detail="workspace sandbox not running"
+            status_code=503, detail=ErrorCode.WORKSPACE_SANDBOX_NOT_RUNNING.value
         ) from exc
     except SandboxFileTooLarge as exc:
-        raise HTTPException(status_code=413, detail="file too large") from exc
+        raise HTTPException(
+            status_code=413, detail=ErrorCode.WORKSPACE_FILE_TOO_LARGE.value
+        ) from exc
 
     committed = await _git_commit(
         mgr,
@@ -908,10 +947,12 @@ async def api_workspace_file_rename(
     src_rel = _normalise_relative(body.src)
     dest_rel = _normalise_relative(body.dest)
     if src_rel == "" or dest_rel == "":
-        raise HTTPException(status_code=400, detail="path is a directory")
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.WORKSPACE_PATH_IS_DIRECTORY.value
+        )
     if src_rel == dest_rel:
         raise HTTPException(
-            status_code=400, detail="src and dest are the same path"
+            status_code=400, detail=ErrorCode.WORKSPACE_RENAME_SAME_PATH.value
         )
 
     handle = await mgr.get_workspace(body.root)
@@ -922,15 +963,19 @@ async def api_workspace_file_rename(
     try:
         src_entry = await _stat_entry(mgr, handle, src_rel)
         if src_entry is None:
-            raise HTTPException(status_code=404, detail="src not found")
+            raise HTTPException(
+                status_code=404, detail=ErrorCode.WORKSPACE_RENAME_SRC_NOT_FOUND.value
+            )
         if src_entry.entry_type != "file":
             raise HTTPException(
-                status_code=400, detail="src is not a regular file"
+                status_code=400, detail=ErrorCode.WORKSPACE_RENAME_SRC_NOT_REGULAR.value
             )
         await _ensure_parent_dir(mgr, handle, dest_parent_rel)
         dest_entry = await _stat_entry(mgr, handle, dest_rel)
         if dest_entry is not None:
-            raise HTTPException(status_code=409, detail="dest already exists")
+            raise HTTPException(
+                status_code=409, detail=ErrorCode.WORKSPACE_RENAME_DEST_EXISTS.value
+            )
         # `mv` is one POSIX call so source and dest stay consistent even on
         # failure; an `exec` failure here surfaces as a 500 below.
         code, _, stderr = await _drain_exec(
@@ -939,11 +984,16 @@ async def api_workspace_file_rename(
         if code != 0:
             raise HTTPException(
                 status_code=500,
-                detail=f"rename failed: {stderr.decode('utf-8', 'replace').strip()}",
+                detail={
+                    "code": ErrorCode.WORKSPACE_RENAME_FAILED.value,
+                    "params": {
+                        "stderr": stderr.decode("utf-8", "replace").strip(),
+                    },
+                },
             )
     except SandboxNotRunning as exc:
         raise HTTPException(
-            status_code=503, detail="workspace sandbox not running"
+            status_code=503, detail=ErrorCode.WORKSPACE_SANDBOX_NOT_RUNNING.value
         ) from exc
 
     committed = await _git_commit(
@@ -977,7 +1027,9 @@ async def api_workspace_file_delete(
     mgr = _require_sandbox_manager(request)
     rel = _normalise_relative(body.path)
     if rel == "":
-        raise HTTPException(status_code=400, detail="path is a directory")
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.WORKSPACE_PATH_IS_DIRECTORY.value
+        )
 
     handle = await mgr.get_workspace(body.root)
     abs_path = _absolute_in_sandbox(rel)
@@ -985,12 +1037,14 @@ async def api_workspace_file_delete(
     try:
         entry = await _stat_entry(mgr, handle, rel)
         if entry is None:
-            raise HTTPException(status_code=404, detail="path not found")
+            raise HTTPException(
+            status_code=404, detail=ErrorCode.WORKSPACE_PATH_NOT_FOUND.value
+        )
         if entry.entry_type != "file":
             # Plan 13 explicitly defers directory delete; surface a 400 so
             # the UI shows "files only" instead of silently doing nothing.
             raise HTTPException(
-                status_code=400, detail="only regular files can be deleted"
+                status_code=400, detail=ErrorCode.WORKSPACE_DELETE_NOT_REGULAR.value
             )
         code, _, stderr = await _drain_exec(
             mgr, handle, ["rm", "--", abs_path]
@@ -998,11 +1052,16 @@ async def api_workspace_file_delete(
         if code != 0:
             raise HTTPException(
                 status_code=500,
-                detail=f"delete failed: {stderr.decode('utf-8', 'replace').strip()}",
+                detail={
+                    "code": ErrorCode.WORKSPACE_DELETE_FAILED.value,
+                    "params": {
+                        "stderr": stderr.decode("utf-8", "replace").strip(),
+                    },
+                },
             )
     except SandboxNotRunning as exc:
         raise HTTPException(
-            status_code=503, detail="workspace sandbox not running"
+            status_code=503, detail=ErrorCode.WORKSPACE_SANDBOX_NOT_RUNNING.value
         ) from exc
 
     committed = await _git_commit(
@@ -1071,7 +1130,7 @@ async def api_workspace_git(request: Request, root: str) -> dict[str, Any]:
             }
     except SandboxNotRunning as exc:
         raise HTTPException(
-            status_code=503, detail="workspace sandbox not running"
+            status_code=503, detail=ErrorCode.WORKSPACE_SANDBOX_NOT_RUNNING.value
         ) from exc
 
     entries: list[dict[str, str]] = []
@@ -1113,14 +1172,16 @@ async def _resolve_git_workspace(
         handle = await mgr.get_workspace(root)
     except SandboxNotRunning as exc:
         raise HTTPException(
-            status_code=503, detail="workspace sandbox not running"
+            status_code=503, detail=ErrorCode.WORKSPACE_SANDBOX_NOT_RUNNING.value
         ) from exc
     return mgr, handle
 
 
 async def _require_repo(mgr: SandboxManager, handle: SandboxHandle) -> None:
     if not await _is_git_repo(mgr, handle):
-        raise HTTPException(status_code=409, detail="workspace is not a git repo")
+        raise HTTPException(
+            status_code=409, detail=ErrorCode.WORKSPACE_NOT_GIT_REPO.value
+        )
 
 
 def _decode(data: bytes) -> str:
@@ -1163,7 +1224,9 @@ async def api_workspace_git_diff(
     if path is not None:
         rel = _normalise_relative(path)
         if rel == "":
-            raise HTTPException(status_code=400, detail="path must be a file")
+            raise HTTPException(
+                status_code=400, detail=ErrorCode.WORKSPACE_PATH_MUST_BE_FILE.value
+            )
         argv.extend(["--", rel])
 
     patch_code, patch_out, patch_err = await _drain_exec(
@@ -1172,7 +1235,14 @@ async def api_workspace_git_diff(
     if patch_code != 0:
         # Surface the stderr so the user can see e.g. "ambiguous argument".
         raise HTTPException(
-            status_code=400, detail=_decode(patch_err).strip() or "git diff failed"
+            status_code=400,
+            detail={
+                "code": ErrorCode.WORKSPACE_GIT_COMMAND_FAILED.value,
+                "params": {
+                    "command": "diff",
+                    "stderr": _decode(patch_err).strip(),
+                },
+            },
         )
     patch_bytes = bytes(patch_out)
 
@@ -1296,7 +1366,13 @@ async def api_workspace_git_log(
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     if limit < 1 or limit > 200:
-        raise HTTPException(status_code=400, detail="limit must be 1..200")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": ErrorCode.REQUEST_LIMIT_OUT_OF_RANGE.value,
+                "params": {"min": 1, "max": 200},
+            },
+        )
     mgr, handle = await _resolve_git_workspace(request, root)
     await _require_repo(mgr, handle)
 
@@ -1316,7 +1392,11 @@ async def api_workspace_git_log(
     code, out, err = await _drain_exec(mgr, handle, argv, cwd=WORKSPACE_MOUNT)
     if code != 0:
         raise HTTPException(
-            status_code=400, detail=_decode(err).strip() or "git log failed"
+            status_code=400,
+            detail={
+                "code": ErrorCode.WORKSPACE_GIT_COMMAND_FAILED.value,
+                "params": {"command": "log", "stderr": _decode(err).strip()},
+            },
         )
     entries: list[dict[str, Any]] = []
     for line in _decode(out).splitlines():
@@ -1347,19 +1427,21 @@ async def api_workspace_git_checkout(
     # doesn't work as a workaround because the `--` would have to come
     # after the new branch name in the `-b` form.
     if body.branch.startswith("-"):
-        raise HTTPException(status_code=400, detail="invalid branch name")
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.WORKSPACE_GIT_INVALID_BRANCH.value
+        )
     mgr, handle = await _resolve_git_workspace(request, body.root)
     await _require_repo(mgr, handle)
 
     if not body.force and await _working_tree_dirty(mgr, handle):
         raise HTTPException(
             status_code=409,
-            detail="working tree has uncommitted changes",
+            detail=ErrorCode.WORKSPACE_GIT_DIRTY.value,
         )
     if body.force and not settings.workspace_git_destructive:
         raise HTTPException(
             status_code=403,
-            detail="destructive git ops disabled (set HERMES_WORKSPACE_GIT_DESTRUCTIVE=1)",
+            detail=ErrorCode.WORKSPACE_GIT_DESTRUCTIVE_DISABLED.value,
         )
 
     argv: list[str] = ["git", "checkout"]
@@ -1372,7 +1454,11 @@ async def api_workspace_git_checkout(
     code, _, err = await _drain_exec(mgr, handle, argv, cwd=WORKSPACE_MOUNT)
     if code != 0:
         raise HTTPException(
-            status_code=400, detail=_decode(err).strip() or "git checkout failed"
+            status_code=400,
+            detail={
+                "code": ErrorCode.WORKSPACE_GIT_COMMAND_FAILED.value,
+                "params": {"command": "checkout", "stderr": _decode(err).strip()},
+            },
         )
     return {"ok": True, "message": ""}
 
@@ -1399,7 +1485,11 @@ async def api_workspace_git_stage(
     code, _, err = await _drain_exec(mgr, handle, argv, cwd=WORKSPACE_MOUNT)
     if code != 0:
         raise HTTPException(
-            status_code=400, detail=_decode(err).strip() or "git add failed"
+            status_code=400,
+            detail={
+                "code": ErrorCode.WORKSPACE_GIT_COMMAND_FAILED.value,
+                "params": {"command": "add", "stderr": _decode(err).strip()},
+            },
         )
     return {"ok": True, "message": ""}
 
@@ -1424,7 +1514,13 @@ async def api_workspace_git_unstage(
     if code != 0:
         raise HTTPException(
             status_code=400,
-            detail=_decode(err).strip() or "git restore --staged failed",
+            detail={
+                "code": ErrorCode.WORKSPACE_GIT_COMMAND_FAILED.value,
+                "params": {
+                    "command": "restore --staged",
+                    "stderr": _decode(err).strip(),
+                },
+            },
         )
     return {"ok": True, "message": ""}
 
@@ -1439,7 +1535,7 @@ async def api_workspace_git_discard(
     if not settings.workspace_git_destructive:
         raise HTTPException(
             status_code=403,
-            detail="destructive git ops disabled (set HERMES_WORKSPACE_GIT_DESTRUCTIVE=1)",
+            detail=ErrorCode.WORKSPACE_GIT_DESTRUCTIVE_DISABLED.value,
         )
     mgr, handle = await _resolve_git_workspace(request, body.root)
     await _require_repo(mgr, handle)
@@ -1454,7 +1550,13 @@ async def api_workspace_git_discard(
     if code != 0:
         raise HTTPException(
             status_code=400,
-            detail=_decode(err).strip() or "git checkout -- failed",
+            detail={
+                "code": ErrorCode.WORKSPACE_GIT_COMMAND_FAILED.value,
+                "params": {
+                    "command": "checkout --",
+                    "stderr": _decode(err).strip(),
+                },
+            },
         )
     return {"ok": True, "message": ""}
 
@@ -1487,7 +1589,13 @@ async def api_workspace_git_commit(
     if code != 0:
         raise HTTPException(
             status_code=400,
-            detail=_decode(err).strip() or "git commit failed",
+            detail={
+                "code": ErrorCode.WORKSPACE_GIT_COMMAND_FAILED.value,
+                "params": {
+                    "command": "commit",
+                    "stderr": _decode(err).strip(),
+                },
+            },
         )
     return {"ok": True, "message": ""}
 
@@ -1576,14 +1684,14 @@ async def api_workspace_git_push(
         if not cur or cur == "HEAD":
             raise HTTPException(
                 status_code=400,
-                detail="cannot push --set-upstream from a detached HEAD",
+                detail=ErrorCode.WORKSPACE_GIT_PUSH_DETACHED_HEAD.value,
             )
         # Defence-in-depth — the current branch name comes from
         # `rev-parse` and *should* be safe, but a `-`-prefixed branch in
         # the working tree would still be parsed as a flag by git push.
         if cur.startswith("-"):
             raise HTTPException(
-                status_code=400, detail="invalid current branch name"
+                status_code=400, detail=ErrorCode.WORKSPACE_GIT_INVALID_CURRENT_BRANCH.value
             )
         argv.extend(["-u", "origin", cur])
 

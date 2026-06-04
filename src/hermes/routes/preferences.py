@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.errors import ErrorCode
 from hermes.personas import CHANNEL_REGISTRY
 from hermes.repository import channels as channels_repo
 from hermes.repository import personas as personas_repo
@@ -150,7 +151,10 @@ async def create_persona(
     except IntegrityError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"persona name already exists: {body.name}",
+            detail={
+                "code": ErrorCode.PERSONA_NAME_CONFLICT.value,
+                "params": {"name": body.name},
+            },
         ) from exc
     return _persona_to_dict(persona)
 
@@ -164,7 +168,10 @@ async def update_persona(
     if existing is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"persona {persona_id} not found",
+            detail={
+                "code": ErrorCode.PERSONA_NOT_FOUND.value,
+                "params": {"id": persona_id},
+            },
         )
 
     # Refuse to demote the only default — the resolver always needs one.
@@ -174,10 +181,7 @@ async def update_persona(
     ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                "cannot demote the default persona; set another persona as "
-                "default first"
-            ),
+            detail=ErrorCode.PERSONA_DEFAULT_DEMOTE.value,
         )
 
     try:
@@ -191,13 +195,19 @@ async def update_persona(
     except IntegrityError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"persona name already exists: {body.name}",
+            detail={
+                "code": ErrorCode.PERSONA_NAME_CONFLICT.value,
+                "params": {"name": body.name or ""},
+            },
         ) from exc
     if updated is None:
         # Race: someone deleted the row between the get and the update.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"persona {persona_id} not found",
+            detail={
+                "code": ErrorCode.PERSONA_NOT_FOUND.value,
+                "params": {"id": persona_id},
+            },
         )
     return _persona_to_dict(updated)
 
@@ -211,22 +221,25 @@ async def delete_persona(persona_id: int, request: Request) -> Response:
     if existing is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"persona {persona_id} not found",
+            detail={
+                "code": ErrorCode.PERSONA_NOT_FOUND.value,
+                "params": {"id": persona_id},
+            },
         )
     if existing.is_default:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                "cannot delete the default persona; set another persona as "
-                "default first"
-            ),
+            detail=ErrorCode.PERSONA_DEFAULT_DELETE.value,
         )
     deleted = await personas_repo.delete(db, persona_id)
     if not deleted:
         # Race or unexpected — surface as 404.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"persona {persona_id} not found",
+            detail={
+                "code": ErrorCode.PERSONA_NOT_FOUND.value,
+                "params": {"id": persona_id},
+            },
         )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -303,7 +316,10 @@ async def list_persona_skills(
     if persona is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"persona {persona_id} not found",
+            detail={
+                "code": ErrorCode.PERSONA_NOT_FOUND.value,
+                "params": {"id": persona_id},
+            },
         )
     return await _persona_skills_payload(db, persona_id)
 
@@ -320,7 +336,10 @@ async def set_persona_skills(
     if persona is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"persona {persona_id} not found",
+            detail={
+                "code": ErrorCode.PERSONA_NOT_FOUND.value,
+                "params": {"id": persona_id},
+            },
         )
 
     items = [item.model_dump() for item in body.items]
@@ -331,10 +350,7 @@ async def set_persona_skills(
         # duplicate (skill_id) within the same items list (PK conflict).
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                "invalid skill activation list: unknown skill_id or "
-                "duplicate entry"
-            ),
+            detail=ErrorCode.PERSONA_SKILL_ACTIVATION_INVALID.value,
         ) from exc
 
     return await _persona_skills_payload(db, persona_id)
@@ -366,7 +382,10 @@ async def update_channel(
     if channel not in CHANNEL_REGISTRY:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"unknown channel: {channel}",
+            detail={
+                "code": ErrorCode.CHANNEL_NOT_FOUND.value,
+                "params": {"channel": channel},
+            },
         )
     db = _db(request)
 
@@ -375,7 +394,10 @@ async def update_channel(
         if target is None:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=f"persona {body.default_persona_id} does not exist",
+                detail={
+                    "code": ErrorCode.PERSONA_REF_INVALID.value,
+                    "params": {"id": body.default_persona_id},
+                },
             )
 
     # Pydantic collapses "field omitted" and "field: null" into the same
@@ -394,7 +416,10 @@ async def update_channel(
         # but covers the channel-row-missing case explicitly.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"channel row missing: {channel}",
+            detail={
+                "code": ErrorCode.CHANNEL_ROW_MISSING.value,
+                "params": {"channel": channel},
+            },
         )
     return _channel_to_dict(updated)
 
@@ -408,12 +433,18 @@ async def reset_channel_prompt(
     if channel not in CHANNEL_REGISTRY:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"unknown channel: {channel}",
+            detail={
+                "code": ErrorCode.CHANNEL_NOT_FOUND.value,
+                "params": {"channel": channel},
+            },
         )
     reset = await channels_repo.reset_prompt(_db(request), channel)
     if reset is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"channel row missing: {channel}",
+            detail={
+                "code": ErrorCode.CHANNEL_ROW_MISSING.value,
+                "params": {"channel": channel},
+            },
         )
     return _channel_to_dict(reset)
