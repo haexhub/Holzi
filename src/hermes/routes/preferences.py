@@ -15,6 +15,9 @@ Endpoints (all bearer-gated; the global auth middleware applies):
     PUT    /api/personas/{id}
     DELETE /api/personas/{id}
 
+    GET    /api/personas/{id}/history                       (Plan 36)
+    POST   /api/personas/{id}/history/{snapshot_id}/restore (Plan 36)
+
     GET    /api/personas/{id}/skills
     PUT    /api/personas/{id}/skills
 
@@ -22,20 +25,27 @@ Endpoints (all bearer-gated; the global auth middleware applies):
     PUT    /api/channels/{channel}
     POST   /api/channels/{channel}/reset
 """
+import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.errors import ErrorCode
 from hermes.personas import CHANNEL_REGISTRY
 from hermes.repository import channels as channels_repo
+from hermes.repository import persona_history as persona_history_repo
 from hermes.repository import personas as personas_repo
 from hermes.repository import skills as skills_repo
-from hermes.repository.models import ChannelPromptRow, Persona, Skill
+from hermes.repository.models import (
+    ChannelPromptRow,
+    Persona,
+    PersonaHistory,
+    Skill,
+)
 from hermes.routes.skills import SkillResponse
 
 router = APIRouter(prefix="/api")
@@ -51,7 +61,9 @@ router = APIRouter(prefix="/api")
 class PersonaResponse(BaseModel):
     id: int
     name: str
-    prompt: str
+    soul: str
+    identity: str
+    agents: str
     is_default: bool
     created_at: int
     updated_at: int
@@ -59,6 +71,21 @@ class PersonaResponse(BaseModel):
 
 class PersonaListResponse(BaseModel):
     personas: list[PersonaResponse]
+
+
+class PersonaHistoryItem(BaseModel):
+    id: int
+    persona_id: int
+    author: str
+    # Parsed `{name, soul, identity, agents}` (the JSON column in the
+    # `persona_history` row). Surfaces structured so the FE doesn't have
+    # to parse client-side.
+    snapshot: dict[str, str]
+    created_at: int
+
+
+class PersonaHistoryListResponse(BaseModel):
+    history: list[PersonaHistoryItem]
 
 
 class ChannelPromptResponse(BaseModel):
@@ -86,10 +113,22 @@ def _persona_to_dict(p: Persona) -> dict[str, Any]:
     return {
         "id": p.id,
         "name": p.name,
-        "prompt": p.prompt,
+        "soul": p.soul,
+        "identity": p.identity,
+        "agents": p.agents,
         "is_default": p.is_default,
         "created_at": p.created_at,
         "updated_at": p.updated_at,
+    }
+
+
+def _history_to_dict(h: PersonaHistory) -> dict[str, Any]:
+    return {
+        "id": h.id,
+        "persona_id": h.persona_id,
+        "author": h.author,
+        "snapshot": json.loads(h.snapshot_json),
+        "created_at": h.created_at,
     }
 
 
@@ -112,18 +151,30 @@ def _channel_to_dict(row: ChannelPromptRow) -> dict[str, Any]:
 
 
 class PersonaCreate(BaseModel):
+    # `extra="forbid"` rejects legacy `prompt`-keyed bodies with a Pydantic
+    # 422 — the wire contract is now three fragments, no transition shim.
+    model_config = ConfigDict(extra="forbid")
     # 1..64 chars matches the "Hermes der Direkte"-class names the user will
     # pick; longer values are almost certainly accidental paste.
     name: str = Field(min_length=1, max_length=64)
-    # 8192 is a hard upper bound; the LLM doesn't need more identity text and
-    # anything bigger is probably the user dumping a whole document.
-    prompt: str = Field(min_length=1, max_length=8192)
+    # 8192 per fragment is a hard upper bound; the LLM doesn't need more
+    # identity text and anything bigger is probably the user dumping a whole
+    # document. Default "" means "section omitted" — the resolver drops
+    # empty sections from the composed prompt. At least one fragment must
+    # be non-empty; that's a route-level check (see `create_persona`) so
+    # the 422 detail shape stays `{code, params}`.
+    soul: str = Field(default="", max_length=8192)
+    identity: str = Field(default="", max_length=8192)
+    agents: str = Field(default="", max_length=8192)
     is_default: bool = False
 
 
 class PersonaUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=1, max_length=64)
-    prompt: str | None = Field(default=None, min_length=1, max_length=8192)
+    soul: str | None = Field(default=None, max_length=8192)
+    identity: str | None = Field(default=None, max_length=8192)
+    agents: str | None = Field(default=None, max_length=8192)
     is_default: bool | None = None
 
 
@@ -141,11 +192,27 @@ async def list_personas(request: Request) -> dict[str, Any]:
 async def create_persona(
     body: PersonaCreate, request: Request
 ) -> dict[str, Any]:
+    # All-empty bodies aren't useful — without any fragment the persona
+    # contributes nothing to the resolver output. Enforced here (not via
+    # a `model_validator`) so the 422 detail shape stays `{code, params}`
+    # consistent with the rest of the API.
+    if not (
+        body.soul.strip() or body.identity.strip() or body.agents.strip()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": ErrorCode.PERSONA_FRAGMENTS_ALL_EMPTY.value,
+                "params": {},
+            },
+        )
     try:
         persona = await personas_repo.create(
             _db(request),
             name=body.name,
-            prompt=body.prompt,
+            soul=body.soul,
+            identity=body.identity,
+            agents=body.agents,
             is_default=body.is_default,
         )
     except IntegrityError as exc:
@@ -184,12 +251,36 @@ async def update_persona(
             detail=ErrorCode.PERSONA_DEFAULT_DEMOTE.value,
         )
 
+    # All-empty check on the POST-merge state: fields with `None` keep
+    # their existing value, otherwise the patch wins. If the result would
+    # have all three fragments empty (after `.strip()`), refuse — the
+    # resolver would compose an empty persona section, which is useless.
+    merged_soul = existing.soul if body.soul is None else body.soul
+    merged_identity = (
+        existing.identity if body.identity is None else body.identity
+    )
+    merged_agents = existing.agents if body.agents is None else body.agents
+    if not (
+        merged_soul.strip()
+        or merged_identity.strip()
+        or merged_agents.strip()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": ErrorCode.PERSONA_FRAGMENTS_ALL_EMPTY.value,
+                "params": {},
+            },
+        )
+
     try:
         updated = await personas_repo.update(
             db,
             persona_id,
             name=body.name,
-            prompt=body.prompt,
+            soul=body.soul,
+            identity=body.identity,
+            agents=body.agents,
             is_default=body.is_default,
         )
     except IntegrityError as exc:
@@ -242,6 +333,109 @@ async def delete_persona(persona_id: int, request: Request) -> Response:
             },
         )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Persona history (Plan 36)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/personas/{persona_id}/history",
+    response_model=PersonaHistoryListResponse,
+)
+async def list_persona_history(
+    persona_id: int, request: Request
+) -> dict[str, Any]:
+    db = _db(request)
+    persona = await personas_repo.get(db, persona_id)
+    if persona is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": ErrorCode.PERSONA_NOT_FOUND.value,
+                "params": {"id": persona_id},
+            },
+        )
+    rows = await persona_history_repo.list_for_persona(db, persona_id)
+    return {"history": [_history_to_dict(r) for r in rows]}
+
+
+@router.post(
+    "/personas/{persona_id}/history/{snapshot_id}/restore",
+    response_model=PersonaResponse,
+)
+async def restore_persona_history(
+    persona_id: int, snapshot_id: int, request: Request
+) -> dict[str, Any]:
+    db = _db(request)
+    persona = await personas_repo.get(db, persona_id)
+    if persona is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": ErrorCode.PERSONA_NOT_FOUND.value,
+                "params": {"id": persona_id},
+            },
+        )
+    snapshot = await persona_history_repo.get(db, snapshot_id)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": ErrorCode.PERSONA_HISTORY_NOT_FOUND.value,
+                "params": {"id": snapshot_id},
+            },
+        )
+    # Guard against cross-persona restore — the snapshot belongs to a
+    # different persona, so applying it would silently rename + overwrite
+    # the target. Refuse with a 422 the FE can surface as a routing error.
+    if snapshot.persona_id != persona_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": ErrorCode.PERSONA_HISTORY_PERSONA_MISMATCH.value,
+                "params": {
+                    "persona_id": persona_id,
+                    "snapshot_id": snapshot_id,
+                },
+            },
+        )
+    snap = json.loads(snapshot.snapshot_json)
+    # Restore = update the persona with the snapshot's fields. The repo
+    # `update()` auto-writes a NEW history row inside the same txn (the
+    # audit trail of the restore action itself), so the Verlauf-Tab will
+    # show snapshot-1, snapshot-2 (later state), snapshot-3 (restore-of-1).
+    try:
+        updated = await personas_repo.update(
+            db,
+            persona_id,
+            name=snap["name"],
+            soul=snap["soul"],
+            identity=snap["identity"],
+            agents=snap["agents"],
+        )
+    except IntegrityError as exc:
+        # The snapshot's `name` could now collide with a sibling persona
+        # that was renamed after the snapshot was taken. Surface as the
+        # same 409 PERSONA_NAME_CONFLICT shape as POST/PUT.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": ErrorCode.PERSONA_NAME_CONFLICT.value,
+                "params": {"name": snap["name"]},
+            },
+        ) from exc
+    if updated is None:
+        # Race: persona was deleted between the get and the update.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": ErrorCode.PERSONA_NOT_FOUND.value,
+                "params": {"id": persona_id},
+            },
+        )
+    return _persona_to_dict(updated)
 
 
 # ---------------------------------------------------------------------------
