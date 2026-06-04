@@ -85,13 +85,17 @@ async def create(
     agents: str,
     is_default: bool = False,
     ts: int | None = None,
+    history_author: str = "user",
 ) -> Persona:
     """Insert a row. UNIQUE(name) means a duplicate raises IntegrityError —
     route layer translates to 409. Triggers demote any prior default if
     `is_default=True`.
 
     A `persona_history` row capturing the new state is appended inside
-    the same transaction (atomic with the INSERT).
+    the same transaction (atomic with the INSERT). `history_author`
+    defaults to ``"user"`` — the lifespan backfill overrides this to
+    ``"system"`` so the seed snapshot is distinguishable from human
+    edits in the audit trail.
     """
     now = ts if ts is not None else int(time.time())
     async with engine.begin() as conn:
@@ -123,7 +127,9 @@ async def create(
                 "personas insert ... RETURNING returned no row"
             )
         persona = _row_to_persona(row)
-        await history_repo.write_snapshot(engine, persona, ts=now, conn=conn)
+        await history_repo.write_snapshot(
+            engine, persona, author=history_author, ts=now, conn=conn
+        )
     return persona
 
 

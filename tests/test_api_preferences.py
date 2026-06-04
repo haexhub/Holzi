@@ -2,16 +2,13 @@
 
 Plan 36 reshaped the persona wire contract from a single ``prompt``
 column to three fragments (``soul``/``identity``/``agents``) and added
-the history list + restore endpoints. The fixture monkeypatches
-``hermes.main.ensure_personas_backfill`` to seed the default persona
-with the new fragments shape — ``ensure_backfill`` itself still calls
-the pre-Plan-36 ``personas_repo.create(prompt=...)`` signature (fixed
-in Plan 36 Task 5) and would crash the lifespan otherwise.
+the history list + restore endpoints. After Task 5, ``ensure_backfill``
+seeds the default persona with the fragments shape natively — no
+monkeypatching of the lifespan boot is needed.
 """
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
-from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import main as hermes_main
 from hermes.personas import (
@@ -21,39 +18,9 @@ from hermes.personas import (
     DEFAULT_PERSONA_NAME,
     DEFAULT_PERSONA_SOUL,
 )
-from hermes.repository import channels as channels_repo
-from hermes.repository import personas as personas_repo
 
 VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
-
-
-async def _seed_fragments_default(engine: AsyncEngine) -> None:
-    """Plan-36-shaped seed: default persona with the new fragment columns
-    + channel rows. Drop-in replacement for ``ensure_backfill`` until
-    Task 5 lands."""
-    existing = await personas_repo.list_all(engine)
-    if not existing:
-        await personas_repo.create(
-            engine,
-            name=DEFAULT_PERSONA_NAME,
-            soul=DEFAULT_PERSONA_SOUL,
-            identity=DEFAULT_PERSONA_IDENTITY,
-            agents=DEFAULT_PERSONA_AGENTS,
-            is_default=True,
-        )
-    await channels_repo.ensure_seeded(engine)
-
-
-@pytest.fixture(autouse=True)
-def _patch_ensure_backfill(monkeypatch):
-    """Bypass the still-broken ``ensure_backfill`` (Task 5) so lifespan
-    boots cleanly with the fragments-shaped default persona."""
-    monkeypatch.setattr(
-        hermes_main,
-        "ensure_personas_backfill",
-        _seed_fragments_default,
-    )
 
 
 @pytest.fixture

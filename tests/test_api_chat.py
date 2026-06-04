@@ -184,9 +184,16 @@ async def test_api_chat_passes_composed_persona_channel_system_prompt(
     (a) fresh backfill → default Hermes + default web prompt,
     (b) customised via the public preferences endpoints → composition
     reflects the new persona + channel prompt."""
-    from hermes.personas import CHANNEL_REGISTRY, DEFAULT_PERSONA_PROMPT
+    from hermes.personas import (
+        CHANNEL_REGISTRY,
+        DEFAULT_PERSONA_AGENTS,
+        DEFAULT_PERSONA_IDENTITY,
+        DEFAULT_PERSONA_SOUL,
+    )
 
-    # (a) Default composition.
+    # (a) Default composition. Backfill seeds all three fragments
+    # (Plan 36), so the resolver emits Soul → Identity → Agents
+    # sections before the channel prompt.
     seen = _install_upstream_responses([_assistant_oneshot("a")])
     async with client.stream(
         "POST", "/api/chat", headers=AUTH, json={"message": "first"}
@@ -196,15 +203,20 @@ async def test_api_chat_passes_composed_persona_channel_system_prompt(
     sys_a = seen[0]["messages"][0]
     assert sys_a["role"] == "system"
     assert sys_a["content"] == (
-        f"{DEFAULT_PERSONA_PROMPT}\n\n"
+        f"## Soul\n{DEFAULT_PERSONA_SOUL}\n\n"
+        f"## Identity\n{DEFAULT_PERSONA_IDENTITY}\n\n"
+        f"## Agents\n{DEFAULT_PERSONA_AGENTS}\n\n"
         f"{CHANNEL_REGISTRY['web']['default_prompt']}"
     )
 
-    # (b) Customised: new persona + custom channel prompt.
+    # (b) Customised: new persona (identity-only) + custom channel prompt.
     new_persona = await client.post(
         "/api/personas",
         headers=AUTH,
-        json={"name": "Reviewer", "prompt": "Be merciless about types."},
+        json={
+            "name": "Reviewer",
+            "identity": "Be merciless about types.",
+        },
     )
     pid = new_persona.json()["id"]
     await client.put(
@@ -224,7 +236,10 @@ async def test_api_chat_passes_composed_persona_channel_system_prompt(
             pass
     sys_b = seen[0]["messages"][0]
     assert sys_b["role"] == "system"
-    assert sys_b["content"] == "Be merciless about types.\n\nCustom web prompt."
+    assert sys_b["content"] == (
+        "## Identity\nBe merciless about types.\n\n"
+        "Custom web prompt."
+    )
 
 
 async def test_api_chat_continues_existing_conversation(

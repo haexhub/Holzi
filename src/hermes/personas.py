@@ -62,14 +62,10 @@ CHANNEL_REGISTRY: Final[dict[str, dict[str, str]]] = {
 # the user has edited — backfill is gated on "table empty" rather than
 # "row with this name absent".
 DEFAULT_PERSONA_NAME: Final[str] = "Hermes"
-DEFAULT_PERSONA_PROMPT: Final[str] = (
-    "Du bist Hermes, ein persönlicher KI-Assistent für Martin. "
-    "Sei direkt, präzise und technisch."
-)
 
-# Plan 36: persona prompt split into three typed fragments. The default
-# constants exist alongside DEFAULT_PERSONA_PROMPT until Task 5 reshapes
-# `ensure_backfill` to seed the new columns.
+# Plan 36: persona prompt is three typed fragments. `ensure_backfill`
+# seeds these directly; the legacy `DEFAULT_PERSONA_PROMPT` constant was
+# removed in Task 5.
 DEFAULT_PERSONA_SOUL: Final[str] = (
     "Du bist direkt, präzise und technisch. Keine Floskeln, keine "
     "Höflichkeitswulst — der User ist Senior-Engineer."
@@ -167,14 +163,23 @@ async def ensure_backfill(engine: AsyncEngine) -> None:
       user has any persona, don't reintroduce "Hermes" (they may have
       renamed/deleted it intentionally).
     - Channels: per-key check via `channels_repo.ensure_seeded`.
+
+    The seed write goes through `personas_repo.create` with
+    ``history_author="system"`` so the initial `persona_history`
+    snapshot is tagged as system-emitted (distinct from `'user'`
+    edits and `'migration'` rows produced by
+    `_migrate_prompt_to_fragments`).
     """
     existing_personas = await personas_repo.list_all(engine)
     if not existing_personas:
         await personas_repo.create(
             engine,
             name=DEFAULT_PERSONA_NAME,
-            prompt=DEFAULT_PERSONA_PROMPT,
+            soul=DEFAULT_PERSONA_SOUL,
+            identity=DEFAULT_PERSONA_IDENTITY,
+            agents=DEFAULT_PERSONA_AGENTS,
             is_default=True,
+            history_author="system",
         )
     await channels_repo.ensure_seeded(engine)
 
