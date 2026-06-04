@@ -6,7 +6,7 @@ from hermes.repository import conversations, messages
 
 @pytest.fixture
 async def convo_id(conn: AsyncEngine) -> int:
-    convo = await conversations.create(conn, channel="signal", ts=1000)
+    convo = await conversations.create(conn, channel="task", ts=1000)
     return convo.id
 
 
@@ -44,7 +44,7 @@ async def test_list_by_conversation_returns_messages_in_chronological_order(
 async def test_list_by_conversation_does_not_leak_other_conversations(
     conn: AsyncEngine,
 ) -> None:
-    convo_a = await conversations.create(conn, channel="signal", ts=1)
+    convo_a = await conversations.create(conn, channel="task", ts=1)
     convo_b = await conversations.create(conn, channel="web", ts=2)
     await messages.append(conn, conversation_id=convo_a.id, role="user", content="A", ts=10)
     await messages.append(conn, conversation_id=convo_b.id, role="user", content="B", ts=20)
@@ -71,7 +71,7 @@ async def test_fts_search_finds_matching_messages(
 async def test_fts_search_can_be_scoped_to_conversation(
     conn: AsyncEngine,
 ) -> None:
-    convo_a = await conversations.create(conn, channel="signal", ts=1)
+    convo_a = await conversations.create(conn, channel="task", ts=1)
     convo_b = await conversations.create(conn, channel="web", ts=2)
     await messages.append(
         conn, conversation_id=convo_a.id, role="user", content="meeting at noon", ts=10

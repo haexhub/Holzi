@@ -101,7 +101,7 @@ def _list_conversations(db: AsyncEngine) -> Tool:
             "properties": {
                 "channel": {
                     "type": "string",
-                    "description": "Optional channel filter (signal | web | vscode).",
+                    "description": "Optional channel filter (web | task).",
                 },
                 "since_unix": {
                     "type": "integer",

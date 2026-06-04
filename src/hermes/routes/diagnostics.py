@@ -1,16 +1,16 @@
 """GET /api/diagnostics — redacted status snapshot for the Control Center.
 
 Surfaces what a new user needs to set up before first chat (LLM credential,
-messenger account, workspace roots, sandbox runtime) plus the things that
-must be healthy at runtime (database reachable, scheduler running). Every
-check returns a short human-readable message; the overall status is the
-worst of the children so the frontend can render a top-level badge without
-re-walking the list.
+workspace roots, sandbox runtime) plus the things that must be healthy at
+runtime (database reachable, scheduler running). Every check returns a
+short human-readable message; the overall status is the worst of the
+children so the frontend can render a top-level badge without re-walking
+the list.
 
 Redaction rule: this endpoint never returns API key plaintext, ciphertext
-blob bytes, the master key, the bearer auth token, or messenger account
-identifiers (phone numbers). Provider names, display names, model ids,
-sandbox image tags and workspace root ids are considered public.
+blob bytes, the master key, or the bearer auth token. Provider names,
+display names, model ids, sandbox image tags and workspace root ids are
+considered public.
 """
 from typing import Literal
 
@@ -22,7 +22,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from hermes.config import settings
 from hermes.logging import logger
 from hermes.repository import llm_credentials as llm_repo
-from hermes.repository import messenger as messenger_repo
 from hermes.repository import workspaces as workspaces_repo
 
 router = APIRouter(prefix="/api/diagnostics", tags=["diagnostics"])
@@ -96,29 +95,6 @@ async def _check_llm(db: AsyncEngine) -> DiagnosticsCheck:
         label="LLM",
         status="ok",
         message=f"active credential: {display} (model {model})",
-    )
-
-
-async def _check_messenger(db: AsyncEngine) -> DiagnosticsCheck:
-    # Messenger is an optional bridge, not a setup gate: the WebUI chat works
-    # without Signal/Telegram. Surface the state as `ok` when nothing is
-    # configured so the overall badge doesn't go yellow on users who run
-    # Hermes web-only by design.
-    accounts = await messenger_repo.list_all(db)
-    active = [a for a in accounts if a.is_active]
-    if not active:
-        return DiagnosticsCheck(
-            id="messenger",
-            label="Messenger",
-            status="ok",
-            message="no messenger accounts configured (optional Signal/Telegram bridge)",
-        )
-    providers = sorted({a.provider for a in active})
-    return DiagnosticsCheck(
-        id="messenger",
-        label="Messenger",
-        status="ok",
-        message=f"{len(active)} active account(s): {', '.join(providers)}",
     )
 
 
@@ -223,20 +199,11 @@ async def api_diagnostics(request: Request) -> DiagnosticsResponse:
     ]
     if db is not None:
         checks.append(await _check_llm(db))
-        checks.append(await _check_messenger(db))
     else:
         checks.append(
             DiagnosticsCheck(
                 id="llm",
                 label="LLM",
-                status="error",
-                message="cannot check — database not initialised",
-            )
-        )
-        checks.append(
-            DiagnosticsCheck(
-                id="messenger",
-                label="Messenger",
                 status="error",
                 message="cannot check — database not initialised",
             )

@@ -50,9 +50,9 @@ def _read_user_guide() -> Tool:
                 "topic": {
                     "type": "string",
                     "description": (
-                        "Slug of the topic (e.g. 'workspaces', "
-                        "'messengers', 'memory', 'tasks'). See the "
-                        "capability index for the full list."
+                        "Slug of the topic (e.g. 'workspaces', 'memory', "
+                        "'tasks'). See the capability index for the full "
+                        "list."
                     ),
                 }
             },

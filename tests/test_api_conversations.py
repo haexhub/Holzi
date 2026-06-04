@@ -31,7 +31,7 @@ async def test_api_conversations_requires_auth(client: httpx.AsyncClient) -> Non
 async def test_api_conversations_list_returns_recent_with_counts(
     client: httpx.AsyncClient,
 ) -> None:
-    c1 = await conversations.create(app.state.db, channel="signal", ts=1000)
+    c1 = await conversations.create(app.state.db, channel="task", ts=1000)
     c2 = await conversations.create(app.state.db, channel="web", ts=2000)
     await messages.append(
         app.state.db, conversation_id=c1.id, role="user", content="hi", ts=1001
@@ -57,10 +57,10 @@ async def test_api_conversations_list_returns_recent_with_counts(
 async def test_api_conversations_list_filters_by_channel(
     client: httpx.AsyncClient,
 ) -> None:
-    c1 = await conversations.create(app.state.db, channel="signal", ts=1000)
+    c1 = await conversations.create(app.state.db, channel="task", ts=1000)
     await conversations.create(app.state.db, channel="web", ts=2000)
 
-    response = await client.get("/api/conversations?channel=signal", headers=AUTH)
+    response = await client.get("/api/conversations?channel=task", headers=AUTH)
     assert response.status_code == 200
     ids = [c["id"] for c in response.json()]
     assert ids == [c1.id]
@@ -286,7 +286,7 @@ async def test_api_conversations_search_combines_with_channel_filter(
         app.state.db, channel="web", title="standup notes", ts=1000
     )
     await conversations.create(
-        app.state.db, channel="signal", title="standup notes", ts=2000
+        app.state.db, channel="task", title="standup notes", ts=2000
     )
 
     response = await client.get(

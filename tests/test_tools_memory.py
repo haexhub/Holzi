@@ -37,7 +37,7 @@ async def test_build_memory_tools_returns_expected_catalog(
 async def test_recall_memory_finds_messages_and_notes(
     conn: AsyncEngine,
 ) -> None:
-    convo = await conversations.create(conn, channel="signal", ts=1)
+    convo = await conversations.create(conn, channel="task", ts=1)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="reschedule standup", ts=10
     )
@@ -56,7 +56,7 @@ async def test_recall_memory_finds_messages_and_notes(
 
 
 async def test_recall_memory_respects_limit(conn: AsyncEngine) -> None:
-    convo = await conversations.create(conn, channel="signal", ts=1)
+    convo = await conversations.create(conn, channel="task", ts=1)
     for i in range(5):
         await messages.append(
             conn, conversation_id=convo.id, role="user", content="alpha", ts=i + 10
@@ -74,7 +74,7 @@ async def test_recall_memory_respects_limit(conn: AsyncEngine) -> None:
 async def test_list_conversations_returns_all_with_message_count(
     conn: AsyncEngine,
 ) -> None:
-    a = await conversations.create(conn, channel="signal", title="A", ts=1)
+    a = await conversations.create(conn, channel="task", title="A", ts=1)
     b = await conversations.create(conn, channel="web", title="B", ts=3)
     await messages.append(conn, conversation_id=a.id, role="user", content="x", ts=10)
     await messages.append(conn, conversation_id=a.id, role="assistant", content="y", ts=11)
@@ -87,21 +87,21 @@ async def test_list_conversations_returns_all_with_message_count(
     by_id = {c["id"]: c for c in data}
     assert by_id[a.id]["message_count"] == 2
     assert by_id[b.id]["message_count"] == 1
-    assert by_id[a.id]["channel"] == "signal"
+    assert by_id[a.id]["channel"] == "task"
     assert by_id[a.id]["title"] == "A"
 
 
 async def test_list_conversations_can_filter_by_channel(
     conn: AsyncEngine,
 ) -> None:
-    await conversations.create(conn, channel="signal", ts=1)
+    await conversations.create(conn, channel="task", ts=1)
     await conversations.create(conn, channel="web", ts=2)
-    await conversations.create(conn, channel="signal", ts=3)
+    await conversations.create(conn, channel="task", ts=3)
 
     tool = _by_name(build_memory_tools(conn), "list_conversations")
-    payload = await tool.handler({"channel": "signal"})
+    payload = await tool.handler({"channel": "task"})
     data = json.loads(payload)
-    assert {c["channel"] for c in data} == {"signal"}
+    assert {c["channel"] for c in data} == {"task"}
     assert len(data) == 2
 
 
@@ -111,7 +111,7 @@ async def test_list_conversations_can_filter_by_channel(
 async def test_get_conversation_returns_metadata_and_messages(
     conn: AsyncEngine,
 ) -> None:
-    convo = await conversations.create(conn, channel="signal", title="t", ts=1)
+    convo = await conversations.create(conn, channel="task", title="t", ts=1)
     await messages.append(conn, conversation_id=convo.id, role="user", content="a", ts=10)
     await messages.append(conn, conversation_id=convo.id, role="assistant", content="b", ts=11)
 

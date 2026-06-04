@@ -8,10 +8,13 @@ The four-decision protocol (`allow_once`, `allow_session`, `allow_always`,
    `revoke_always` / `list_always` against a fresh per-test SQLite DB.
 2. Endpoint tests — `GET /api/approvals/standing`, `DELETE .../{tool}`, and
    the four-decision `POST /api/approvals/{id}` body validation.
-3. Integration tests — `/api/chat` with cross_channel_send, asserting that a
-   pre-seeded standing approval skips the `approval_required` event entirely
-   and that a `deny` with reason flows into the tool error fed back to the
-   LLM.
+3. Integration tests — `/api/chat` with mcp_install (the only remaining
+   approval-gated built-in after Plan 34 removed the messenger surface),
+   asserting that a pre-seeded standing approval skips the
+   `approval_required` event entirely and that a `deny` with reason flows
+   into the tool error fed back to the LLM. mcp_install is called with
+   args that fail validation early, so no real MCP server gets installed
+   in the test DB.
 """
 import asyncio
 import json
@@ -195,10 +198,10 @@ async def client():
 
 async def test_repo_grant_and_list_always(conn) -> None:
     """`grant_always` upserts and `list_always` returns granted_at/last_used_at."""
-    await approvals_repo.grant_always(conn, "cross_channel_send", now=1000)
+    await approvals_repo.grant_always(conn, "mcp_install", now=1000)
     rows = await approvals_repo.list_always(conn)
     assert [(r.tool_name, r.granted_at) for r in rows] == [
-        ("cross_channel_send", 1000)
+        ("mcp_install", 1000)
     ]
     # last_used_at is None on a fresh grant.
     assert rows[0].last_used_at is None
@@ -206,8 +209,8 @@ async def test_repo_grant_and_list_always(conn) -> None:
 
 async def test_repo_grant_always_is_idempotent(conn) -> None:
     """Re-granting the same tool refreshes `granted_at` without duplicate rows."""
-    await approvals_repo.grant_always(conn, "cross_channel_send", now=1000)
-    await approvals_repo.grant_always(conn, "cross_channel_send", now=2000)
+    await approvals_repo.grant_always(conn, "mcp_install", now=1000)
+    await approvals_repo.grant_always(conn, "mcp_install", now=2000)
     rows = await approvals_repo.list_always(conn)
     assert len(rows) == 1
     assert rows[0].granted_at == 2000
@@ -215,23 +218,23 @@ async def test_repo_grant_always_is_idempotent(conn) -> None:
 
 async def test_repo_is_always_allowed(conn) -> None:
     assert (
-        await approvals_repo.is_always_allowed(conn, "cross_channel_send")
+        await approvals_repo.is_always_allowed(conn, "mcp_install")
     ) is False
-    await approvals_repo.grant_always(conn, "cross_channel_send", now=1000)
+    await approvals_repo.grant_always(conn, "mcp_install", now=1000)
     assert (
-        await approvals_repo.is_always_allowed(conn, "cross_channel_send")
+        await approvals_repo.is_always_allowed(conn, "mcp_install")
     ) is True
 
 
 async def test_repo_revoke_always(conn) -> None:
-    await approvals_repo.grant_always(conn, "cross_channel_send", now=1000)
-    removed = await approvals_repo.revoke_always(conn, "cross_channel_send")
+    await approvals_repo.grant_always(conn, "mcp_install", now=1000)
+    removed = await approvals_repo.revoke_always(conn, "mcp_install")
     assert removed is True
     assert (
-        await approvals_repo.is_always_allowed(conn, "cross_channel_send")
+        await approvals_repo.is_always_allowed(conn, "mcp_install")
     ) is False
     # Revoking a missing row returns False (caller surfaces as 404).
-    assert (await approvals_repo.revoke_always(conn, "cross_channel_send")) is False
+    assert (await approvals_repo.revoke_always(conn, "mcp_install")) is False
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +311,7 @@ async def test_get_standing_returns_always_and_session(
     client: httpx.AsyncClient,
 ) -> None:
     # Seed: an always-row directly via the repo, plus a session entry in state.
-    await approvals_repo.grant_always(app.state.db, "cross_channel_send", now=1000)
+    await approvals_repo.grant_always(app.state.db, "mcp_install", now=1000)
     app.state.session_approvals[42] = {"save_note"}
     try:
         resp = await client.get("/api/approvals/standing", headers=AUTH)
@@ -316,7 +319,7 @@ async def test_get_standing_returns_always_and_session(
         body = resp.json()
         assert body["always"] == [
             {
-                "tool": "cross_channel_send",
+                "tool": "mcp_install",
                 "granted_at": 1000,
                 "last_used_at": None,
             }
@@ -326,7 +329,7 @@ async def test_get_standing_returns_always_and_session(
             (42, "save_note")
         }
     finally:
-        await approvals_repo.revoke_always(app.state.db, "cross_channel_send")
+        await approvals_repo.revoke_always(app.state.db, "mcp_install")
         app.state.session_approvals.pop(42, None)
 
 
@@ -338,14 +341,14 @@ async def test_get_standing_requires_auth(client: httpx.AsyncClient) -> None:
 async def test_delete_standing_always_removes_row(
     client: httpx.AsyncClient,
 ) -> None:
-    await approvals_repo.grant_always(app.state.db, "cross_channel_send", now=1000)
+    await approvals_repo.grant_always(app.state.db, "mcp_install", now=1000)
     resp = await client.delete(
-        "/api/approvals/standing/cross_channel_send?scope=always",
+        "/api/approvals/standing/mcp_install?scope=always",
         headers=AUTH,
     )
     assert resp.status_code == 204
     assert (
-        await approvals_repo.is_always_allowed(app.state.db, "cross_channel_send")
+        await approvals_repo.is_always_allowed(app.state.db, "mcp_install")
     ) is False
 
 
@@ -353,7 +356,7 @@ async def test_delete_standing_always_missing_returns_404(
     client: httpx.AsyncClient,
 ) -> None:
     resp = await client.delete(
-        "/api/approvals/standing/cross_channel_send?scope=always",
+        "/api/approvals/standing/mcp_install?scope=always",
         headers=AUTH,
     )
     assert resp.status_code == 404
@@ -362,7 +365,7 @@ async def test_delete_standing_always_missing_returns_404(
 async def test_delete_standing_session_removes_entry(
     client: httpx.AsyncClient,
 ) -> None:
-    app.state.session_approvals[7] = {"save_note", "cross_channel_send"}
+    app.state.session_approvals[7] = {"save_note", "mcp_install"}
     try:
         resp = await client.delete(
             "/api/approvals/standing/save_note?scope=session",
@@ -370,7 +373,7 @@ async def test_delete_standing_session_removes_entry(
         )
         assert resp.status_code == 204
         # Only the targeted tool is gone — the other session entry survives.
-        assert app.state.session_approvals[7] == {"cross_channel_send"}
+        assert app.state.session_approvals[7] == {"mcp_install"}
     finally:
         app.state.session_approvals.pop(7, None)
 
@@ -395,11 +398,17 @@ async def test_chat_skips_approval_when_always_allowed(
 ) -> None:
     """A persisted always-grant pre-empts the approval gate: no
     `approval_required` event is emitted and the tool runs immediately."""
-    await approvals_repo.grant_always(app.state.db, "cross_channel_send", now=1000)
+    await approvals_repo.grant_always(app.state.db, "mcp_install", now=1000)
     _install_upstream_responses(
         [
             _tool_call_first_response(
-                "cross_channel_send", {"channel": "signal", "message": "hi"}
+                "mcp_install",
+                {
+                    "name": "test-mcp",
+                    "display_name": "Test",
+                    "transport": "http",
+                    "url": "http://127.0.0.1:1/mcp",
+                },
             ),
             _assistant_oneshot("done"),
         ]
@@ -427,12 +436,18 @@ async def test_chat_skips_approval_when_session_allowed(
     (none yet) — we create one explicitly and seed the session entry under
     its id."""
     convo = await conversations.create(app.state.db, channel="web", ts=1000)
-    app.state.session_approvals[convo.id] = {"cross_channel_send"}
+    app.state.session_approvals[convo.id] = {"mcp_install"}
     try:
         _install_upstream_responses(
             [
                 _tool_call_first_response(
-                    "cross_channel_send", {"channel": "signal", "message": "hi"}
+                    "mcp_install",
+                {
+                    "name": "test-mcp",
+                    "display_name": "Test",
+                    "transport": "http",
+                    "url": "http://127.0.0.1:1/mcp",
+                },
                 ),
                 _assistant_oneshot("done"),
             ]
@@ -462,12 +477,18 @@ async def test_chat_session_grant_does_not_carry_to_new_conversation(
     on `convo_b` still requires approval on `convo_b`."""
     convo_a = await conversations.create(app.state.db, channel="web", ts=1000)
     convo_b = await conversations.create(app.state.db, channel="web", ts=1001)
-    app.state.session_approvals[convo_a.id] = {"cross_channel_send"}
+    app.state.session_approvals[convo_a.id] = {"mcp_install"}
     try:
         _install_upstream_responses(
             [
                 _tool_call_first_response(
-                    "cross_channel_send", {"channel": "signal", "message": "hi"}
+                    "mcp_install",
+                {
+                    "name": "test-mcp",
+                    "display_name": "Test",
+                    "transport": "http",
+                    "url": "http://127.0.0.1:1/mcp",
+                },
                 ),
                 _assistant_oneshot("done"),
             ]
@@ -503,7 +524,13 @@ async def test_chat_allow_session_persists_session_grant(
     _install_upstream_responses(
         [
             _tool_call_first_response(
-                "cross_channel_send", {"channel": "signal", "message": "hi"}
+                "mcp_install",
+                {
+                    "name": "test-mcp",
+                    "display_name": "Test",
+                    "transport": "http",
+                    "url": "http://127.0.0.1:1/mcp",
+                },
             ),
             _assistant_oneshot("done"),
         ]
@@ -522,7 +549,7 @@ async def test_chat_allow_session_persists_session_grant(
     events = _parse_sse(body)
     session_evt = next(d for n, d in events if n == "session")
     conv_id = session_evt["conversation_id"]
-    assert "cross_channel_send" in app.state.session_approvals.get(conv_id, set())
+    assert "mcp_install" in app.state.session_approvals.get(conv_id, set())
 
 
 async def test_chat_allow_always_persists_to_db(
@@ -534,7 +561,13 @@ async def test_chat_allow_always_persists_to_db(
     _install_upstream_responses(
         [
             _tool_call_first_response(
-                "cross_channel_send", {"channel": "signal", "message": "hi"}
+                "mcp_install",
+                {
+                    "name": "test-mcp",
+                    "display_name": "Test",
+                    "transport": "http",
+                    "url": "http://127.0.0.1:1/mcp",
+                },
             ),
             _assistant_oneshot("done"),
         ]
@@ -552,7 +585,7 @@ async def test_chat_allow_always_persists_to_db(
 
     assert (
         await approvals_repo.is_always_allowed(
-            app.state.db, "cross_channel_send"
+            app.state.db, "mcp_install"
         )
     ) is True
     # Simulate a restart: clear the in-memory session map.
@@ -560,7 +593,7 @@ async def test_chat_allow_always_persists_to_db(
     # The persisted always-grant still pre-empts the gate.
     assert (
         await approvals_repo.is_always_allowed(
-            app.state.db, "cross_channel_send"
+            app.state.db, "mcp_install"
         )
     ) is True
 
@@ -573,7 +606,13 @@ async def test_chat_deny_reason_flows_into_tool_error(
     seen = _install_upstream_responses(
         [
             _tool_call_first_response(
-                "cross_channel_send", {"channel": "signal", "message": "hi"}
+                "mcp_install",
+                {
+                    "name": "test-mcp",
+                    "display_name": "Test",
+                    "transport": "http",
+                    "url": "http://127.0.0.1:1/mcp",
+                },
             ),
             _assistant_oneshot("ok, won't send"),
         ]

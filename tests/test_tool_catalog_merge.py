@@ -34,8 +34,6 @@ def _identity_handler(args: dict) -> Awaitable[str]:
 async def test_builtin_only_marks_all_source_builtin(conn) -> None:
     catalog = build_tool_catalog(
         db=conn,
-        signal_client=None,
-        signal_self_number=None,
         external_http=None,
         brave_api_key=None,
         mcp_manager=None,
@@ -55,8 +53,6 @@ async def test_mcp_tools_appended_after_builtin(conn) -> None:
     )
     catalog = build_tool_catalog(
         db=conn,
-        signal_client=None,
-        signal_self_number=None,
         external_http=None,
         brave_api_key=None,
         mcp_manager=_FakeMcpManager([remote]),
@@ -73,8 +69,6 @@ async def test_meta_tools_present_and_builtin(conn) -> None:
     and the expected approval gating."""
     catalog = build_tool_catalog(
         db=conn,
-        signal_client=None,
-        signal_self_number=None,
         external_http=None,
         brave_api_key=None,
         mcp_manager=None,
@@ -99,8 +93,6 @@ async def test_list_tools_reflects_provider(conn) -> None:
     captured: dict[str, list[Tool]] = {"catalog": []}
     catalog = build_tool_catalog(
         db=conn,
-        signal_client=None,
-        signal_self_number=None,
         external_http=None,
         brave_api_key=None,
         mcp_manager=None,
@@ -125,16 +117,12 @@ async def test_list_tools_reflects_provider(conn) -> None:
 async def test_no_manager_is_equivalent_to_empty_manager(conn) -> None:
     a = build_tool_catalog(
         db=conn,
-        signal_client=None,
-        signal_self_number=None,
         external_http=None,
         brave_api_key=None,
         mcp_manager=None,
     )
     b = build_tool_catalog(
         db=conn,
-        signal_client=None,
-        signal_self_number=None,
         external_http=None,
         brave_api_key=None,
         mcp_manager=_FakeMcpManager([]),

@@ -20,7 +20,6 @@ dependencies = [
     "trafilatura>=1.12",
     "cryptography>=48.0.0",
     "croniter>=2.0",
-    "websockets>=12",
 ]
 
 [project.optional-dependencies]

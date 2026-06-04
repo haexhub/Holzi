@@ -1,11 +1,11 @@
 """Database bootstrap.
 
 Owns the single `AsyncEngine` for the app. Consumers (route handlers,
-scheduler tick, signal worker) open their own short-lived
-`AsyncConnection` via `engine.begin()` so that each logical operation
-sits in its own transaction. Sharing a single long-lived connection
-across concurrent tasks is unsafe per SQLAlchemy's ownership model —
-two coroutines committing on the same connection would race.
+scheduler tick) open their own short-lived `AsyncConnection` via
+`engine.begin()` so that each logical operation sits in its own
+transaction. Sharing a single long-lived connection across concurrent
+tasks is unsafe per SQLAlchemy's ownership model — two coroutines
+committing on the same connection would race.
 
 Schema lives in two places:
 - `schema.py` — SQLAlchemy Core `Table` definitions for the regular
@@ -137,6 +137,25 @@ async def _apply_lightweight_migrations(conn) -> None:
     await conn.execute(text("DROP INDEX IF EXISTS reminders_due_pending"))
     await conn.execute(text("DROP TABLE IF EXISTS reminders"))
     await conn.execute(text("DROP TABLE IF EXISTS todos"))
+
+    # Plan 34: messenger surface removed. Drop the messenger_accounts table
+    # and prune any leftover conversations/messages/attachments tied to
+    # the deprecated 'signal' / 'telegram' channels. FK cascades take care
+    # of children (messages, attachments, agent_runs).
+    await conn.execute(
+        text("DROP INDEX IF EXISTS messenger_accounts_active_per_provider")
+    )
+    await conn.execute(text("DROP TABLE IF EXISTS messenger_accounts"))
+    await conn.execute(
+        text(
+            "DELETE FROM conversations WHERE channel IN ('signal', 'telegram')"
+        )
+    )
+    await conn.execute(
+        text(
+            "DELETE FROM channel_prompts WHERE channel IN ('signal', 'telegram')"
+        )
+    )
 
     cols = await conn.execute(text("PRAGMA table_info(agent_runs)"))
     existing = {row[1] for row in cols.all()}

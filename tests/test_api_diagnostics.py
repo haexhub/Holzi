@@ -17,13 +17,12 @@ from asgi_lifespan import LifespanManager
 from hermes import config as hermes_config
 from hermes.main import app
 from hermes.repository import llm_credentials as llm_repo
-from hermes.repository import messenger as messenger_repo
 from hermes.repository import workspaces as workspaces_repo
 
 VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
-CHECK_IDS = {"database", "llm", "messenger", "scheduler", "workspace", "sandbox"}
+CHECK_IDS = {"database", "llm", "scheduler", "workspace", "sandbox"}
 
 
 @pytest.fixture
@@ -79,14 +78,12 @@ async def test_diagnostics_default_state_flags_missing_setup(
     client: httpx.AsyncClient,
 ) -> None:
     """Fresh boot: no LLM credential, no workspace roots, no sandbox socket
-    → warnings, but db + scheduler are ok. Messenger is an optional bridge,
-    so its absence stays `ok` and doesn't pollute the overall badge."""
+    → warnings, but db + scheduler are ok."""
     body = (await client.get("/api/diagnostics", headers=AUTH)).json()
 
     assert _check(body, "database")["status"] == "ok"
     assert _check(body, "scheduler")["status"] == "ok"
     assert _check(body, "llm")["status"] == "warning"
-    assert _check(body, "messenger")["status"] == "ok"
     assert _check(body, "workspace")["status"] == "warning"
     assert _check(body, "sandbox")["status"] == "warning"
     # Overall = worst of children → warning when anything is < ok.
@@ -127,42 +124,6 @@ async def test_diagnostics_with_active_llm_credential_does_not_leak_secrets(
     assert blob.data not in raw
     assert blob.iv not in raw
     assert blob.tag not in raw
-
-
-# ---------------------------------------------------------------------------
-# messenger
-# ---------------------------------------------------------------------------
-
-
-async def test_diagnostics_with_active_messenger_account_reports_ok(
-    client: httpx.AsyncClient,
-) -> None:
-    phone = "+491701234567"
-    account = await messenger_repo.create_signal(app.state.db, phone)
-    await messenger_repo.activate(app.state.db, account.id)
-
-    response = await client.get("/api/diagnostics", headers=AUTH)
-    body = response.json()
-    messenger = _check(body, "messenger")
-
-    assert messenger["status"] == "ok"
-    # Distinguishes the "configured" case from the "optional / not set up" case.
-    assert "active account" in messenger["message"]
-    # Phone numbers are PII — must not be returned verbatim.
-    assert phone not in response.text
-
-
-async def test_diagnostics_without_messenger_account_is_ok_not_warning(
-    client: httpx.AsyncClient,
-) -> None:
-    """Messenger is an optional Signal/Telegram bridge — its absence is a
-    valid web-only configuration, not a setup issue. Status must be `ok` so
-    the overall badge stays green when only LLM is configured."""
-    response = await client.get("/api/diagnostics", headers=AUTH)
-    messenger = _check(response.json(), "messenger")
-
-    assert messenger["status"] == "ok"
-    assert "optional" in messenger["message"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -294,8 +255,8 @@ async def test_diagnostics_reports_error_when_scheduler_task_died(
 async def test_diagnostics_handles_missing_db_engine(
     client: httpx.AsyncClient,
 ) -> None:
-    """If the DB engine isn't on app.state the LLM and messenger checks
-    can't run; they must surface as 'error' rather than crashing."""
+    """If the DB engine isn't on app.state the LLM check can't run; it
+    must surface as 'error' rather than crashing."""
     original_db = app.state.db
     try:
         app.state.db = None
@@ -303,7 +264,6 @@ async def test_diagnostics_handles_missing_db_engine(
         body = response.json()
         assert _check(body, "database")["status"] == "error"
         assert _check(body, "llm")["status"] == "error"
-        assert _check(body, "messenger")["status"] == "error"
         assert body["overall"] == "error"
     finally:
         app.state.db = original_db
