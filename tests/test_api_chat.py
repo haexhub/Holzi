@@ -1290,7 +1290,7 @@ async def test_api_chat_emits_approval_required_and_resumes_on_allow(
                     "name": "test-mcp",
                     "display_name": "Test",
                     "transport": "http",
-                    "url": "http://example.invalid/mcp",
+                    "url": "http://127.0.0.1:1/mcp",
                 },
             ),
             _assistant_oneshot("done"),
@@ -1321,7 +1321,7 @@ async def test_api_chat_emits_approval_required_and_resumes_on_allow(
         "name": "test-mcp",
         "display_name": "Test",
         "transport": "http",
-        "url": "http://example.invalid/mcp",
+        "url": "http://127.0.0.1:1/mcp",
     }
     assert approval["approval_id"]
     assert approval["reason"]
@@ -1343,7 +1343,7 @@ async def test_api_chat_deny_skips_tool_and_feeds_denied_result(
                     "name": "test-mcp",
                     "display_name": "Test",
                     "transport": "http",
-                    "url": "http://example.invalid/mcp",
+                    "url": "http://127.0.0.1:1/mcp",
                 },
             ),
             _assistant_oneshot("ok, won't send"),

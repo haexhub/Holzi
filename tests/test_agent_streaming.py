@@ -516,7 +516,7 @@ async def test_run_agent_without_on_chunk_stays_non_streaming(
 ) -> None:
     """Backwards-compat: callers without on_chunk (Signal worker, MCP, tests)
     keep getting the JSON-response path."""
-    convo = await conversations.create(conn, channel="signal", ts=1000)
+    convo = await conversations.create(conn, channel="task", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )

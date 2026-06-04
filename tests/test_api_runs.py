@@ -511,12 +511,12 @@ async def test_runs_finalize_does_not_clobber_terminal_row(conn) -> None:
 
 async def test_runs_repository_list_filters(conn) -> None:
     c1 = await conversations.create(conn, channel="web", ts=1000)
-    c2 = await conversations.create(conn, channel="signal", ts=1000)
+    c2 = await conversations.create(conn, channel="task", ts=1000)
     for i, (cid, status, channel) in enumerate(
         [
             (c1.id, "success", "web"),
             (c1.id, "error", "web"),
-            (c2.id, "success", "signal"),
+            (c2.id, "success", "task"),
         ]
     ):
         rid = f"r{i}"
