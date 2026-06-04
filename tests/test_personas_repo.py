@@ -55,6 +55,30 @@ async def test_create_basic_persona(conn: AsyncEngine) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_with_history_author_overrides_default(
+    conn: AsyncEngine,
+) -> None:
+    """Plan 36 Task 5: the lifespan backfill seeds the default persona
+    with ``history_author='system'`` so the initial audit row is
+    distinguishable from user-edits. The kwarg defaults to ``'user'``
+    (covered by `test_create_basic_persona`); this verifies the
+    override flows through to the history row.
+    """
+    p = await repo.create(
+        conn,
+        name="Seeded",
+        soul="",
+        identity="seed",
+        agents="",
+        is_default=True,
+        history_author="system",
+    )
+    history = await history_repo.list_for_persona(conn, p.id)
+    assert len(history) == 1
+    assert history[0].author == "system"
+
+
+@pytest.mark.asyncio
 async def test_create_duplicate_name_raises(conn: AsyncEngine) -> None:
     await repo.create(
         conn,
