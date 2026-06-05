@@ -25,6 +25,7 @@ from hermes.personas import (
     _migrate_skills_add_enabled,
 )
 from hermes.personas import ensure_backfill as ensure_personas_backfill
+from hermes.users import ensure_users_seeded
 from hermes.repository import sandbox_crashes as sandbox_crashes_repo
 from hermes.repository import workspaces as workspaces_repo
 from hermes.routes.api import router as api_router
@@ -142,6 +143,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # scheduler, /api/chat). Idempotent — re-runs on existing DBs
         # only insert what's missing.
         await ensure_personas_backfill(app.state.db)
+
+        # Plan 37: seed the single-user row. Must run after
+        # ensure_personas_backfill so the persona exists when bootstrap
+        # tools reference it. Idempotent — INSERT OR IGNORE.
+        await ensure_users_seeded(app.state.db)
 
         # Plan 25: backfill workspaces from HERMES_WORKSPACE_ROOTS. The env
         # is the bootstrap mechanism; the DB is the source of truth from
