@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from hermes.starter_skills import ensure_starter_skills_seeded, STARTER_SKILLS
+from hermes.starter_skills import STARTER_SKILLS, ensure_starter_skills_seeded
 
 
 @pytest.mark.asyncio
