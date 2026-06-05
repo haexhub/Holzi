@@ -635,3 +635,110 @@ async def test_reset_unknown_channel_returns_404(
     detail = response.json()["detail"]
     assert detail["code"] == "CHANNEL_NOT_FOUND"
     assert detail["params"]["channel"] == "discord"
+
+
+# ---------------------------------------------------------------------------
+# Persona credential + model (Plan 29-D Task 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_put_persona_unknown_credential_422(client: httpx.AsyncClient) -> None:
+    resp = await client.put(
+        "/api/personas/1",
+        json={"llm_credential_id": 9999},
+        headers=AUTH,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["code"] == "PERSONA_INVALID_CREDENTIAL"
+
+
+async def test_put_persona_model_without_credential_422(client: httpx.AsyncClient) -> None:
+    resp = await client.put(
+        "/api/personas/1",
+        json={"model": "gpt-4o"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["code"] == "PERSONA_INVALID_MODEL"
+
+
+async def test_put_persona_credential_persisted(client: httpx.AsyncClient) -> None:
+    # Create a credential to pin
+    create_resp = await client.post(
+        "/api/llm/credentials",
+        json={"provider": "openai", "display_name": "test-openai", "api_key": "sk-test"},
+        headers=AUTH,
+    )
+    assert create_resp.status_code == 201
+    cred_id = create_resp.json()["id"]
+
+    # Pin it on persona 1 (without model, which would require provider model validation)
+    put_resp = await client.put(
+        "/api/personas/1",
+        json={"llm_credential_id": cred_id},
+        headers=AUTH,
+    )
+    assert put_resp.status_code == 200
+    assert put_resp.json()["llm_credential_id"] == cred_id
+    assert put_resp.json()["model"] is None
+
+
+async def test_put_persona_clear_credential(client: httpx.AsyncClient) -> None:
+    # First pin a credential
+    create_resp = await client.post(
+        "/api/llm/credentials",
+        json={"provider": "openai", "display_name": "test-openai2", "api_key": "sk-test"},
+        headers=AUTH,
+    )
+    cred_id = create_resp.json()["id"]
+    await client.put("/api/personas/1", json={"llm_credential_id": cred_id}, headers=AUTH)
+
+    # Now clear it
+    clear_resp = await client.put(
+        "/api/personas/1",
+        json={"llm_credential_id": None},
+        headers=AUTH,
+    )
+    assert clear_resp.status_code == 200
+    assert clear_resp.json()["llm_credential_id"] is None
+
+
+async def test_get_persona_models_no_credential_503(client: httpx.AsyncClient) -> None:
+    resp = await client.get("/api/personas/1/models", headers=AUTH)
+    assert resp.status_code == 503
+
+
+async def test_get_persona_models_persona_not_found_404(client: httpx.AsyncClient) -> None:
+    resp = await client.get("/api/personas/9999/models", headers=AUTH)
+    assert resp.status_code == 404
+
+
+async def test_delete_credential_nulls_persona_model(client: httpx.AsyncClient) -> None:
+    """Deleting a credential nulls llm_credential_id (via FK cascade) and model (app-side)."""
+    # Create a credential
+    cred_resp = await client.post(
+        "/api/llm/credentials",
+        json={"provider": "openai", "display_name": "to-delete", "api_key": "sk-x"},
+        headers=AUTH,
+    )
+    assert cred_resp.status_code == 201
+    cred_id = cred_resp.json()["id"]
+
+    # Pin it on persona 1 (no model, just credential)
+    put_resp = await client.put(
+        "/api/personas/1",
+        json={"llm_credential_id": cred_id},
+        headers=AUTH,
+    )
+    assert put_resp.status_code == 200
+    assert put_resp.json()["llm_credential_id"] == cred_id
+
+    # Delete the credential
+    del_resp = await client.delete(f"/api/llm/credentials/{cred_id}", headers=AUTH)
+    assert del_resp.status_code == 204
+
+    # Verify persona no longer references the credential (both columns nulled)
+    list_resp = await client.get("/api/personas", headers=AUTH)
+    p = list_resp.json()["personas"][0]
+    assert p["llm_credential_id"] is None
+    assert p["model"] is None

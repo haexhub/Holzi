@@ -458,6 +458,7 @@ async def test_api_chat_passes_tool_catalog_to_agent(
     assert "task_create" in names
 
 
+@pytest.mark.real_persona_context
 async def test_api_chat_uses_active_credential_model(
     client: httpx.AsyncClient,
 ) -> None:

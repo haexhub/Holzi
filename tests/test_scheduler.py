@@ -3,10 +3,15 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from hermes.repository import agent_tasks, conversations, messages, runs
+from hermes.crypto import EncryptedBlob, Encryptor
+from hermes.personas import ensure_backfill
+from hermes.repository import agent_tasks, conversations, llm_credentials, messages, runs
 from hermes.scheduler import AgentTaskScheduler, ConversationSweepScheduler
+
+_DUMMY_ENCRYPTOR = Encryptor(b"\x00" * 32)
 
 
 def _stub_runner(
@@ -41,14 +46,29 @@ def _stub_runner(
     return runner
 
 
-def _scheduler(
+async def _scheduler(
     db: AsyncEngine,
     *,
     runner: Callable[..., Awaitable[str]] | None = None,
 ) -> AgentTaskScheduler:
+    """Seed a minimal DB (backfill + active credential) and return a scheduler."""
+    await ensure_backfill(db)
+    cred = await llm_credentials.create_api_key(
+        db,
+        provider="anthropic",
+        display_name="test-cred",
+        base_url=None,
+        ciphertext=EncryptedBlob(iv="aa", tag="bb", data="cc"),
+    )
+    async with db.begin() as conn:
+        await conn.execute(
+            text("UPDATE llm_credentials SET is_active=1 WHERE id=:id"),
+            {"id": cred.id},
+        )
     return AgentTaskScheduler(
         db,
-        upstream_provider=lambda: None,  # type: ignore[arg-type,return-value]
+        encryptor=_DUMMY_ENCRYPTOR,
+        fallback_proxy_url="http://proxy.test",
         tool_factory=lambda: [],
         fallback_model="test-model",
         agent_runner=runner or _stub_runner(),
@@ -65,7 +85,7 @@ async def test_fire_due_runs_one_shot_and_disables(conn: AsyncEngine) -> None:
         conn, title="ping", prompt="say hi", due_at=1_000, ts=500
     )
 
-    sched = _scheduler(conn)
+    sched = await _scheduler(conn)
     fired = await sched.fire_due(now=2_000)
 
     assert fired == 1
@@ -144,7 +164,7 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
     await agent_tasks.create(
         conn, title="t1", prompt="run me", due_at=1_000, ts=500
     )
-    sched = _scheduler(conn, runner=capturing_runner)
+    sched = await _scheduler(conn, runner=capturing_runner)
     await sched.fire_due(now=2_000)
     assert captured[-1] == (
         f"{default_persona_block}\n\n"
@@ -167,7 +187,7 @@ async def test_fire_due_skips_disabled(conn: AsyncEngine) -> None:
         conn, title="paused", prompt="x", due_at=1_000, enabled=False, ts=500
     )
 
-    sched = _scheduler(conn)
+    sched = await _scheduler(conn)
     fired = await sched.fire_due(now=2_000)
 
     assert fired == 0
@@ -190,7 +210,7 @@ async def test_fire_due_advances_recurring(conn: AsyncEngine) -> None:
     )
     assert task.due_at == 28_800
 
-    sched = _scheduler(conn)
+    sched = await _scheduler(conn)
     fired = await sched.fire_due(now=30_000)
 
     assert fired == 1
@@ -208,7 +228,7 @@ async def test_fire_due_records_failure_without_advancing_enabled(
         conn, title="boom", prompt="x", due_at=1_000, ts=500
     )
 
-    sched = _scheduler(conn, runner=_stub_runner(raises=RuntimeError("nope")))
+    sched = await _scheduler(conn, runner=_stub_runner(raises=RuntimeError("nope")))
     fired = await sched.fire_due(now=2_000)
 
     # `fired` counts only successful firings (the `fired += 1` lives after
@@ -253,7 +273,7 @@ async def test_fire_due_keeps_other_tasks_running_after_one_fails(
         )
         return "ok"
 
-    sched = _scheduler(conn, runner=runner)
+    sched = await _scheduler(conn, runner=runner)
     await sched.fire_due(now=2_000)
 
     bad_after = await agent_tasks.get(conn, bad.id)
@@ -273,7 +293,7 @@ async def test_run_now_does_not_advance_due_at(conn: AsyncEngine) -> None:
     )
     original_due_at = task.due_at
 
-    sched = _scheduler(conn)
+    sched = await _scheduler(conn)
     await sched.run_now(task.id)
 
     refreshed = await agent_tasks.get(conn, task.id)
@@ -292,7 +312,7 @@ async def test_run_now_does_not_disable_one_shot(conn: AsyncEngine) -> None:
         conn, title="once", prompt="manual", due_at=2_000_000_000, ts=500
     )
 
-    sched = _scheduler(conn)
+    sched = await _scheduler(conn)
     await sched.run_now(task.id)
 
     refreshed = await agent_tasks.get(conn, task.id)
@@ -303,7 +323,7 @@ async def test_run_now_does_not_disable_one_shot(conn: AsyncEngine) -> None:
 
 
 async def test_run_now_missing_raises_lookup_error(conn: AsyncEngine) -> None:
-    sched = _scheduler(conn)
+    sched = await _scheduler(conn)
     try:
         await sched.run_now(9999)
     except LookupError as exc:

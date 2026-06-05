@@ -21,6 +21,7 @@ from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
 from hermes.personas import (
     _drop_persona_skills_table,
+    _migrate_personas_add_credential_columns,
     _migrate_prompt_to_fragments,
     _migrate_skills_add_enabled,
     ensure_bootstrap_skill_seeded,
@@ -140,6 +141,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _drop_persona_skills_table(app.state.db)
         await _migrate_skills_add_enabled(app.state.db)
 
+        # Plan 29-D: add llm_credential_id + model to personas if missing.
+        await _migrate_personas_add_credential_columns(app.state.db)
+
         # Plan 29-A: seed the default persona + per-channel prompt rows
         # before anything that resolves system prompts can run (workers,
         # scheduler, /api/chat). Idempotent — re-runs on existing DBs
@@ -255,7 +259,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # the scheduler on a stale client.
         app.state.scheduler = AgentTaskScheduler(
             app.state.db,
-            upstream_provider=lambda: app.state.upstream,
+            encryptor=app.state.encryptor,
+            fallback_proxy_url=settings.llm_url,
             tool_factory=lambda: build_tool_catalog(
                 db=app.state.db,
                 external_http=app.state.external_http,

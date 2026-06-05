@@ -33,14 +33,18 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.errors import ErrorCode
 from hermes.personas import CHANNEL_REGISTRY
+from hermes.provider_models import ProviderModelsError, list_provider_models
 from hermes.repository import channels as channels_repo
+from hermes.repository import llm_credentials as llm_credentials_repo
 from hermes.repository import persona_history as persona_history_repo
 from hermes.repository import personas as personas_repo
 from hermes.repository.models import (
     ChannelPromptRow,
+    LlmCredential,
     Persona,
     PersonaHistory,
 )
+from hermes.repository.personas import _UNSET as REPO_UNSET
 
 router = APIRouter(prefix="/api")
 
@@ -61,6 +65,8 @@ class PersonaResponse(BaseModel):
     is_default: bool
     created_at: int
     updated_at: int
+    llm_credential_id: int | None = None
+    model: str | None = None
 
 
 class PersonaListResponse(BaseModel):
@@ -127,6 +133,8 @@ def _persona_to_dict(p: Persona) -> dict[str, Any]:
         "is_default": p.is_default,
         "created_at": p.created_at,
         "updated_at": p.updated_at,
+        "llm_credential_id": p.llm_credential_id,
+        "model": p.model,
     }
 
 
@@ -184,6 +192,8 @@ class PersonaUpdate(BaseModel):
     identity: str | None = Field(default=None, max_length=8192)
     agents: str | None = Field(default=None, max_length=8192)
     is_default: bool | None = None
+    llm_credential_id: int | None = None
+    model: str | None = None
 
 
 @router.get("/personas", response_model=PersonaListResponse)
@@ -281,6 +291,76 @@ async def update_persona(
             },
         )
 
+    # Resolve new credential/model fields — only touch if they appear in the request body.
+    new_cred_id = REPO_UNSET
+    new_model = REPO_UNSET
+    _fetched_cred = None  # cache to avoid double-fetch when both fields are set
+
+    if "llm_credential_id" in body.model_fields_set:
+        if body.llm_credential_id is not None:
+            _fetched_cred = await llm_credentials_repo.get(db, body.llm_credential_id)
+            if _fetched_cred is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={
+                        "code": ErrorCode.PERSONA_INVALID_CREDENTIAL.value,
+                        "params": {"id": body.llm_credential_id},
+                    },
+                )
+        new_cred_id = body.llm_credential_id
+        # Clearing the credential also orphans any pinned model — auto-clear it
+        # unless the caller explicitly sets model in the same request.
+        if new_cred_id is None and "model" not in body.model_fields_set:
+            new_model = None
+
+    if "model" in body.model_fields_set:
+        if body.model is not None:
+            # model can only be set when a credential is configured (new or existing)
+            effective_cred_id = (
+                body.llm_credential_id
+                if "llm_credential_id" in body.model_fields_set
+                else existing.llm_credential_id
+            )
+            if effective_cred_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={
+                        "code": ErrorCode.PERSONA_INVALID_MODEL.value,
+                        "params": {"model": body.model, "reason": "no_credential"},
+                    },
+                )
+            # Reuse the credential already fetched above when possible.
+            cred_for_model: LlmCredential | None
+            if _fetched_cred is not None and _fetched_cred.id == effective_cred_id:
+                cred_for_model = _fetched_cred
+            else:
+                cred_for_model = await llm_credentials_repo.get(db, effective_cred_id)
+                if cred_for_model is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail={
+                            "code": ErrorCode.PERSONA_INVALID_CREDENTIAL.value,
+                            "params": {"id": effective_cred_id},
+                        },
+                    )
+            try:
+                available_models = await list_provider_models(
+                    cred_for_model,
+                    http=request.app.state.external_http,
+                    encryptor=request.app.state.encryptor,
+                )
+                if not any(m.id == body.model for m in available_models):
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail={
+                            "code": ErrorCode.PERSONA_INVALID_MODEL.value,
+                            "params": {"model": body.model},
+                        },
+                    )
+            except ProviderModelsError:
+                pass  # provider unreachable; skip model validation
+        new_model = body.model
+
     try:
         updated = await personas_repo.update(
             db,
@@ -290,6 +370,8 @@ async def update_persona(
             identity=body.identity,
             agents=body.agents,
             is_default=body.is_default,
+            llm_credential_id=new_cred_id,
+            model=new_model,
         )
     except IntegrityError as exc:
         raise HTTPException(
@@ -341,6 +423,47 @@ async def delete_persona(persona_id: int, request: Request) -> Response:
             },
         )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/personas/{persona_id}/models")
+async def list_persona_models(persona_id: int, request: Request) -> dict[str, Any]:
+    """Return the model list for this persona's credential (or the active credential).
+
+    Wraps GET /api/llm/credentials/{id}/models so the UI doesn't need to know
+    which credential a persona uses.
+    """
+    db = _db(request)
+    persona = await personas_repo.get(db, persona_id)
+    if persona is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": ErrorCode.PERSONA_NOT_FOUND.value,
+                "params": {"id": persona_id},
+            },
+        )
+
+    cred = None
+    if persona.llm_credential_id is not None:
+        cred = await llm_credentials_repo.get(db, persona.llm_credential_id)
+    if cred is None:
+        cred = await llm_credentials_repo.get_active(db)
+    if cred is None:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorCode.PERSONA_NO_CREDENTIAL.value,
+        )
+
+    try:
+        models = await list_provider_models(
+            cred,
+            http=request.app.state.external_http,
+            encryptor=request.app.state.encryptor,
+        )
+    except ProviderModelsError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {"models": [{"id": m.id, "label": m.label} for m in models]}
 
 
 # ---------------------------------------------------------------------------
