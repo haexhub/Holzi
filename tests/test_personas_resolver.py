@@ -19,6 +19,7 @@ from hermes.personas import (
     CHANNEL_REGISTRY,
     PersonaContext,
     get_effective_system_prompt,
+    resolve_chat_context_meta,
     resolve_persona_context,
 )
 from hermes.repository import channels as channels_repo
@@ -401,3 +402,59 @@ async def test_resolve_context_model_falls_back_to_cred_default_when_persona_mod
     await personas_repo.update(conn, persona.id, llm_credential_id=cred_id)
     ctx = await resolve_persona_context("web", conn)
     assert ctx.model == "gpt-4o"
+
+
+# ---------------------------------------------------------------------------
+# One-turn overrides + resolve_chat_context_meta (Plan 39 / Wave B2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_model_override_wins(conn):
+    cred_id = await _seed_credential(conn, model="gpt-4o", is_active=True)
+    persona = await _seed_default_persona(conn, identity="x")
+    await personas_repo.update(conn, persona.id, llm_credential_id=cred_id, model="gpt-4-turbo")
+    ctx = await resolve_persona_context("web", conn, model_override="claude-opus-4-7")
+    assert ctx.model == "claude-opus-4-7"
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_persona_id_override_uses_that_persona(conn):
+    await _seed_credential(conn, model="gpt-4o", is_active=True)
+    await _seed_default_persona(conn, identity="default-identity")
+    other = await personas_repo.create(
+        conn, name="Override", soul="", identity="override-identity", agents="", is_default=False
+    )
+    ctx = await resolve_persona_context("web", conn, persona_id_override=other.id)
+    assert "override-identity" in ctx.system_prompt
+    assert "default-identity" not in ctx.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_unknown_persona_id_override_raises_404(conn):
+    from fastapi import HTTPException
+    await _seed_credential(conn, model="gpt-4o", is_active=True)
+    await _seed_default_persona(conn, identity="x")
+    with pytest.raises(HTTPException) as exc_info:
+        await resolve_persona_context("web", conn, persona_id_override=999999)
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_context_meta_returns_persona_and_model(conn):
+    cred_id = await _seed_credential(conn, model="gpt-4o", is_active=True)
+    persona = await _seed_default_persona(conn, identity="x", name="Hermes")
+    await personas_repo.update(conn, persona.id, llm_credential_id=cred_id, model="gpt-4-turbo")
+    persona_id, persona_name, model = await resolve_chat_context_meta("web", conn)
+    assert persona_id == persona.id
+    assert persona_name == "Hermes"
+    assert model == "gpt-4-turbo"
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_context_meta_no_credential_raises_503(conn):
+    from fastapi import HTTPException
+    await _seed_default_persona(conn, identity="x")
+    with pytest.raises(HTTPException) as exc_info:
+        await resolve_chat_context_meta("web", conn)
+    assert exc_info.value.status_code == 503

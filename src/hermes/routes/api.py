@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import json
+import re
 import uuid
 import zoneinfo
 from collections.abc import AsyncIterator
@@ -42,7 +43,7 @@ from hermes.events import (
     to_sse,
 )
 from hermes.logging import logger
-from hermes.personas import resolve_persona_context
+from hermes.personas import resolve_chat_context_meta, resolve_persona_context
 from hermes.repository import (
     agent_tasks,
     attachments,
@@ -105,26 +106,74 @@ class ChatRequest(BaseModel):
     # Ids of attachments previously uploaded to this conversation (Plan 11).
     # Each must belong to `conversation_id` and still be unlinked, else 400.
     attachment_ids: list[int] = Field(default_factory=list)
+    # One-turn overrides. Not persisted. Cleared after the agent run.
+    model_override: str | None = Field(default=None, min_length=1)
+    persona_id_override: int | None = Field(default=None, ge=1)
+
+
+class ChatContextResponse(BaseModel):
+    """Lightweight metadata about the currently-resolved persona + model.
+
+    Used by the chat header pill to display the active agent identity.
+    Does NOT include the system_prompt (large; computed per-turn only).
+    """
+    persona_id: int | None
+    persona_name: str | None
+    model: str
+
+
+_API_KEY_RE = re.compile(
+    r"\b("
+    r"sk-ant-[A-Za-z0-9_\-]{20,}"   # Anthropic
+    r"|sk-[A-Za-z0-9_\-]{20,}"       # OpenAI (incl. sk-proj-… project keys)
+    r"|gsk_[A-Za-z0-9]{20,}"         # Google AI Studio
+    r"|AIza[A-Za-z0-9_\-]{35,}"      # Google
+    r")\b"
+    r"|Bearer [A-Za-z0-9_\-\.]{20,}" # Generic bearer
+)
+
+
+def _sanitize_upstream_message(body: bytes, status: int) -> str:
+    """Extract a safe-to-display message from a provider error response body.
+
+    Parses JSON, extracts .error.message or top-level .message, redacts
+    known API key patterns, and truncates to 300 chars. Returns
+    "HTTP <status>" on parse failure or empty body.
+    """
+    if not body:
+        return f"HTTP {status}"
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return f"HTTP {status}"
+    msg = ""
+    if isinstance(data.get("error"), dict):
+        msg = str(data["error"].get("message", ""))
+    if not msg:
+        msg = str(data.get("message", ""))
+    if not msg:
+        return f"HTTP {status}"
+    msg = _API_KEY_RE.sub("[REDACTED]", msg)
+    return msg[:300]
 
 
 def _classify_chat_error(exc: BaseException) -> tuple[str, int, str]:
-    """Map an exception raised inside the agent loop to an error code and the
-    HTTP status it would correspond to in a non-streaming world.
+    """Map an agent-loop exception to (sse_code, status_code, message).
 
-    The /api/chat response is already 200 by the time we see the error
-    (StreamingResponse has flushed headers), so the status code is reported
-    to the client *inside* the SSE error event — the frontend uses it to
-    distinguish "upstream provider is down" (502) from "upstream too slow"
-    (504) from "our agent blew up" (500). Same triage logic mirrors what
-    `routes/llm.py` does for `GET /models`.
+    status_code is the HTTP status the upstream actually returned (or the
+    equivalent synthetic one for network errors). The frontend uses it to
+    distinguish 429 (rate-limit) from 5xx (provider error) from 50x (our side).
     """
     if isinstance(exc, httpx.HTTPStatusError):
         upstream_status = exc.response.status_code
-        return (
-            "upstream_http_error",
-            502,
-            f"upstream returned {upstream_status}",
-        )
+        try:
+            body = exc.response.content  # populated for non-streaming raises
+        except httpx.ResponseNotRead:
+            body = b""
+        message = _sanitize_upstream_message(body, upstream_status)
+        if upstream_status == 429:
+            return ("upstream_rate_limited", 429, message)
+        return ("upstream_http_error", upstream_status, message)
     if isinstance(exc, httpx.TimeoutException):
         return ("upstream_timeout", 504, "upstream timed out")
     if isinstance(exc, httpx.RequestError):
@@ -227,10 +276,21 @@ async def api_chat(request: Request) -> Response:
             conversation_id=convo.id,
         )
 
-    return await _stream_web_agent_run(request, convo)
+    return await _stream_web_agent_run(
+        request,
+        convo,
+        model_override=payload.model_override,
+        persona_id_override=payload.persona_id_override,
+    )
 
 
-async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
+async def _stream_web_agent_run(
+    request: Request,
+    convo: Any,
+    *,
+    model_override: str | None = None,
+    persona_id_override: int | None = None,
+) -> Response:
     """Run the web agent over the conversation's current message history and
     stream it as SSE. Shared by /api/chat (after appending the new user
     message) and /api/conversations/{id}/retry (after trimming the trailing
@@ -270,7 +330,12 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
 
     # Resolve persona context once before the SSE generator so the model id
     # we persist in agent_runs matches what the upstream actually saw.
-    persona_ctx = await resolve_persona_context(WEB_CHANNEL, db)
+    persona_ctx = await resolve_persona_context(
+        WEB_CHANNEL,
+        db,
+        model_override=model_override,
+        persona_id_override=persona_id_override,
+    )
     model = persona_ctx.model
     persona_upstream = build_client_for_credential(
         persona_ctx.credential,
@@ -511,6 +576,26 @@ async def api_chat_cancel_run(request: Request, run_id: str) -> Response:
         )
     event.set()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/chat/context")
+async def api_chat_context(request: Request) -> ChatContextResponse:
+    """Return the currently-resolved persona name + model for the web channel.
+
+    Resolves persona → credential → model using the same priority chain as
+    POST /api/chat but skips the (expensive) system-prompt build. Suitable
+    for polling from the header pill. Returns 503 if no credential is
+    configured (same condition that would block a real chat turn).
+    """
+    db: AsyncEngine = request.app.state.db
+    persona_id, persona_name, model = await resolve_chat_context_meta(
+        WEB_CHANNEL, db
+    )
+    return ChatContextResponse(
+        persona_id=persona_id,
+        persona_name=persona_name,
+        model=model,
+    )
 
 
 # ---------------------------------------------------------------------------

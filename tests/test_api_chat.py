@@ -581,7 +581,7 @@ async def test_api_chat_classifies_upstream_http_error(
 
     err = dict(_parse_sse(body))["error"]
     assert err["code"] == "upstream_http_error"
-    assert err["status_code"] == 502
+    assert err["status_code"] == 500
     assert "500" in err["message"]
 
 
