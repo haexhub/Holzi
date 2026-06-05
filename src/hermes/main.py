@@ -21,6 +21,7 @@ from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
 from hermes.personas import (
     _drop_persona_skills_table,
+    _migrate_personas_add_credential_columns,
     _migrate_prompt_to_fragments,
     _migrate_skills_add_enabled,
     ensure_bootstrap_skill_seeded,
@@ -139,6 +140,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Must run before any resolver/repo code that reads skills.
         await _drop_persona_skills_table(app.state.db)
         await _migrate_skills_add_enabled(app.state.db)
+
+        # Plan 29-D: add llm_credential_id + model to personas if missing.
+        await _migrate_personas_add_credential_columns(app.state.db)
 
         # Plan 29-A: seed the default persona + per-channel prompt rows
         # before anything that resolves system prompts can run (workers,

@@ -296,6 +296,25 @@ async def _migrate_skills_add_enabled(engine: AsyncEngine) -> None:
         )
 
 
+async def _migrate_personas_add_credential_columns(engine: AsyncEngine) -> None:
+    """One-shot: add llm_credential_id + model to personas if missing. Idempotent."""
+    async with engine.connect() as conn:
+        cols = (await conn.execute(text("PRAGMA table_info(personas)"))).all()
+        has_cred = any(row.name == "llm_credential_id" for row in cols)
+    if has_cred:
+        return
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "ALTER TABLE personas ADD COLUMN llm_credential_id INTEGER "
+                "REFERENCES llm_credentials(id) ON DELETE SET NULL"
+            )
+        )
+        await conn.execute(
+            text("ALTER TABLE personas ADD COLUMN model TEXT")
+        )
+
+
 async def ensure_backfill(engine: AsyncEngine) -> None:
     """Seed the default persona + every channel row that's missing.
 
