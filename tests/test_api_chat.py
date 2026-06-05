@@ -209,9 +209,10 @@ async def test_api_chat_passes_composed_persona_channel_system_prompt(
     _all_skills.sort(key=lambda s: s["slug"])
     _skill_lines = ["## Available skills"]
     for s in _all_skills:
-        _skill_lines.append(
-            f"- {s['slug']} — {s['description']} (use when: {s['when_to_use']})"
-        )
+        line = f"- {s['slug']} — {s['description']}"
+        if s.get("when_to_use"):
+            line += f" (use when: {s['when_to_use']})"
+        _skill_lines.append(line)
     _catalog_line = "\n".join(_skill_lines)
 
     # (a) Default composition. Backfill seeds all three fragments
