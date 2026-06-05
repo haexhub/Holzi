@@ -125,7 +125,7 @@ class ChatContextResponse(BaseModel):
 _API_KEY_RE = re.compile(
     r"\b("
     r"sk-ant-[A-Za-z0-9_\-]{20,}"   # Anthropic
-    r"|sk-[A-Za-z0-9]{20,}"          # OpenAI
+    r"|sk-[A-Za-z0-9_\-]{20,}"       # OpenAI (incl. sk-proj-… project keys)
     r"|gsk_[A-Za-z0-9]{20,}"         # Google AI Studio
     r"|AIza[A-Za-z0-9_\-]{35,}"      # Google
     r")\b"

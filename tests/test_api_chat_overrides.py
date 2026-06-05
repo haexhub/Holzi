@@ -1,8 +1,10 @@
 """Tests for per-turn model + persona overrides on POST /api/chat."""
 import json
+
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
+
 from hermes.main import app
 
 VALID_TOKEN = "test-token-for-pytest"
@@ -34,8 +36,13 @@ async def client():
 
 
 @pytest.fixture(autouse=True)
-def _mock_upstream(monkeypatch):
-    """Intercept upstream calls and return a canned SSE stream."""
+async def _mock_upstream(client):
+    """Intercept upstream calls and return a canned SSE stream.
+
+    Depends on `client` so it installs the mock AFTER the lifespan startup
+    that sets `app.state.upstream` to a real client — otherwise startup
+    would clobber the mock and requests would hit the real network.
+    """
     seen_bodies: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -46,12 +53,15 @@ def _mock_upstream(monkeypatch):
             stream=httpx.ByteStream(_sse_done_stream()),
         )
 
+    previous = app.state.upstream
     app.state.upstream = httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
         base_url="http://fake-upstream",
     )
+    # Close the real client the lifespan built at startup; we replaced it.
+    if previous is not None:
+        await previous.aclose()
     yield seen_bodies
-    # credential fixture restores upstream in test teardown via LifespanManager
 
 
 async def test_chat_request_accepts_model_override(client, _mock_upstream):
@@ -62,6 +72,10 @@ async def test_chat_request_accepts_model_override(client, _mock_upstream):
     )
     # Stream consumes without error (2xx headers delivered)
     assert resp.status_code == 200
+    # The override must actually reach the upstream request — a bare 200
+    # would also pass if the upstream call had silently failed.
+    assert _mock_upstream, "upstream was never called"
+    assert _mock_upstream[0]["model"] == "claude-opus-4-7"
 
 
 async def test_chat_request_accepts_persona_id_override(client, _mock_upstream):
@@ -72,6 +86,8 @@ async def test_chat_request_accepts_persona_id_override(client, _mock_upstream):
         json={"message": "hello", "persona_id_override": 1},
     )
     assert resp.status_code == 200
+    # A valid persona override resolves and the turn reaches the upstream.
+    assert _mock_upstream, "upstream was never called"
 
 
 async def test_chat_request_rejects_unknown_persona_id(client, _mock_upstream):

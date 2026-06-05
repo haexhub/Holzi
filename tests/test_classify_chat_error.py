@@ -1,6 +1,6 @@
 """Unit tests for _classify_chat_error and _sanitize_upstream_message."""
 import json
-import pytest
+
 import httpx
 
 from hermes.routes.api import _classify_chat_error, _sanitize_upstream_message
@@ -13,7 +13,9 @@ def _make_status_error(status: int, body: bytes = b"") -> httpx.HTTPStatusError:
 
 
 def test_classify_429_returns_rate_limited_code():
-    body = json.dumps({"error": {"message": "Rate limit exceeded", "type": "rate_limit_error"}}).encode()
+    body = json.dumps(
+        {"error": {"message": "Rate limit exceeded", "type": "rate_limit_error"}}
+    ).encode()
     exc = _make_status_error(429, body)
     code, status_code, message = _classify_chat_error(exc)
     assert code == "upstream_rate_limited"
@@ -22,7 +24,9 @@ def test_classify_429_returns_rate_limited_code():
 
 
 def test_classify_503_returns_upstream_http_error():
-    body = json.dumps({"error": {"message": "Service unavailable", "type": "overloaded_error"}}).encode()
+    body = json.dumps(
+        {"error": {"message": "Service unavailable", "type": "overloaded_error"}}
+    ).encode()
     exc = _make_status_error(503, body)
     code, status_code, message = _classify_chat_error(exc)
     assert code == "upstream_http_error"
@@ -39,15 +43,26 @@ def test_classify_http_error_with_empty_body():
 
 
 def test_sanitize_redacts_api_key_in_message():
-    body = json.dumps({"error": {"message": "Invalid key sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}).encode()
+    key = "sk-ant-api03-" + "A" * 43
+    body = json.dumps({"error": {"message": f"Invalid key {key}"}}).encode()
     exc = _make_status_error(401, body)
     _, _, message = _classify_chat_error(exc)
-    assert "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" not in message
+    assert key not in message
     assert "[REDACTED]" in message
 
 
+def test_sanitize_redacts_openai_project_key():
+    key = "sk-proj-AbCd1234EfGh5678IjKl90Mn"
+    body = json.dumps({"error": {"message": f"Incorrect API key provided: {key}"}}).encode()
+    msg = _sanitize_upstream_message(body, 401)
+    assert key not in msg
+    assert "[REDACTED]" in msg
+
+
 def test_sanitize_upstream_message_openai_shape():
-    body = json.dumps({"error": {"message": "You exceeded your current quota", "type": "insufficient_quota"}}).encode()
+    body = json.dumps(
+        {"error": {"message": "You exceeded your current quota", "type": "insufficient_quota"}}
+    ).encode()
     msg = _sanitize_upstream_message(body, 429)
     assert msg == "You exceeded your current quota"
 
