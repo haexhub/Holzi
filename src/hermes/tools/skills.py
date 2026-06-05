@@ -61,7 +61,9 @@ def _skill_load(db: AsyncEngine) -> Tool:
         ),
         parameters_schema={
             "type": "object",
-            "properties": {"slug": {"type": "string"}},
+            "properties": {
+                "slug": {"type": "string", "minLength": 1, "maxLength": 64},
+            },
             "required": ["slug"],
         },
         handler=handler,
@@ -90,8 +92,12 @@ def _skill_search(db: AsyncEngine) -> Tool:
                         {"q": query},
                     )
                 ).all()
-        except OperationalError:
-            logger.info("skill_search FTS5 query error, returning empty", query=query)
+        except OperationalError as exc:
+            logger.warning(
+                "skill_search FTS5 query error, returning empty",
+                query=query,
+                error=str(exc),
+            )
             return json.dumps({"results": []})
         return json.dumps({"results": [dict(r._mapping) for r in rows]})
 

@@ -412,9 +412,12 @@ async def get_effective_system_prompt(
     - Section omitted entirely when zero enabled skills exist.
 
     Bootstrap-hint (Plan 37):
-    - Appended after ``channel_prompt`` when ``users.bootstrap_completed = 0``.
-    - Omitted when no ``users`` row exists (defensive) or after
-      ``mark_bootstrap_complete()`` flips the flag.
+    - Appended after ``channel_prompt`` when ``users.bootstrap_completed = 0``
+      AND the ``bootstrap-first-chat`` skill is present + enabled.
+    - Omitted when no ``users`` row exists (defensive), after
+      ``mark_bootstrap_complete()`` flips the flag, or when the
+      bootstrap skill was disabled/deleted — otherwise the agent would
+      follow the hint and hit a 404 on ``skill_load``.
 
     Persona resolution:
     1. `channel_prompts.default_persona_id` if set and the row exists.
@@ -467,7 +470,10 @@ async def get_effective_system_prompt(
     parts.append(channel_prompt)
 
     bootstrap_done = await users_mod.is_bootstrap_completed(engine)
-    if not bootstrap_done:
+    bootstrap_loadable = any(
+        s.slug == "bootstrap-first-chat" for s in enabled_skills
+    )
+    if not bootstrap_done and bootstrap_loadable:
         parts.append(_BOOTSTRAP_HINT)
 
     return "\n\n".join(parts)

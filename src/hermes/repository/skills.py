@@ -143,9 +143,7 @@ async def update(
     new_body = (
         body_markdown if body_markdown is not None else existing.body_markdown
     )
-    new_enabled = (
-        (1 if enabled else 0) if enabled is not None else (1 if existing.enabled else 0)
-    )
+    new_enabled = 1 if (enabled if enabled is not None else existing.enabled) else 0
 
     now = ts if ts is not None else int(time.time())
     async with engine.begin() as conn:
