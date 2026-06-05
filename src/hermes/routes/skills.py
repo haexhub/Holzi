@@ -15,7 +15,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -44,6 +44,7 @@ class SkillResponse(BaseModel):
     description: str
     when_to_use: str | None
     body_markdown: str
+    enabled: bool
     created_at: int
     updated_at: int
 
@@ -53,15 +54,20 @@ class SkillListResponse(BaseModel):
 
 
 class SkillCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     slug: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=1, max_length=500)
     when_to_use: str | None = Field(default=None, max_length=500)
     body_markdown: str = Field(min_length=1, max_length=_BODY_MAX_LEN)
+    enabled: bool = True
 
 
 class SkillUpdate(BaseModel):
     """Patch — slug is immutable, omit any field to leave it alone."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, min_length=1, max_length=500)
@@ -69,6 +75,7 @@ class SkillUpdate(BaseModel):
     body_markdown: str | None = Field(
         default=None, min_length=1, max_length=_BODY_MAX_LEN
     )
+    enabled: bool | None = None
 
 
 def _db(request: Request) -> AsyncEngine:
@@ -83,6 +90,7 @@ def _skill_to_dict(s: Skill) -> dict[str, Any]:
         "description": s.description,
         "when_to_use": s.when_to_use,
         "body_markdown": s.body_markdown,
+        "enabled": s.enabled,
         "created_at": s.created_at,
         "updated_at": s.updated_at,
     }
@@ -113,8 +121,9 @@ async def create_skill(
             slug=body.slug,
             name=body.name,
             description=body.description,
-            when_to_use=body.when_to_use,
+            when_to_use=body.when_to_use or "",
             body_markdown=body.body_markdown,
+            enabled=body.enabled,
         )
     except IntegrityError as exc:
         raise HTTPException(
@@ -138,6 +147,7 @@ async def update_skill(
         description=body.description,
         when_to_use=body.when_to_use,
         body_markdown=body.body_markdown,
+        enabled=body.enabled,
     )
     if updated is None:
         raise HTTPException(

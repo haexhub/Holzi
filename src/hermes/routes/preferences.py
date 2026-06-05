@@ -1,12 +1,12 @@
-"""HTTP API for personas + channel prompts (Plan 29-A) + persona-skill
-activation (Plan 33).
+"""HTTP API for personas + channel prompts (Plan 29-A → 36 → 37).
 
-Three thin CRUD surfaces over the `personas` / `channel_prompts` /
-`persona_skills` tables. The single-default invariant on personas is
-held by triggers in `schema.sql`; this layer is responsible for the
-API-level guardrails (duplicate name → 409, blank/oversized prompt →
-422, deleting the default persona → 422, unknown channel → 404,
-unknown skill in persona-skill set → 422).
+Two thin CRUD surfaces over the `personas` / `channel_prompts` tables.
+The per-persona skill-activation layer (Plan 33) was dropped in Plan 37
+in favour of the global catalog-index + `skill_load` tool pattern.
+The single-default invariant on personas is held by triggers in
+`schema.sql`; this layer is responsible for the API-level guardrails
+(duplicate name → 409, blank/oversized prompt → 422, deleting the
+default persona → 422, unknown channel → 404).
 
 Endpoints (all bearer-gated; the global auth middleware applies):
 
@@ -17,9 +17,6 @@ Endpoints (all bearer-gated; the global auth middleware applies):
 
     GET    /api/personas/{id}/history                       (Plan 36)
     POST   /api/personas/{id}/history/{snapshot_id}/restore (Plan 36)
-
-    GET    /api/personas/{id}/skills
-    PUT    /api/personas/{id}/skills
 
     GET    /api/channels
     PUT    /api/channels/{channel}
@@ -39,14 +36,11 @@ from hermes.personas import CHANNEL_REGISTRY
 from hermes.repository import channels as channels_repo
 from hermes.repository import persona_history as persona_history_repo
 from hermes.repository import personas as personas_repo
-from hermes.repository import skills as skills_repo
 from hermes.repository.models import (
     ChannelPromptRow,
     Persona,
     PersonaHistory,
-    Skill,
 )
-from hermes.routes.skills import SkillResponse
 
 router = APIRouter(prefix="/api")
 
@@ -450,118 +444,6 @@ async def restore_persona_history(
             },
         )
     return _persona_to_dict(updated)
-
-
-# ---------------------------------------------------------------------------
-# Persona-skill activation (Plan 33)
-# ---------------------------------------------------------------------------
-
-
-class PersonaSkillItem(BaseModel):
-    """One row in the persona's skill list as returned by GET — the full
-    skill payload is embedded so the UI can render the list without a
-    second round-trip to /api/skills."""
-
-    skill: SkillResponse  # forward-declared below; FastAPI resolves at import.
-    ordering: int
-    enabled: bool
-
-
-class PersonaSkillListResponse(BaseModel):
-    skills: list[PersonaSkillItem]
-
-
-class PersonaSkillSetItem(BaseModel):
-    """One row in the PUT body — refers to a skill by id, no inline data."""
-
-    skill_id: int
-    ordering: int = Field(ge=0)
-    enabled: bool
-
-
-class PersonaSkillSetRequest(BaseModel):
-    items: list[PersonaSkillSetItem]
-
-
-def _skill_to_response_dict(s: Skill) -> dict[str, Any]:
-    return {
-        "id": s.id,
-        "slug": s.slug,
-        "name": s.name,
-        "description": s.description,
-        "when_to_use": s.when_to_use,
-        "body_markdown": s.body_markdown,
-        "created_at": s.created_at,
-        "updated_at": s.updated_at,
-    }
-
-
-async def _persona_skills_payload(
-    db: AsyncEngine, persona_id: int
-) -> dict[str, Any]:
-    rows = await skills_repo.list_for_persona(db, persona_id)
-    return {
-        "skills": [
-            {
-                "skill": _skill_to_response_dict(skill),
-                "ordering": ordering,
-                "enabled": enabled,
-            }
-            for skill, ordering, enabled in rows
-        ]
-    }
-
-
-@router.get(
-    "/personas/{persona_id}/skills",
-    response_model=PersonaSkillListResponse,
-)
-async def list_persona_skills(
-    persona_id: int, request: Request
-) -> dict[str, Any]:
-    db = _db(request)
-    persona = await personas_repo.get(db, persona_id)
-    if persona is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.PERSONA_NOT_FOUND.value,
-                "params": {"id": persona_id},
-            },
-        )
-    return await _persona_skills_payload(db, persona_id)
-
-
-@router.put(
-    "/personas/{persona_id}/skills",
-    response_model=PersonaSkillListResponse,
-)
-async def set_persona_skills(
-    persona_id: int, body: PersonaSkillSetRequest, request: Request
-) -> dict[str, Any]:
-    db = _db(request)
-    persona = await personas_repo.get(db, persona_id)
-    if persona is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.PERSONA_NOT_FOUND.value,
-                "params": {"id": persona_id},
-            },
-        )
-
-    items = [item.model_dump() for item in body.items]
-    try:
-        await skills_repo.set_persona_skills(db, persona_id, items)
-    except IntegrityError as exc:
-        # Most likely cause: skill_id doesn't exist (FK violation) or a
-        # duplicate (skill_id) within the same items list (PK conflict).
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=ErrorCode.PERSONA_SKILL_ACTIVATION_INVALID.value,
-        ) from exc
-
-    return await _persona_skills_payload(db, persona_id)
 
 
 # ---------------------------------------------------------------------------
