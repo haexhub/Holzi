@@ -193,14 +193,27 @@ async def test_api_chat_passes_composed_persona_channel_system_prompt(
         DEFAULT_PERSONA_IDENTITY,
         DEFAULT_PERSONA_SOUL,
     )
+    from hermes.starter_skills import STARTER_SKILLS
 
-    # Plan 37: the lifespan seeds the bootstrap-first-chat skill, so the
-    # catalog index always contains it. Build the expected catalog line.
-    _catalog_line = (
-        f"## Available skills\n"
-        f"- bootstrap-first-chat — {BOOTSTRAP_SKILL_DESCRIPTION}"
-        f" (use when: {BOOTSTRAP_SKILL_WHEN_TO_USE})"
-    )
+    # Plan 37+38: the lifespan seeds the bootstrap-first-chat skill and the
+    # 8 curated starter skills. Build the expected catalog index (alphabetical
+    # by slug: bootstrap-first-chat comes first, then the 8 starter skills).
+    _all_skills = [
+        {
+            "slug": "bootstrap-first-chat",
+            "description": BOOTSTRAP_SKILL_DESCRIPTION,
+            "when_to_use": BOOTSTRAP_SKILL_WHEN_TO_USE,
+        },
+        *STARTER_SKILLS,
+    ]
+    _all_skills.sort(key=lambda s: s["slug"])
+    _skill_lines = ["## Available skills"]
+    for s in _all_skills:
+        line = f"- {s['slug']} — {s['description']}"
+        if s.get("when_to_use"):
+            line += f" (use when: {s['when_to_use']})"
+        _skill_lines.append(line)
+    _catalog_line = "\n".join(_skill_lines)
 
     # (a) Default composition. Backfill seeds all three fragments
     # (Plan 36), so the resolver emits Soul → Identity → Agents

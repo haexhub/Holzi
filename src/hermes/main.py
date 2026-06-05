@@ -45,6 +45,7 @@ from hermes.routes.workspaces import router as workspaces_router
 from hermes.sandbox import WorkspaceCrash
 from hermes.sandbox.factory import build_sandbox_manager
 from hermes.scheduler import AgentTaskScheduler, ConversationSweepScheduler
+from hermes.starter_skills import ensure_starter_skills_seeded
 from hermes.tool_catalog import build_tool_catalog
 from hermes.upstream import build_fallback_client, rebuild_upstream_from_db
 from hermes.users import ensure_users_seeded
@@ -150,6 +151,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # tools reference it. Idempotent — INSERT OR IGNORE.
         await ensure_users_seeded(app.state.db)
         await ensure_bootstrap_skill_seeded(app.state.db)
+
+        # Plan 38: seed the 8 curated starter skills. Idempotent —
+        # INSERT OR IGNORE per slug; user-edited bodies are preserved.
+        await ensure_starter_skills_seeded(app.state.db)
 
         # Plan 25: backfill workspaces from HERMES_WORKSPACE_ROOTS. The env
         # is the bootstrap mechanism; the DB is the source of truth from
