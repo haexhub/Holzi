@@ -91,6 +91,10 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
     "task", db)` and feeds the composition to `run_agent`. Two states:
     (a) backfill only → default Hermes + default task prompt;
     (b) custom channel prompt → composition uses the override."""
+    import time
+
+    from sqlalchemy import text
+
     from hermes.personas import (
         CHANNEL_REGISTRY,
         DEFAULT_PERSONA_AGENTS,
@@ -99,9 +103,6 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
         ensure_backfill,
     )
     from hermes.repository import channels as channels_repo
-    from hermes.users import ensure_users_seeded
-    from sqlalchemy import text
-    import time
 
     await ensure_backfill(conn)
     # Seed users with bootstrap_completed=1 so the bootstrap hint is

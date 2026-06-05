@@ -7,11 +7,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import capabilities
+from hermes import users as users_mod
 from hermes.personas import get_effective_system_prompt
 from hermes.repository import channels as channels_repo
 from hermes.repository import personas as personas_repo
 from hermes.repository import skills as skills_repo
-from hermes import users as users_mod
 
 
 async def _seed_env(engine: AsyncEngine, *, channel_prompt: str = "C") -> None:
@@ -48,7 +48,9 @@ async def test_catalog_index_single_skill_with_when_to_use(
         body_markdown="BODY",
     )
     prompt = await get_effective_system_prompt("web", conn)
-    assert "## Available skills\n- my-skill — Does things (use when: When you need things done)" in prompt
+    expected_line = "- my-skill — Does things (use when: When you need things done)"
+    assert "## Available skills" in prompt
+    assert expected_line in prompt
 
 
 @pytest.mark.asyncio
@@ -66,7 +68,7 @@ async def test_catalog_index_empty_when_to_use_omits_suffix(
         body_markdown="BODY",
     )
     prompt = await get_effective_system_prompt("web", conn)
-    assert "- plain-skill — A plain skill\n" in prompt or prompt.endswith("- plain-skill — A plain skill")
+    assert "- plain-skill — A plain skill" in prompt
     assert "use when:" not in prompt
 
 

@@ -26,7 +26,6 @@ from hermes.personas import (
     ensure_bootstrap_skill_seeded,
 )
 from hermes.personas import ensure_backfill as ensure_personas_backfill
-from hermes.users import ensure_users_seeded
 from hermes.repository import sandbox_crashes as sandbox_crashes_repo
 from hermes.repository import workspaces as workspaces_repo
 from hermes.routes.api import router as api_router
@@ -48,6 +47,7 @@ from hermes.sandbox.factory import build_sandbox_manager
 from hermes.scheduler import AgentTaskScheduler, ConversationSweepScheduler
 from hermes.tool_catalog import build_tool_catalog
 from hermes.upstream import build_fallback_client, rebuild_upstream_from_db
+from hermes.users import ensure_users_seeded
 
 configure_logging()
 

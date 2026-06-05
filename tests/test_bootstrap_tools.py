@@ -1,6 +1,5 @@
 """Tests for persona_update + mark_bootstrap_complete tools (Plan 37 Task 5)."""
 import json
-import time
 
 import pytest
 from fastapi import HTTPException

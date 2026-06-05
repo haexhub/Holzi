@@ -123,8 +123,12 @@ async def test_list_all_orders_by_slug(conn: AsyncEngine) -> None:
 
 @pytest.mark.asyncio
 async def test_list_enabled_excludes_disabled(conn: AsyncEngine) -> None:
-    await repo.create(conn, slug="active", name="Active", description="a", body_markdown="a", enabled=True)
-    await repo.create(conn, slug="hidden", name="Hidden", description="h", body_markdown="h", enabled=False)
+    await repo.create(
+        conn, slug="active", name="Active", description="a", body_markdown="a", enabled=True
+    )
+    await repo.create(
+        conn, slug="hidden", name="Hidden", description="h", body_markdown="h", enabled=False
+    )
     enabled = await repo.list_enabled(conn)
     assert [r.slug for r in enabled] == ["active"]
 
