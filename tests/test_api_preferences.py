@@ -711,3 +711,34 @@ async def test_get_persona_models_no_credential_503(client: httpx.AsyncClient) -
 async def test_get_persona_models_persona_not_found_404(client: httpx.AsyncClient) -> None:
     resp = await client.get("/api/personas/9999/models", headers=AUTH)
     assert resp.status_code == 404
+
+
+async def test_delete_credential_nulls_persona_model(client: httpx.AsyncClient) -> None:
+    """Deleting a credential nulls llm_credential_id (via FK cascade) and model (app-side)."""
+    # Create a credential
+    cred_resp = await client.post(
+        "/api/llm/credentials",
+        json={"provider": "openai", "display_name": "to-delete", "api_key": "sk-x"},
+        headers=AUTH,
+    )
+    assert cred_resp.status_code == 201
+    cred_id = cred_resp.json()["id"]
+
+    # Pin it on persona 1 (no model, just credential)
+    put_resp = await client.put(
+        "/api/personas/1",
+        json={"llm_credential_id": cred_id},
+        headers=AUTH,
+    )
+    assert put_resp.status_code == 200
+    assert put_resp.json()["llm_credential_id"] == cred_id
+
+    # Delete the credential
+    del_resp = await client.delete(f"/api/llm/credentials/{cred_id}", headers=AUTH)
+    assert del_resp.status_code == 204
+
+    # Verify persona no longer references the credential (both columns nulled)
+    list_resp = await client.get("/api/personas", headers=AUTH)
+    p = list_resp.json()["personas"][0]
+    assert p["llm_credential_id"] is None
+    assert p["model"] is None

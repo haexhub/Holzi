@@ -22,6 +22,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.config import settings
@@ -124,6 +125,16 @@ async def create_credential(
 )
 async def delete_credential(request: Request, cred_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
+    # Null out persona.model for any persona pinned to this credential BEFORE
+    # the FK cascade sets llm_credential_id=NULL. After cascade, we can't
+    # target by cred_id anymore.
+    async with db.begin() as conn:
+        await conn.execute(
+            sql_text(
+                "UPDATE personas SET model = NULL WHERE llm_credential_id = :cid"
+            ),
+            {"cid": cred_id},
+        )
     if not await repo.delete(db, cred_id):
         raise HTTPException(
             status_code=404, detail=ErrorCode.LLM_CREDENTIAL_NOT_FOUND.value
