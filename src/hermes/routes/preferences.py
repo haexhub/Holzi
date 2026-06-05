@@ -293,11 +293,12 @@ async def update_persona(
     # Resolve new credential/model fields — only touch if they appear in the request body.
     new_cred_id = REPO_UNSET
     new_model = REPO_UNSET
+    _fetched_cred = None  # cache to avoid double-fetch when both fields are set
 
     if "llm_credential_id" in body.model_fields_set:
         if body.llm_credential_id is not None:
-            cred = await llm_credentials_repo.get(db, body.llm_credential_id)
-            if cred is None:
+            _fetched_cred = await llm_credentials_repo.get(db, body.llm_credential_id)
+            if _fetched_cred is None:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail={
@@ -306,6 +307,10 @@ async def update_persona(
                     },
                 )
         new_cred_id = body.llm_credential_id
+        # Clearing the credential also orphans any pinned model — auto-clear it
+        # unless the caller explicitly sets model in the same request.
+        if new_cred_id is None and "model" not in body.model_fields_set:
+            new_model = None
 
     if "model" in body.model_fields_set:
         if body.model is not None:
@@ -323,31 +328,35 @@ async def update_persona(
                         "params": {"model": body.model, "reason": "no_credential"},
                     },
                 )
-            cred_for_model = await llm_credentials_repo.get(db, effective_cred_id)
-            if cred_for_model is None:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail={
-                        "code": ErrorCode.PERSONA_INVALID_CREDENTIAL.value,
-                        "params": {"id": effective_cred_id},
-                    },
-                )
+            # Reuse the credential already fetched above when possible.
+            if _fetched_cred is not None and _fetched_cred.id == effective_cred_id:
+                cred_for_model = _fetched_cred
+            else:
+                cred_for_model = await llm_credentials_repo.get(db, effective_cred_id)
+                if cred_for_model is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail={
+                            "code": ErrorCode.PERSONA_INVALID_CREDENTIAL.value,
+                            "params": {"id": effective_cred_id},
+                        },
+                    )
             try:
                 available_models = await list_provider_models(
                     cred_for_model,
                     http=request.app.state.external_http,
                     encryptor=request.app.state.encryptor,
                 )
+                if not any(m.id == body.model for m in available_models):
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail={
+                            "code": ErrorCode.PERSONA_INVALID_MODEL.value,
+                            "params": {"model": body.model},
+                        },
+                    )
             except ProviderModelsError:
-                available_models = ()
-            if not any(m.id == body.model for m in available_models):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail={
-                        "code": ErrorCode.PERSONA_INVALID_MODEL.value,
-                        "params": {"model": body.model},
-                    },
-                )
+                pass  # provider unreachable; skip model validation
         new_model = body.model
 
     try:
