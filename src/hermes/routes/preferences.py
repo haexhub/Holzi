@@ -73,14 +73,28 @@ class PersonaListResponse(BaseModel):
     personas: list[PersonaResponse]
 
 
+class PersonaHistorySnapshot(BaseModel):
+    """The parsed `persona_history.snapshot_json` body — exactly the four
+    fields written by `personas_repo.create`/`update` (and the lifespan
+    migration). `is_default` is deliberately excluded; it's a sort flag
+    on the live `personas` row, not a persona-version property.
+
+    Typed as a named model so `gen:api` emits a TypeScript interface
+    with named fields instead of an opaque index signature — a typo in
+    `entry.snapshot.<field>` on the FE is then caught by tsc.
+    """
+
+    name: str
+    soul: str
+    identity: str
+    agents: str
+
+
 class PersonaHistoryItem(BaseModel):
     id: int
     persona_id: int
     author: str
-    # Parsed `{name, soul, identity, agents}` (the JSON column in the
-    # `persona_history` row). Surfaces structured so the FE doesn't have
-    # to parse client-side.
-    snapshot: dict[str, str]
+    snapshot: PersonaHistorySnapshot
     created_at: int
 
 
