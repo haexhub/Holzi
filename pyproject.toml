@@ -54,4 +54,5 @@ testpaths = ["tests"]
 addopts = "-m 'not integration'"
 markers = [
     "integration: requires external services (e.g. a rootless Podman socket)",
+    "real_persona_context: opt out of the autouse persona-context patch; test seeds its own credential",
 ]

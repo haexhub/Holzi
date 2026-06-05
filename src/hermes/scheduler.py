@@ -6,17 +6,17 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import run_agent
+from hermes.crypto import Encryptor
 from hermes.logging import logger
-from hermes.personas import get_effective_system_prompt
+from hermes.personas import resolve_persona_context
 from hermes.repository import agent_tasks as agent_tasks_repo
 from hermes.repository import conversations as conversations_repo
-from hermes.repository import llm_credentials as llm_credentials_repo
 from hermes.repository import messages as messages_repo
 from hermes.run_tracker import track_run
+from hermes.upstream import build_client_for_credential
 
 DEFAULT_POLL_INTERVAL_SECONDS = 60
 # Conversations age out in days; checking once an hour is plenty and
@@ -30,11 +30,6 @@ DEFAULT_CONVERSATION_SWEEP_INTERVAL_SECONDS = 3600
 TASK_CHANNEL = "task"
 
 
-# A factory the scheduler calls per-run to obtain the upstream httpx client.
-# Mirrors how routes/api.py reads `app.state.upstream`: it can be rebuilt at
-# runtime when credentials change, so caching the client at construction
-# time would pin a stale handle.
-UpstreamProvider = Callable[[], httpx.AsyncClient]
 ToolFactory = Callable[[], list]
 
 
@@ -61,7 +56,8 @@ class AgentTaskScheduler:
         self,
         db: AsyncEngine,
         *,
-        upstream_provider: UpstreamProvider,
+        encryptor: Encryptor,
+        fallback_proxy_url: str,
         tool_factory: ToolFactory,
         fallback_model: str,
         poll_interval: int = DEFAULT_POLL_INTERVAL_SECONDS,
@@ -70,7 +66,8 @@ class AgentTaskScheduler:
         agent_runner: Callable[..., Awaitable[str]] | None = None,
     ) -> None:
         self.db = db
-        self._upstream_provider = upstream_provider
+        self._encryptor = encryptor
+        self._fallback_proxy_url = fallback_proxy_url
         self._tool_factory = tool_factory
         self._fallback_model = fallback_model
         self.poll_interval = poll_interval
@@ -159,9 +156,13 @@ class AgentTaskScheduler:
             content=task.prompt,
         )
 
-        model = (
-            await llm_credentials_repo.get_active_model(self.db)
-        ) or self._fallback_model
+        persona_ctx = await resolve_persona_context(TASK_CHANNEL, self.db)
+        model = persona_ctx.model
+        task_upstream = build_client_for_credential(
+            persona_ctx.credential,
+            encryptor=self._encryptor,
+            fallback_proxy_url=self._fallback_proxy_url,
+        )
         run_id = uuid.uuid4().hex
         metrics: dict[str, Any] = {}
 
@@ -177,12 +178,10 @@ class AgentTaskScheduler:
                 agent_task_id=task.id,
             ):
                 result = await self._agent_runner(
-                    upstream=self._upstream_provider(),
+                    upstream=task_upstream,
                     db=self.db,
                     conversation_id=convo.id,
-                    system_prompt=await get_effective_system_prompt(
-                        TASK_CHANNEL, self.db
-                    ),
+                    system_prompt=persona_ctx.system_prompt,
                     model=model,
                     tools=self._tool_factory(),
                     metrics=metrics,
@@ -190,6 +189,7 @@ class AgentTaskScheduler:
                 run_status = "success"
                 return result
         finally:
+            await task_upstream.aclose()
             # Always record the firing, even on error: that's what last_status
             # is for. `advance=False` on the run-now path leaves due_at /
             # enabled alone so a manual run doesn't skip the next regular

@@ -259,7 +259,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # the scheduler on a stale client.
         app.state.scheduler = AgentTaskScheduler(
             app.state.db,
-            upstream_provider=lambda: app.state.upstream,
+            encryptor=app.state.encryptor,
+            fallback_proxy_url=settings.llm_url,
             tool_factory=lambda: build_tool_catalog(
                 db=app.state.db,
                 external_http=app.state.external_http,

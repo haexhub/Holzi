@@ -42,7 +42,7 @@ from hermes.events import (
     to_sse,
 )
 from hermes.logging import logger
-from hermes.personas import get_effective_system_prompt
+from hermes.personas import resolve_persona_context
 from hermes.repository import (
     agent_tasks,
     attachments,
@@ -54,9 +54,7 @@ from hermes.repository import (
 from hermes.repository import (
     approvals as approvals_repo,
 )
-from hermes.repository import (
-    llm_credentials as llm_credentials_repo,
-)
+from hermes.upstream import build_client_for_credential
 from hermes.run_tracker import track_run
 from hermes.sandbox import WorkspaceCrash
 from hermes.tool_catalog import build_tool_catalog
@@ -238,7 +236,6 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
     message) and /api/conversations/{id}/retry (after trimming the trailing
     assistant/tool tail) so retry is not a separate code path."""
     db: AsyncEngine = request.app.state.db
-    upstream: httpx.AsyncClient = request.app.state.upstream
 
     tools = build_tool_catalog(
         db=db,
@@ -271,12 +268,15 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
         request.app.state.session_approvals
     )
 
-    # Active credential overrides settings.model; resolve once before the
-    # SSE generator so the model id we persist in agent_runs matches what
-    # the upstream actually saw.
-    model = (
-        await llm_credentials_repo.get_active_model(db)
-    ) or settings.model
+    # Resolve persona context once before the SSE generator so the model id
+    # we persist in agent_runs matches what the upstream actually saw.
+    persona_ctx = await resolve_persona_context(WEB_CHANNEL, db)
+    model = persona_ctx.model
+    persona_upstream = build_client_for_credential(
+        persona_ctx.credential,
+        encryptor=request.app.state.encryptor,
+        fallback_proxy_url=settings.llm_url,
+    )
 
     async def gen() -> AsyncIterator[bytes]:
         yield to_sse(SessionEvent(data=SessionData(conversation_id=convo.id)))
@@ -394,12 +394,10 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
                     metrics=metrics,
                 ):
                     await run_agent(
-                        upstream=upstream,
+                        upstream=persona_upstream,
                         db=db,
                         conversation_id=convo.id,
-                        system_prompt=await get_effective_system_prompt(
-                            WEB_CHANNEL, db
-                        ),
+                        system_prompt=persona_ctx.system_prompt,
                         model=model,
                         tools=tools,
                         on_chunk=on_chunk,
@@ -483,6 +481,7 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
             chat_runs.pop(run_id, None)
             if sandbox_manager is not None:
                 sandbox_manager.remove_crash_handler(on_sandbox_crash)
+            await persona_upstream.aclose()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

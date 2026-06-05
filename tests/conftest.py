@@ -61,3 +61,83 @@ def _empty_capability_index(monkeypatch) -> None:
     from hermes import capabilities
 
     monkeypatch.setattr(capabilities, "load_capability_index", lambda: "")
+
+
+@pytest.fixture(autouse=True)
+def _patch_persona_context_for_app_tests(request, monkeypatch) -> None:
+    """Restore the pre-Task-6 upstream behavior for integration tests.
+
+    `_stream_web_agent_run` now calls `resolve_persona_context` (which
+    requires an active credential in the DB) and `build_client_for_credential`
+    (which creates a fresh httpx client). Integration tests that call
+    `/api/chat` rely on `app.state.upstream` being the mock transport,
+    and they run against a fresh DB that has no credentials.
+
+    This fixture:
+    1. Patches `resolve_persona_context` in `routes.api` to compose the
+       system prompt via `get_effective_system_prompt` (same as before) and
+       return a sentinel credential so `build_client_for_credential` is called.
+    2. Patches `build_client_for_credential` in `routes.api` to return
+       `app.state.upstream` (the mock the test installs) rather than
+       building a real credential-bound client.
+
+    Tests that specifically exercise the credential-routing path (e.g.,
+    `test_api_chat_uses_active_credential_model`) opt out by marking themselves
+    with `@pytest.mark.real_persona_context`. Those tests seed their own
+    credentials and verify end-to-end credential routing.
+
+    Tests that exercise `hermes.personas.resolve_persona_context` directly
+    (e.g., `test_personas_resolver.py`) import from the original module,
+    not from `routes.api`, so they are unaffected by this patch.
+    """
+    import hermes.routes.api as api_mod
+    from hermes.main import app
+    from hermes.personas import PersonaContext, get_effective_system_prompt
+    from hermes.repository.models import LlmCredential
+
+    # `build_client_for_credential` always returns the test mock so tests that
+    # set `app.state.upstream` don't need to worry about credential-bound
+    # client creation. This patch applies to ALL integration tests.
+    def _fake_build_client(cred, **kwargs):
+        return app.state.upstream
+
+    monkeypatch.setattr(api_mod, "build_client_for_credential", _fake_build_client)
+
+    # `resolve_persona_context` requires an active credential in the DB.
+    # Tests marked `real_persona_context` seed their own credential and opt
+    # out of the fake resolver so the real credential-routing path is exercised.
+    if request.node.get_closest_marker("real_persona_context"):
+        return
+
+    _SENTINEL_CRED = LlmCredential(
+        id=0,
+        provider="anthropic",
+        mode="oauth_claude",
+        display_name="test-sentinel",
+        base_url=None,
+        model=None,
+        is_active=True,
+        api_key_iv=None,
+        api_key_tag=None,
+        api_key_data=None,
+        oauth_status=None,
+        oauth_authorized_at=None,
+        oauth_iv=None,
+        oauth_tag=None,
+        oauth_data=None,
+        created_at=0,
+        updated_at=0,
+    )
+
+    async def _fake_resolve_persona_context(channel: str, engine) -> PersonaContext:
+        from hermes.config import settings
+
+        system_prompt = await get_effective_system_prompt(channel, engine)
+        model = settings.model
+        return PersonaContext(
+            system_prompt=system_prompt,
+            credential=_SENTINEL_CRED,
+            model=model,
+        )
+
+    monkeypatch.setattr(api_mod, "resolve_persona_context", _fake_resolve_persona_context)
