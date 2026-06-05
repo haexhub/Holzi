@@ -54,10 +54,10 @@ from hermes.repository import (
 from hermes.repository import (
     approvals as approvals_repo,
 )
-from hermes.upstream import build_client_for_credential
 from hermes.run_tracker import track_run
 from hermes.sandbox import WorkspaceCrash
 from hermes.tool_catalog import build_tool_catalog
+from hermes.upstream import build_client_for_credential
 
 router = APIRouter(prefix="/api")
 
