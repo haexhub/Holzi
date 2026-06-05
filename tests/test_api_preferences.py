@@ -635,3 +635,79 @@ async def test_reset_unknown_channel_returns_404(
     detail = response.json()["detail"]
     assert detail["code"] == "CHANNEL_NOT_FOUND"
     assert detail["params"]["channel"] == "discord"
+
+
+# ---------------------------------------------------------------------------
+# Persona credential + model (Plan 29-D Task 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_put_persona_unknown_credential_422(client: httpx.AsyncClient) -> None:
+    resp = await client.put(
+        "/api/personas/1",
+        json={"llm_credential_id": 9999},
+        headers=AUTH,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["code"] == "PERSONA_INVALID_CREDENTIAL"
+
+
+async def test_put_persona_model_without_credential_422(client: httpx.AsyncClient) -> None:
+    resp = await client.put(
+        "/api/personas/1",
+        json={"model": "gpt-4o"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["code"] == "PERSONA_INVALID_MODEL"
+
+
+async def test_put_persona_credential_persisted(client: httpx.AsyncClient) -> None:
+    # Create a credential to pin
+    create_resp = await client.post(
+        "/api/llm/credentials",
+        json={"provider": "openai", "display_name": "test-openai", "api_key": "sk-test"},
+        headers=AUTH,
+    )
+    assert create_resp.status_code == 201
+    cred_id = create_resp.json()["id"]
+
+    # Pin it on persona 1 (without model, which would require provider model validation)
+    put_resp = await client.put(
+        "/api/personas/1",
+        json={"llm_credential_id": cred_id},
+        headers=AUTH,
+    )
+    assert put_resp.status_code == 200
+    assert put_resp.json()["llm_credential_id"] == cred_id
+    assert put_resp.json()["model"] is None
+
+
+async def test_put_persona_clear_credential(client: httpx.AsyncClient) -> None:
+    # First pin a credential
+    create_resp = await client.post(
+        "/api/llm/credentials",
+        json={"provider": "openai", "display_name": "test-openai2", "api_key": "sk-test"},
+        headers=AUTH,
+    )
+    cred_id = create_resp.json()["id"]
+    await client.put("/api/personas/1", json={"llm_credential_id": cred_id}, headers=AUTH)
+
+    # Now clear it
+    clear_resp = await client.put(
+        "/api/personas/1",
+        json={"llm_credential_id": None},
+        headers=AUTH,
+    )
+    assert clear_resp.status_code == 200
+    assert clear_resp.json()["llm_credential_id"] is None
+
+
+async def test_get_persona_models_no_credential_503(client: httpx.AsyncClient) -> None:
+    resp = await client.get("/api/personas/1/models", headers=AUTH)
+    assert resp.status_code == 503
+
+
+async def test_get_persona_models_persona_not_found_404(client: httpx.AsyncClient) -> None:
+    resp = await client.get("/api/personas/9999/models", headers=AUTH)
+    assert resp.status_code == 404
