@@ -158,3 +158,17 @@ def _patch_persona_context_for_app_tests(request, monkeypatch) -> None:
         )
 
     monkeypatch.setattr(api_mod, "resolve_persona_context", _fake_resolve_persona_context)
+
+    async def _fake_resolve_chat_context_meta(channel: str, engine):
+        from hermes.config import settings
+        from hermes.repository import personas as personas_repo
+
+        row = await personas_repo.get_default(engine)
+        model = settings.model
+        return (
+            row.id if row else None,
+            row.name if row else None,
+            model,
+        )
+
+    monkeypatch.setattr(api_mod, "resolve_chat_context_meta", _fake_resolve_chat_context_meta)

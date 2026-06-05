@@ -43,7 +43,7 @@ from hermes.events import (
     to_sse,
 )
 from hermes.logging import logger
-from hermes.personas import resolve_persona_context
+from hermes.personas import resolve_chat_context_meta, resolve_persona_context
 from hermes.repository import (
     agent_tasks,
     attachments,
@@ -109,6 +109,17 @@ class ChatRequest(BaseModel):
     # One-turn overrides. Not persisted. Cleared after the agent run.
     model_override: str | None = Field(default=None, min_length=1)
     persona_id_override: int | None = Field(default=None, ge=1)
+
+
+class ChatContextResponse(BaseModel):
+    """Lightweight metadata about the currently-resolved persona + model.
+
+    Used by the chat header pill to display the active agent identity.
+    Does NOT include the system_prompt (large; computed per-turn only).
+    """
+    persona_id: int | None
+    persona_name: str | None
+    model: str
 
 
 _API_KEY_RE = re.compile(
@@ -565,6 +576,26 @@ async def api_chat_cancel_run(request: Request, run_id: str) -> Response:
         )
     event.set()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/chat/context")
+async def api_chat_context(request: Request) -> ChatContextResponse:
+    """Return the currently-resolved persona name + model for the web channel.
+
+    Resolves persona → credential → model using the same priority chain as
+    POST /api/chat but skips the (expensive) system-prompt build. Suitable
+    for polling from the header pill. Returns 503 if no credential is
+    configured (same condition that would block a real chat turn).
+    """
+    db: AsyncEngine = request.app.state.db
+    persona_id, persona_name, model = await resolve_chat_context_meta(
+        WEB_CHANNEL, db
+    )
+    return ChatContextResponse(
+        persona_id=persona_id,
+        persona_name=persona_name,
+        model=model,
+    )
 
 
 # ---------------------------------------------------------------------------

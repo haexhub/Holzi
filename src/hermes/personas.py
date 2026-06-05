@@ -621,6 +621,52 @@ async def resolve_persona_context(
     )
 
 
+async def resolve_chat_context_meta(
+    channel: str,
+    engine: AsyncEngine,
+) -> tuple[int | None, str | None, str]:
+    """Resolve persona_id + persona_name + model without building system_prompt.
+
+    Used by GET /api/chat/context. Three to four DB reads — significantly
+    cheaper than `resolve_persona_context` which also runs skill-catalog +
+    capability-index assembly.
+    """
+    from fastapi import HTTPException
+
+    from hermes.config import settings
+
+    row = await channels_repo.get(engine, channel)
+    persona_id: int | None = None if row is None else row.default_persona_id
+    persona = None
+    if persona_id is not None:
+        persona = await personas_repo.get(engine, persona_id)
+    if persona is None:
+        persona = await personas_repo.get_default(engine)
+
+    credential: LlmCredential | None = None
+    if persona is not None and persona.llm_credential_id is not None:
+        credential = await llm_credentials_repo.get(engine, persona.llm_credential_id)
+    if credential is None:
+        credential = await llm_credentials_repo.get_active(engine)
+    if credential is None:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorCode.PERSONA_NO_CREDENTIAL.value,
+        )
+
+    model: str = (
+        (persona.model if persona is not None else None)
+        or credential.model
+        or settings.model
+    )
+
+    return (
+        persona.id if persona else None,
+        persona.name if persona else None,
+        model,
+    )
+
+
 async def ensure_bootstrap_skill_seeded(engine: AsyncEngine) -> None:
     """Idempotent: INSERT OR IGNORE the bootstrap-first-chat skill row.
 
