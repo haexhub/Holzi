@@ -91,6 +91,10 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
     "task", db)` and feeds the composition to `run_agent`. Two states:
     (a) backfill only → default Hermes + default task prompt;
     (b) custom channel prompt → composition uses the override."""
+    import time
+
+    from sqlalchemy import text
+
     from hermes.personas import (
         CHANNEL_REGISTRY,
         DEFAULT_PERSONA_AGENTS,
@@ -101,6 +105,17 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
     from hermes.repository import channels as channels_repo
 
     await ensure_backfill(conn)
+    # Seed users with bootstrap_completed=1 so the bootstrap hint is
+    # suppressed — this test pins the exact system-prompt composition
+    # and doesn't care about onboarding.
+    async with conn.begin() as txn:
+        await txn.execute(
+            text(
+                "INSERT OR IGNORE INTO users(id, bootstrap_completed, created_at) "
+                "VALUES (1, 1, :ts)"
+            ),
+            {"ts": int(time.time())},
+        )
 
     captured: list[str] = []
 

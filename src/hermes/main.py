@@ -19,7 +19,12 @@ from hermes.logging import configure_logging, logger
 from hermes.mcp_manager import McpServerManager
 from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
-from hermes.personas import _migrate_prompt_to_fragments
+from hermes.personas import (
+    _drop_persona_skills_table,
+    _migrate_prompt_to_fragments,
+    _migrate_skills_add_enabled,
+    ensure_bootstrap_skill_seeded,
+)
 from hermes.personas import ensure_backfill as ensure_personas_backfill
 from hermes.repository import sandbox_crashes as sandbox_crashes_repo
 from hermes.repository import workspaces as workspaces_repo
@@ -42,6 +47,7 @@ from hermes.sandbox.factory import build_sandbox_manager
 from hermes.scheduler import AgentTaskScheduler, ConversationSweepScheduler
 from hermes.tool_catalog import build_tool_catalog
 from hermes.upstream import build_fallback_client, rebuild_upstream_from_db
+from hermes.users import ensure_users_seeded
 
 configure_logging()
 
@@ -128,11 +134,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # so the repo layer (Task 2+) never sees the old column.
         await _migrate_prompt_to_fragments(app.state.db)
 
+        # Plan 37: drop legacy persona_skills table + add skills.enabled.
+        # Must run before any resolver/repo code that reads skills.
+        await _drop_persona_skills_table(app.state.db)
+        await _migrate_skills_add_enabled(app.state.db)
+
         # Plan 29-A: seed the default persona + per-channel prompt rows
         # before anything that resolves system prompts can run (workers,
         # scheduler, /api/chat). Idempotent — re-runs on existing DBs
         # only insert what's missing.
         await ensure_personas_backfill(app.state.db)
+
+        # Plan 37: seed the single-user row. Must run after
+        # ensure_personas_backfill so the persona exists when bootstrap
+        # tools reference it. Idempotent — INSERT OR IGNORE.
+        await ensure_users_seeded(app.state.db)
+        await ensure_bootstrap_skill_seeded(app.state.db)
 
         # Plan 25: backfill workspaces from HERMES_WORKSPACE_ROOTS. The env
         # is the bootstrap mechanism; the DB is the source of truth from

@@ -5,10 +5,12 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import Tool
+from hermes.tools.bootstrap import build_bootstrap_tools
 from hermes.tools.external import build_external_tools
 from hermes.tools.memory import build_memory_tools
 from hermes.tools.meta import build_meta_tools
 from hermes.tools.productivity import build_productivity_tools
+from hermes.tools.skills import build_skill_tools
 from hermes.tools.user_guide import build_user_guide_tools
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -53,6 +55,8 @@ def build_tool_catalog(
             encryptor=encryptor,
             tool_catalog_provider=provider,
         )
+        + build_skill_tools(db)
+        + build_bootstrap_tools(db)
     )
     # `Tool.source` defaults to "builtin" on the dataclass — every builder
     # leaves it at the default, so the merge needs no explicit annotation

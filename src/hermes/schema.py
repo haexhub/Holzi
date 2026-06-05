@@ -478,38 +478,30 @@ skills = Table(
     Column("description", Text, nullable=False),
     # Optional `when_to_use` frontmatter field — guidance the user
     # writes for themselves, never injected into the prompt.
-    Column("when_to_use", Text),
+    Column("when_to_use", Text, nullable=False, server_default=""),
     Column("body_markdown", Text, nullable=False),
+    # Plan 37: NICHT in den Catalog-Index aufgenommen wenn enabled=0.
+    # Body bleibt erreichbar via `skill_load(name)` — disabled Skills
+    # sind dem Agent *unsichtbar*, aber im UI weiterhin editierbar.
+    Column("enabled", Integer, nullable=False, server_default="1"),
     Column("created_at", Integer, nullable=False),
     Column("updated_at", Integer, nullable=False),
 )
 
 
-# Per-persona skill activation. `ordering` drives composition order in
-# the resolver (LLMs are order-sensitive); `enabled` is a soft toggle so
-# the user can mute a skill without forgetting the association.
-# Both FKs CASCADE: deleting either side removes the link row.
-persona_skills = Table(
-    "persona_skills",
+# Plan 37: Minimal-`users`-Tabelle, Wave-C-vorbereitend (Plan 35
+# §C1). Single-User-Box bis Wave C — eine Seed-Row mit id=1. Wave C
+# erweitert per ALTER TABLE ADD COLUMN um email / password_hash /
+# role / parent_user_id (kein zweiter Drop-and-Recreate).
+users = Table(
+    "users",
     metadata,
+    Column("id", Integer, primary_key=True),
     Column(
-        "persona_id",
+        "bootstrap_completed",
         Integer,
-        ForeignKey("personas.id", ondelete="CASCADE"),
-        primary_key=True,
+        nullable=False,
+        server_default="0",
     ),
-    Column(
-        "skill_id",
-        Integer,
-        ForeignKey("skills.id", ondelete="CASCADE"),
-        primary_key=True,
-    ),
-    Column("ordering", Integer, nullable=False, server_default="0"),
-    Column("enabled", Integer, nullable=False, server_default="1"),
-)
-
-Index(
-    "idx_persona_skills_persona",
-    persona_skills.c.persona_id,
-    persona_skills.c.ordering,
+    Column("created_at", Integer, nullable=False),
 )

@@ -28,10 +28,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import capabilities
+from hermes import users as users_mod
 from hermes.repository import channels as channels_repo
 from hermes.repository import personas as personas_repo
 from hermes.repository import skills as skills_repo
-from hermes.repository.models import Persona
+from hermes.repository.models import Persona, Skill
 
 # Single source of truth for known channels. Key = exact string used as
 # the channel identifier by the call-sites and persisted in the
@@ -78,6 +79,107 @@ DEFAULT_PERSONA_AGENTS: Final[str] = (
     "Implementierung. Du fragst nach, bevor du destruktive Aktionen "
     "ausführst."
 )
+
+# ---------------------------------------------------------------------------
+# Bootstrap-skill seed constants (Plan 37 Task 6)
+# ---------------------------------------------------------------------------
+
+BOOTSTRAP_SKILL_DESCRIPTION: Final[str] = (
+    "Onboarding-Q&A für eine frische Holzi-Installation. Stellt 3-5 "
+    "Fragen und schreibt das Ergebnis in die Default-Persona."
+)
+
+BOOTSTRAP_SKILL_WHEN_TO_USE: Final[str] = (
+    "Erste User-Message in einer frischen Installation, sobald der "
+    "bootstrap-Hint im System-Prompt erscheint. Auch manuell durch "
+    "den User: \"setze mich neu auf\"."
+)
+
+BOOTSTRAP_SKILL_BODY: Final[str] = """\
+# bootstrap-first-chat
+
+> Du bist gerade dabei, Holzi für einen neuen User aufzusetzen.
+> Wenn der User auf Englisch antwortet, wechsle zu Englisch und
+> übersetze die folgenden Fragen sinngemäß.
+
+Stelle dem User die folgenden Fragen — **eine nach der anderen**.
+Warte auf jede Antwort, bevor du die nächste stellst.
+
+### Frage 1 — Identität
+
+„Hallo! Ich bin Hermes, dein persönlicher KI-Assistent. Wer bist
+du? Erzähl mir kurz deinen Namen und was du beruflich (oder als
+Hauptbeschäftigung) machst."
+
+### Frage 2 — Stil
+
+„Wie soll ich mit dir reden? Eher direkt-sachlich (Senior-Engineer-
+Modus, keine Floskeln), eher ausführlich-erklärend (Teaching-Modus),
+oder ausgeglichen?"
+
+### Frage 3 — Hauptanwendungsfälle
+
+„Wofür willst du mich vor allem benutzen? (z.B. Coding, Recherche,
+Schreiben, Lernen, Reflektion, Familie / Alltag, …)"
+
+### Optional Frage 4 — Lieblings-Tools
+
+„Gibt es bestimmte Tools oder Themen, die du oft benutzen wirst und
+die ich kennen sollte? (Optional — du kannst auch „skip" sagen.)"
+
+### Abschluss
+
+Wenn du genug hast, mach Folgendes — **in dieser Reihenfolge**:
+
+1. Rufe `persona_update(soul=..., identity=..., agents=...)` mit
+   den drei Fragments synthetisiert aus den User-Antworten:
+   - `identity` ≈ Name + Rolle (Antwort 1)
+   - `soul` ≈ Ton-Präferenz (Antwort 2)
+   - `agents` ≈ Anwendungsfälle als „Du fokussierst auf …"-Liste
+     (Antwort 3)
+2. Optional: Falls Frage 4 spezifische Tools oder Themen lieferte,
+   rufe für jedes 1× `save_note(key=..., content=..., tags=...)`.
+3. Rufe `mark_bootstrap_complete()`.
+4. Antworte dem User mit einer kurzen Zusammenfassung dessen, was
+   du gesetzt hast, und einem Hinweis auf `/settings/preferences`,
+   wo der User die Werte editieren kann.
+
+### Wenn der User nicht mitspielt
+
+Drei Fälle, jeweils mit klarer Anweisung an dich (den Agenten):
+
+**1. User antwortet off-topic** (z.B. „erzähl mir einen Witz",
+„erkläre Quantenphysik"):
+Antworte kurz: „Lass mich Holzi erst für dich aufsetzen, dann
+können wir frei chatten. Zurück zu Frage X: …" und stelle die
+laufende Frage erneut. Maximal ein Mal pro Frage — wenn der User
+beim zweiten Versuch immer noch ausweicht, behandle das als
+implizites Skip (siehe Fall 2).
+
+**2. User sagt explizit Skip** („skip", „überspringen", „abbrechen",
+„nicht jetzt", oder vergleichbar):
+- Rufe **nur** `mark_bootstrap_complete()` — kein
+  `persona_update`-Call.
+- Antworte: „Ok, ich überspringe das Setup. Du kannst es jederzeit
+  unter /settings/preferences nachholen."
+
+**3. Nach 10 ausgetauschten Nachrichten (5 Fragen + 5 Antworten)
+ist immer noch keine Persona gesetzt:**
+Brich die Q&A ab. Rufe `mark_bootstrap_complete()`. Wenn du
+trotzdem genug Information hast, kannst du vorher ein
+`persona_update(...)` mit dem was du hast machen — sonst nur das
+`mark`. Antworte freundlich: „Wir können das später fortsetzen
+unter /settings/preferences."
+
+Diese drei Regeln sind reiner Body-Text in diesem Skill. Es gibt
+**keinen Server-Side-Mechanismus**, der nach 10 Turns automatisch
+das Bootstrap-Flag flippt — die Verantwortung liegt vollständig bei
+dir als Agent. Wenn du den Skill abbrichst ohne
+`mark_bootstrap_complete()` aufzurufen, wird die nächste frische
+Conversation den Bootstrap-Hint erneut sehen und du wirst nochmal
+versuchen müssen, den User durch die Q&A zu führen. Das ist
+beabsichtigt — kein silent fallback.
+"""
 
 
 async def _migrate_prompt_to_fragments(engine: AsyncEngine) -> None:
@@ -155,6 +257,45 @@ async def _migrate_prompt_to_fragments(engine: AsyncEngine) -> None:
         await conn.execute(text("ALTER TABLE personas DROP COLUMN prompt"))
 
 
+async def _drop_persona_skills_table(engine: AsyncEngine) -> None:
+    """One-shot: drop the Plan-33 `persona_skills` table if it still
+    exists. Idempotent.
+    """
+    async with engine.connect() as conn:
+        tables = (
+            await conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name='persona_skills'"
+                )
+            )
+        ).all()
+    if not tables:
+        return
+    async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE persona_skills"))
+
+
+async def _migrate_skills_add_enabled(engine: AsyncEngine) -> None:
+    """One-shot: add `skills.enabled` if missing. Idempotent —
+    PRAGMA-gated. Existing rows default to 1 (enabled).
+    """
+    async with engine.connect() as conn:
+        cols = (
+            await conn.execute(text("PRAGMA table_info(skills)"))
+        ).all()
+        has_enabled = any(row.name == "enabled" for row in cols)
+    if has_enabled:
+        return
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "ALTER TABLE skills ADD COLUMN enabled INTEGER "
+                "NOT NULL DEFAULT 1"
+            )
+        )
+
+
 async def ensure_backfill(engine: AsyncEngine) -> None:
     """Seed the default persona + every channel row that's missing.
 
@@ -199,13 +340,43 @@ def _persona_sections(persona: Persona) -> list[tuple[str, str]]:
     ]
 
 
+def _catalog_index(skills: list[Skill]) -> str:
+    """Render the ``## Available skills`` catalog section.
+
+    One line per enabled skill: ``- {slug} — {description} (use when: {when_to_use})``.
+    The ``(use when: ...)`` suffix is omitted when ``when_to_use`` is empty.
+    Skills are already sorted alphabetically by slug (caller passes
+    ``skills_repo.list_enabled()`` output). Returns empty string when
+    the list is empty — the resolver then skips this section entirely.
+    """
+    if not skills:
+        return ""
+    lines: list[str] = ["## Available skills"]
+    for skill in skills:
+        if skill.when_to_use:
+            lines.append(
+                f"- {skill.slug} — {skill.description} (use when: {skill.when_to_use})"
+            )
+        else:
+            lines.append(f"- {skill.slug} — {skill.description}")
+    return "\n".join(lines)
+
+
+_BOOTSTRAP_HINT = (
+    "---\n\n"
+    "You haven't been set up yet. As your first action, call "
+    "skill_load('bootstrap-first-chat') and follow its instructions "
+    "before responding to the user."
+)
+
+
 async def get_effective_system_prompt(
     channel: str, engine: AsyncEngine
 ) -> str:
     """Compose the system prompt the agent should run with for `channel`.
 
-    Composition order (Plan 36 extends 33 by splitting persona into
-    three labelled fragments):
+    Composition order (Plan 37 extends 36 with catalog index + bootstrap
+    hint):
 
     ```
     ## Soul
@@ -217,11 +388,15 @@ async def get_effective_system_prompt(
     ## Agents
     <persona.agents>
 
-    <skills_block>
+    ## Available skills
+    - {slug} — {description} (use when: {when_to_use})
+    ...
 
     <capability_index>
 
     <channel.prompt>
+
+    <bootstrap_hint>   # only when bootstrap_completed = 0
     ```
 
     Persona-section rules:
@@ -231,11 +406,18 @@ async def get_effective_system_prompt(
     - Order is fixed Soul → Identity → Agents regardless of how the
       `Persona` dataclass was constructed.
 
-    `skills_block` is the join of every active (enabled=1) skill body
-    attached to the resolved persona, in `ordering` order. `index`,
-    `skills_block`, and the persona-section group may each be empty and
-    are then skipped; the ``"\\n\\n"`` separator stays consistent between
-    the parts that actually appear.
+    Catalog-index rules (Plan 37):
+    - One line per enabled skill, alphabetical by slug.
+    - ``(use when: ...)`` suffix omitted when ``when_to_use`` is empty.
+    - Section omitted entirely when zero enabled skills exist.
+
+    Bootstrap-hint (Plan 37):
+    - Appended after ``channel_prompt`` when ``users.bootstrap_completed = 0``
+      AND the ``bootstrap-first-chat`` skill is present + enabled.
+    - Omitted when no ``users`` row exists (defensive), after
+      ``mark_bootstrap_complete()`` flips the flag, or when the
+      bootstrap skill was disabled/deleted — otherwise the agent would
+      follow the hint and hit a 404 on ``skill_load``.
 
     Persona resolution:
     1. `channel_prompts.default_persona_id` if set and the row exists.
@@ -266,15 +448,8 @@ async def get_effective_system_prompt(
     if persona is None:
         persona = await personas_repo.get_default(engine)
 
-    skills_block = ""
-    if persona is not None:
-        attached = await skills_repo.list_for_persona(engine, persona.id)
-        active_bodies = [
-            skill.body_markdown
-            for skill, _ordering, enabled in attached
-            if enabled and skill.body_markdown.strip()
-        ]
-        skills_block = "\n\n".join(active_bodies)
+    enabled_skills = await skills_repo.list_enabled(engine)
+    catalog = _catalog_index(enabled_skills)
 
     index = capabilities.load_capability_index()
     parts: list[str] = []
@@ -288,9 +463,45 @@ async def get_effective_system_prompt(
         if persona_parts:
             parts.append("\n\n".join(persona_parts))
 
-    if skills_block:
-        parts.append(skills_block)
+    if catalog:
+        parts.append(catalog)
     if index:
         parts.append(index)
     parts.append(channel_prompt)
+
+    bootstrap_done = await users_mod.is_bootstrap_completed(engine)
+    bootstrap_loadable = any(
+        s.slug == "bootstrap-first-chat" for s in enabled_skills
+    )
+    if not bootstrap_done and bootstrap_loadable:
+        parts.append(_BOOTSTRAP_HINT)
+
     return "\n\n".join(parts)
+
+
+async def ensure_bootstrap_skill_seeded(engine: AsyncEngine) -> None:
+    """Idempotent: INSERT OR IGNORE the bootstrap-first-chat skill row.
+
+    Called once per boot (after ``ensure_users_seeded``). If the user
+    has edited the body via the Skills-Page, ``INSERT OR IGNORE`` matched
+    on the UNIQUE slug leaves the row untouched — no overwrite.
+    """
+    now = int(time.time())
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT OR IGNORE INTO skills"
+                "(slug, name, description, when_to_use, body_markdown,"
+                " enabled, created_at, updated_at) "
+                "VALUES (:slug, :name, :description, :when_to_use,"
+                " :body_markdown, 1, :now, :now)"
+            ),
+            {
+                "slug": "bootstrap-first-chat",
+                "name": "Bootstrap: First Chat",
+                "description": BOOTSTRAP_SKILL_DESCRIPTION,
+                "when_to_use": BOOTSTRAP_SKILL_WHEN_TO_USE,
+                "body_markdown": BOOTSTRAP_SKILL_BODY,
+                "now": now,
+            },
+        )

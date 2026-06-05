@@ -70,6 +70,38 @@ CREATE VIEW IF NOT EXISTS proxy_credentials_v1 AS
   WHERE is_active = 1;
 
 -- ---------------------------------------------------------------------------
+-- skills FTS5 + sync triggers (Plan 37). Mirror of notes_fts pattern.
+-- Search indexed all skills (also disabled) — enabled filtering happens
+-- in the Python layer, not in triggers.
+-- ---------------------------------------------------------------------------
+CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(
+    slug, name, description, when_to_use, body_markdown,
+    content='skills',
+    content_rowid='id',
+    tokenize = "unicode61 remove_diacritics 2"
+);
+
+CREATE TRIGGER IF NOT EXISTS skills_ai AFTER INSERT ON skills
+BEGIN
+  INSERT INTO skills_fts(rowid, slug, name, description, when_to_use, body_markdown)
+  VALUES (new.id, new.slug, new.name, new.description, new.when_to_use, new.body_markdown);
+END;
+
+CREATE TRIGGER IF NOT EXISTS skills_ad AFTER DELETE ON skills
+BEGIN
+  INSERT INTO skills_fts(skills_fts, rowid, slug, name, description, when_to_use, body_markdown)
+  VALUES('delete', old.id, old.slug, old.name, old.description, old.when_to_use, old.body_markdown);
+END;
+
+CREATE TRIGGER IF NOT EXISTS skills_au AFTER UPDATE ON skills
+BEGIN
+  INSERT INTO skills_fts(skills_fts, rowid, slug, name, description, when_to_use, body_markdown)
+  VALUES('delete', old.id, old.slug, old.name, old.description, old.when_to_use, old.body_markdown);
+  INSERT INTO skills_fts(rowid, slug, name, description, when_to_use, body_markdown)
+  VALUES (new.id, new.slug, new.name, new.description, new.when_to_use, new.body_markdown);
+END;
+
+-- ---------------------------------------------------------------------------
 -- personas (Plan 29-A): single-default invariant. Inserting or updating a
 -- row with is_default=1 demotes every other row. Triggers stay simple —
 -- the API layer is responsible for blocking the "demote the only default"

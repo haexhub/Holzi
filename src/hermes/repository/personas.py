@@ -143,12 +143,15 @@ async def update(
     agents: str | None = None,
     is_default: bool | None = None,
     ts: int | None = None,
+    history_author: str = "user",
 ) -> Persona | None:
     """Patch a row. None means "leave this field alone". Demotion of
     other defaults happens via the schema.sql trigger.
 
     On a successful update a `persona_history` row capturing the
     post-update state is appended inside the same transaction.
+    `history_author` labels who issued this write (``"user"`` for
+    UI edits, ``"bootstrap"`` for the bootstrap skill, etc.).
     """
     existing = await get(engine, persona_id)
     if existing is None:
@@ -186,7 +189,9 @@ async def update(
         if row is None:
             return None
         persona = _row_to_persona(row)
-        await history_repo.write_snapshot(engine, persona, ts=now, conn=conn)
+        await history_repo.write_snapshot(
+            engine, persona, author=history_author, ts=now, conn=conn
+        )
     return persona
 
 
