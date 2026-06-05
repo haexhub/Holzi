@@ -23,6 +23,7 @@ from hermes.personas import (
     _drop_persona_skills_table,
     _migrate_prompt_to_fragments,
     _migrate_skills_add_enabled,
+    ensure_bootstrap_skill_seeded,
 )
 from hermes.personas import ensure_backfill as ensure_personas_backfill
 from hermes.users import ensure_users_seeded
@@ -148,6 +149,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # ensure_personas_backfill so the persona exists when bootstrap
         # tools reference it. Idempotent — INSERT OR IGNORE.
         await ensure_users_seeded(app.state.db)
+        await ensure_bootstrap_skill_seeded(app.state.db)
 
         # Plan 25: backfill workspaces from HERMES_WORKSPACE_ROOTS. The env
         # is the bootstrap mechanism; the DB is the source of truth from
