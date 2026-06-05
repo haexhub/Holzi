@@ -22,6 +22,7 @@ go through this single function.
 """
 import json
 import time
+from dataclasses import dataclass
 from typing import Final
 
 from sqlalchemy import text
@@ -29,10 +30,25 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import capabilities
 from hermes import users as users_mod
+from hermes.errors import ErrorCode
 from hermes.repository import channels as channels_repo
+from hermes.repository import llm_credentials as llm_credentials_repo
 from hermes.repository import personas as personas_repo
 from hermes.repository import skills as skills_repo
-from hermes.repository.models import Persona, Skill
+from hermes.repository.models import LlmCredential, Persona, Skill
+
+@dataclass
+class PersonaContext:
+    """Resolved agent context for a single chat turn.
+
+    `credential` is always non-null: resolved from persona.llm_credential_id
+    → active credential → HTTPException(503) if neither exists.
+    `model` is persona.model if set, else credential.model, else settings.model.
+    """
+    system_prompt: str
+    credential: LlmCredential
+    model: str
+
 
 # Single source of truth for known channels. Key = exact string used as
 # the channel identifier by the call-sites and persisted in the
@@ -496,6 +512,55 @@ async def get_effective_system_prompt(
         parts.append(_BOOTSTRAP_HINT)
 
     return "\n\n".join(parts)
+
+
+async def resolve_persona_context(
+    channel: str,
+    engine: AsyncEngine,
+) -> PersonaContext:
+    """Extend get_effective_system_prompt with credential + model resolution.
+
+    Resolution order:
+    1. system_prompt: delegates to get_effective_system_prompt.
+    2. credential: persona.llm_credential_id → active credential.
+       Raises HTTPException(503, PERSONA_NO_CREDENTIAL) when neither found.
+    3. model: persona.model → credential.model → settings.model.
+    """
+    from fastapi import HTTPException
+    from hermes.config import settings
+
+    system_prompt = await get_effective_system_prompt(channel, engine)
+
+    row = await channels_repo.get(engine, channel)
+    persona_id: int | None = None if row is None else row.default_persona_id
+    persona = None
+    if persona_id is not None:
+        persona = await personas_repo.get(engine, persona_id)
+    if persona is None:
+        persona = await personas_repo.get_default(engine)
+
+    credential: LlmCredential | None = None
+    if persona is not None and persona.llm_credential_id is not None:
+        credential = await llm_credentials_repo.get(engine, persona.llm_credential_id)
+    if credential is None:
+        credential = await llm_credentials_repo.get_active(engine)
+    if credential is None:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorCode.PERSONA_NO_CREDENTIAL.value,
+        )
+
+    model: str = (
+        (persona.model if persona is not None else None)
+        or credential.model
+        or settings.model
+    )
+
+    return PersonaContext(
+        system_prompt=system_prompt,
+        credential=credential,
+        model=model,
+    )
 
 
 async def ensure_bootstrap_skill_seeded(engine: AsyncEngine) -> None:

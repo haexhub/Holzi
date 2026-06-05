@@ -14,11 +14,15 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import capabilities
+from hermes.crypto import EncryptedBlob
 from hermes.personas import (
     CHANNEL_REGISTRY,
+    PersonaContext,
     get_effective_system_prompt,
+    resolve_persona_context,
 )
 from hermes.repository import channels as channels_repo
+from hermes.repository import llm_credentials as cred_repo
 from hermes.repository import personas as personas_repo
 from hermes.repository import skills as skills_repo
 
@@ -320,3 +324,80 @@ async def test_empty_capability_index_is_omitted_from_composition(
 
     assert prompt == "## Identity\nI-body\n\nC"
     assert "\n\n\n" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# resolve_persona_context tests (Plan 29-D Task 3)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_credential(
+    engine,
+    *,
+    model: str | None = None,
+    is_active: bool = False,
+) -> int:
+    """Seed a dummy openai api_key credential. Returns credential id."""
+    from sqlalchemy import text
+    cred = await cred_repo.create_api_key(
+        engine,
+        provider="openai",
+        display_name="test-cred",
+        base_url=None,
+        ciphertext=EncryptedBlob(iv="aa", tag="bb", data="cc"),
+    )
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE llm_credentials SET model=:m, is_active=:a WHERE id=:id"),
+            {"m": model, "a": 1 if is_active else 0, "id": cred.id},
+        )
+    return cred.id
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_uses_active_cred_when_persona_has_none(conn):
+    cred_id = await _seed_credential(conn, model="gpt-4o", is_active=True)
+    await _seed_default_persona(conn, identity="x")
+    ctx = await resolve_persona_context("web", conn)
+    assert isinstance(ctx, PersonaContext)
+    assert ctx.credential.id == cred_id
+    assert ctx.model == "gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_persona_credential_overrides_active(conn):
+    await _seed_credential(conn, model="gpt-4o", is_active=True)
+    pinned_id = await _seed_credential(conn, model="gpt-3.5-turbo", is_active=False)
+    persona = await _seed_default_persona(conn, identity="x")
+    await personas_repo.update(conn, persona.id, llm_credential_id=pinned_id)
+    ctx = await resolve_persona_context("web", conn)
+    assert ctx.credential.id == pinned_id
+    assert ctx.model == "gpt-3.5-turbo"
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_persona_model_overrides_cred_model(conn):
+    cred_id = await _seed_credential(conn, model="gpt-4o", is_active=True)
+    persona = await _seed_default_persona(conn, identity="x")
+    await personas_repo.update(conn, persona.id, llm_credential_id=cred_id, model="gpt-4-turbo")
+    ctx = await resolve_persona_context("web", conn)
+    assert ctx.model == "gpt-4-turbo"
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_no_credential_raises_503(conn):
+    from fastapi import HTTPException
+    await _seed_default_persona(conn, identity="x")
+    with pytest.raises(HTTPException) as exc_info:
+        await resolve_persona_context("web", conn)
+    assert exc_info.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_model_falls_back_to_cred_default_when_persona_model_null(conn):
+    cred_id = await _seed_credential(conn, model="gpt-4o", is_active=True)
+    persona = await _seed_default_persona(conn, identity="x")
+    # persona.model is None by default — should fall back to credential.model
+    await personas_repo.update(conn, persona.id, llm_credential_id=cred_id)
+    ctx = await resolve_persona_context("web", conn)
+    assert ctx.model == "gpt-4o"
