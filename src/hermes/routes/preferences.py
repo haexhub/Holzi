@@ -40,6 +40,7 @@ from hermes.repository import persona_history as persona_history_repo
 from hermes.repository import personas as personas_repo
 from hermes.repository.models import (
     ChannelPromptRow,
+    LlmCredential,
     Persona,
     PersonaHistory,
 )
@@ -329,6 +330,7 @@ async def update_persona(
                     },
                 )
             # Reuse the credential already fetched above when possible.
+            cred_for_model: LlmCredential | None
             if _fetched_cred is not None and _fetched_cred.id == effective_cred_id:
                 cred_for_model = _fetched_cred
             else:
