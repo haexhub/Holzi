@@ -515,32 +515,87 @@ async def get_effective_system_prompt(
     return "\n\n".join(parts)
 
 
+async def _get_system_prompt_for_persona(
+    channel: str, engine: AsyncEngine, *, persona: Persona
+) -> str:
+    """Build a system prompt using the given persona instead of the channel default.
+
+    Used when `persona_id_override` is set on a chat request — the system
+    prompt structure is identical to `get_effective_system_prompt` except
+    the persona is supplied directly rather than resolved from the channel row.
+    """
+    if channel not in CHANNEL_REGISTRY:
+        raise KeyError(f"unknown channel: {channel}")
+
+    row = await channels_repo.get(engine, channel)
+    channel_prompt = row.prompt if row is not None else CHANNEL_REGISTRY[channel]["default_prompt"]
+
+    enabled_skills = await skills_repo.list_enabled(engine)
+    catalog = _catalog_index(enabled_skills)
+    index = capabilities.load_capability_index()
+
+    parts: list[str] = []
+    persona_parts: list[str] = []
+    for header, body in _persona_sections(persona):
+        body = body.strip()
+        if body:
+            persona_parts.append(f"{header}\n{body}")
+    if persona_parts:
+        parts.append("\n\n".join(persona_parts))
+    if catalog:
+        parts.append(catalog)
+    if index:
+        parts.append(index)
+    parts.append(channel_prompt)
+
+    bootstrap_done = await users_mod.is_bootstrap_completed(engine)
+    bootstrap_loadable = any(s.slug == "bootstrap-first-chat" for s in enabled_skills)
+    if not bootstrap_done and bootstrap_loadable:
+        parts.append(_BOOTSTRAP_HINT)
+
+    return "\n\n".join(parts)
+
+
 async def resolve_persona_context(
     channel: str,
     engine: AsyncEngine,
+    *,
+    model_override: str | None = None,
+    persona_id_override: int | None = None,
 ) -> PersonaContext:
     """Extend get_effective_system_prompt with credential + model resolution.
 
-    Resolution order:
-    1. system_prompt: delegates to get_effective_system_prompt.
-    2. credential: persona.llm_credential_id → active credential.
-       Raises HTTPException(503, PERSONA_NO_CREDENTIAL) when neither found.
-    3. model: persona.model → credential.model → settings.model.
+    Override resolution order (one-turn; not persisted):
+    - persona_id_override: skips channel default persona lookup, uses this ID.
+      Raises HTTPException(404, PERSONA_NOT_FOUND) if the ID doesn't exist.
+    - model_override: supersedes persona.model / credential.model / settings.model.
     """
     from fastapi import HTTPException
 
     from hermes.config import settings
 
-    system_prompt = await get_effective_system_prompt(channel, engine)
+    # Resolve persona (with optional one-turn override)
+    if persona_id_override is not None:
+        override_persona = await personas_repo.get(engine, persona_id_override)
+        if override_persona is None:
+            raise HTTPException(
+                status_code=404, detail=ErrorCode.PERSONA_NOT_FOUND.value
+            )
+        system_prompt = await _get_system_prompt_for_persona(
+            channel, engine, persona=override_persona
+        )
+        persona: Persona | None = override_persona
+    else:
+        system_prompt = await get_effective_system_prompt(channel, engine)
+        row = await channels_repo.get(engine, channel)
+        persona_id: int | None = None if row is None else row.default_persona_id
+        persona = None
+        if persona_id is not None:
+            persona = await personas_repo.get(engine, persona_id)
+        if persona is None:
+            persona = await personas_repo.get_default(engine)
 
-    row = await channels_repo.get(engine, channel)
-    persona_id: int | None = None if row is None else row.default_persona_id
-    persona = None
-    if persona_id is not None:
-        persona = await personas_repo.get(engine, persona_id)
-    if persona is None:
-        persona = await personas_repo.get_default(engine)
-
+    # Credential resolution (unchanged)
     credential: LlmCredential | None = None
     if persona is not None and persona.llm_credential_id is not None:
         credential = await llm_credentials_repo.get(engine, persona.llm_credential_id)
@@ -552,7 +607,8 @@ async def resolve_persona_context(
             detail=ErrorCode.PERSONA_NO_CREDENTIAL.value,
         )
 
-    model: str = (
+    # Model resolution (override wins)
+    model: str = model_override or (
         (persona.model if persona is not None else None)
         or credential.model
         or settings.model

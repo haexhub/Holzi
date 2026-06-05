@@ -106,6 +106,9 @@ class ChatRequest(BaseModel):
     # Ids of attachments previously uploaded to this conversation (Plan 11).
     # Each must belong to `conversation_id` and still be unlinked, else 400.
     attachment_ids: list[int] = Field(default_factory=list)
+    # One-turn overrides. Not persisted. Cleared after the agent run.
+    model_override: str | None = Field(default=None, min_length=1)
+    persona_id_override: int | None = Field(default=None, ge=1)
 
 
 _API_KEY_RE = re.compile(
@@ -152,7 +155,10 @@ def _classify_chat_error(exc: BaseException) -> tuple[str, int, str]:
     """
     if isinstance(exc, httpx.HTTPStatusError):
         upstream_status = exc.response.status_code
-        body = exc.response.content  # populated for non-streaming raises
+        try:
+            body = exc.response.content  # populated for non-streaming raises
+        except httpx.ResponseNotRead:
+            body = b""
         message = _sanitize_upstream_message(body, upstream_status)
         if upstream_status == 429:
             return ("upstream_rate_limited", 429, message)
@@ -259,10 +265,21 @@ async def api_chat(request: Request) -> Response:
             conversation_id=convo.id,
         )
 
-    return await _stream_web_agent_run(request, convo)
+    return await _stream_web_agent_run(
+        request,
+        convo,
+        model_override=payload.model_override,
+        persona_id_override=payload.persona_id_override,
+    )
 
 
-async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
+async def _stream_web_agent_run(
+    request: Request,
+    convo: Any,
+    *,
+    model_override: str | None = None,
+    persona_id_override: int | None = None,
+) -> Response:
     """Run the web agent over the conversation's current message history and
     stream it as SSE. Shared by /api/chat (after appending the new user
     message) and /api/conversations/{id}/retry (after trimming the trailing
@@ -302,7 +319,12 @@ async def _stream_web_agent_run(request: Request, convo: Any) -> Response:
 
     # Resolve persona context once before the SSE generator so the model id
     # we persist in agent_runs matches what the upstream actually saw.
-    persona_ctx = await resolve_persona_context(WEB_CHANNEL, db)
+    persona_ctx = await resolve_persona_context(
+        WEB_CHANNEL,
+        db,
+        model_override=model_override,
+        persona_id_override=persona_id_override,
+    )
     model = persona_ctx.model
     persona_upstream = build_client_for_credential(
         persona_ctx.credential,
