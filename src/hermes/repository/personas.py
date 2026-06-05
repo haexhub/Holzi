@@ -197,13 +197,17 @@ async def delete(engine: AsyncEngine, persona_id: int) -> bool:
     and ON DELETE CASCADE on `persona_history.persona_id` wipes the
     audit rows for the gone persona.
     """
-    existing = await get(engine, persona_id)
-    if existing is None:
-        return False
-    if existing.is_default:
-        return False
+    # Atomic guard: include the is_default=0 condition in the DELETE
+    # itself rather than checking first via `get()` and then DELETEing
+    # — that pattern has a TOCTOU race where a concurrent UPDATE can
+    # promote the row to default between read and delete. The single
+    # DELETE … WHERE is_default = 0 is race-free; rowcount=0 means
+    # either the row didn't exist or it was the default.
     async with engine.begin() as conn:
         result = await conn.execute(
-            t_personas.delete().where(t_personas.c.id == persona_id)
+            t_personas.delete().where(
+                (t_personas.c.id == persona_id)
+                & (t_personas.c.is_default == 0)
+            )
         )
     return (result.rowcount or 0) > 0

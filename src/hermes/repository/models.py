@@ -170,8 +170,10 @@ class PersonaHistory:
 
     `snapshot_json` is the raw JSON string of
     `{name, soul, identity, agents}`; the repo layer parses it for
-    callers that need fields. `author` is fixed `'user'` today —
-    Wave C swaps it for a real user_id.
+    callers that need fields. `author` is one of `'user'` (normal
+    edits), `'system'` (initial seed via `ensure_backfill`) or
+    `'migration'` (one-shot legacy → fragments migration); Wave C
+    will swap user-tier writes for a real user_id.
     """
 
     id: int
