@@ -135,6 +135,7 @@ async def test_chat_completions_unknown_session_returns_404(
         },
     )
     assert response.status_code == 404
+    assert response.json()["detail"] == "CHAT_SESSION_NOT_FOUND"
 
 
 async def test_chat_completions_invalid_session_header_returns_400(
@@ -150,6 +151,7 @@ async def test_chat_completions_invalid_session_header_returns_400(
         },
     )
     assert response.status_code == 400
+    assert response.json()["detail"] == "CHAT_INVALID_SESSION"
 
 
 async def test_chat_completions_streaming_passes_sse_and_persists(
@@ -193,6 +195,7 @@ async def test_chat_completions_malformed_json_returns_400(
         content=b"not-json-at-all",
     )
     assert response.status_code == 400
+    assert response.json()["detail"] == "REQUEST_INVALID_JSON"
 
 
 async def test_chat_completions_upstream_connect_error_returns_502(
@@ -211,6 +214,7 @@ async def test_chat_completions_upstream_connect_error_returns_502(
         },
     )
     assert response.status_code == 502
+    assert response.json()["detail"] == "CHAT_UPSTREAM_UNREACHABLE"
 
 
 async def test_chat_completions_upstream_timeout_returns_504(
@@ -229,6 +233,7 @@ async def test_chat_completions_upstream_timeout_returns_504(
         },
     )
     assert response.status_code == 504
+    assert response.json()["detail"] == "CHAT_UPSTREAM_TIMEOUT"
 
 
 async def test_chat_completions_upstream_returns_non_json_2xx_returns_502(
@@ -249,6 +254,7 @@ async def test_chat_completions_upstream_returns_non_json_2xx_returns_502(
         },
     )
     assert response.status_code == 502
+    assert response.json()["detail"] == "CHAT_UPSTREAM_NON_JSON"
 
 
 async def test_chat_completions_streaming_with_upstream_5xx_returns_error_not_stream(

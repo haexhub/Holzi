@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.errors import ErrorCode
 from hermes.repository import runs as runs_repo
 
 router = APIRouter(prefix="/api/insights", tags=["insights"])
@@ -140,7 +141,10 @@ async def api_insights(
     if period not in _PERIOD_BUCKETS:
         raise HTTPException(
             status_code=400,
-            detail=f"period must be one of {sorted(_PERIOD_BUCKETS)}",
+            detail={
+                "code": ErrorCode.REQUEST_INVALID_PERIOD.value,
+                "params": {"allowed": sorted(_PERIOD_BUCKETS)},
+            },
         )
     db: AsyncEngine = request.app.state.db
     today = _utc_today()

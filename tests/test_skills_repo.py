@@ -149,7 +149,7 @@ async def test_list_all_orders_by_name(conn: AsyncEngine) -> None:
 @pytest.mark.asyncio
 async def test_list_for_persona_empty(conn: AsyncEngine) -> None:
     persona = await personas_repo.create(
-        conn, name="P", prompt="p", is_default=True
+        conn, name="P", soul="", identity="p", agents="", is_default=True
     )
     assert await repo.list_for_persona(conn, persona.id) == []
 
@@ -157,7 +157,7 @@ async def test_list_for_persona_empty(conn: AsyncEngine) -> None:
 @pytest.mark.asyncio
 async def test_set_persona_skills_inserts_in_order(conn: AsyncEngine) -> None:
     persona = await personas_repo.create(
-        conn, name="P", prompt="p", is_default=True
+        conn, name="P", soul="", identity="p", agents="", is_default=True
     )
     s1 = await repo.create(
         conn,
@@ -203,7 +203,7 @@ async def test_set_persona_skills_is_atomic_replacement(
 ) -> None:
     """set_persona_skills replaces the entire list for that persona."""
     persona = await personas_repo.create(
-        conn, name="P", prompt="p", is_default=True
+        conn, name="P", soul="", identity="p", agents="", is_default=True
     )
     s1 = await repo.create(
         conn,
@@ -242,7 +242,7 @@ async def test_set_persona_skills_is_atomic_replacement(
 @pytest.mark.asyncio
 async def test_set_persona_skills_empty_clears_all(conn: AsyncEngine) -> None:
     persona = await personas_repo.create(
-        conn, name="P", prompt="p", is_default=True
+        conn, name="P", soul="", identity="p", agents="", is_default=True
     )
     s = await repo.create(
         conn,
@@ -267,7 +267,7 @@ async def test_set_persona_skills_atomic_rollback_on_invalid_skill(
 ) -> None:
     """Invalid skill_id in the items list rolls back the whole replacement."""
     persona = await personas_repo.create(
-        conn, name="P", prompt="p", is_default=True
+        conn, name="P", soul="", identity="p", agents="", is_default=True
     )
     s = await repo.create(
         conn,
@@ -300,7 +300,7 @@ async def test_delete_skill_cascades_persona_skills(
     conn: AsyncEngine,
 ) -> None:
     persona = await personas_repo.create(
-        conn, name="P", prompt="p", is_default=True
+        conn, name="P", soul="", identity="p", agents="", is_default=True
     )
     s = await repo.create(
         conn,
@@ -325,10 +325,10 @@ async def test_delete_persona_cascades_persona_skills(
     conn: AsyncEngine,
 ) -> None:
     default = await personas_repo.create(
-        conn, name="D", prompt="d", is_default=True
+        conn, name="D", soul="", identity="d", agents="", is_default=True
     )
     other = await personas_repo.create(
-        conn, name="O", prompt="o", is_default=False
+        conn, name="O", soul="", identity="o", agents="", is_default=False
     )
     s = await repo.create(
         conn,

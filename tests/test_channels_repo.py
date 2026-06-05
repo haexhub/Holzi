@@ -49,7 +49,7 @@ async def test_update_prompt_only(conn: AsyncEngine) -> None:
 async def test_update_default_persona_only(conn: AsyncEngine) -> None:
     await repo.ensure_seeded(conn)
     persona = await personas_repo.create(
-        conn, name="A", prompt="a", is_default=True
+        conn, name="A", soul="", identity="a", agents="", is_default=True
     )
 
     updated = await repo.update(conn, "web", default_persona_id=persona.id)
@@ -69,7 +69,7 @@ async def test_update_unknown_channel_returns_none(conn: AsyncEngine) -> None:
 async def test_reset_prompt(conn: AsyncEngine) -> None:
     await repo.ensure_seeded(conn)
     persona = await personas_repo.create(
-        conn, name="A", prompt="a", is_default=True
+        conn, name="A", soul="", identity="a", agents="", is_default=True
     )
     await repo.update(
         conn, "web", prompt="custom", default_persona_id=persona.id
@@ -95,10 +95,20 @@ async def test_delete_persona_nulls_channel_default(
     """FK ON DELETE SET NULL on channel_prompts.default_persona_id."""
     await repo.ensure_seeded(conn)
     default_persona = await personas_repo.create(
-        conn, name="Default", prompt="d", is_default=True
+        conn,
+        name="Default",
+        soul="",
+        identity="d",
+        agents="",
+        is_default=True,
     )
     other = await personas_repo.create(
-        conn, name="Other", prompt="o", is_default=False
+        conn,
+        name="Other",
+        soul="",
+        identity="o",
+        agents="",
+        is_default=False,
     )
     await repo.update(conn, "web", default_persona_id=other.id)
 

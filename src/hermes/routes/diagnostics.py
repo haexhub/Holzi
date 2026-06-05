@@ -2,15 +2,16 @@
 
 Surfaces what a new user needs to set up before first chat (LLM credential,
 workspace roots, sandbox runtime) plus the things that must be healthy at
-runtime (database reachable, scheduler running). Every check returns a
-short human-readable message; the overall status is the worst of the
-children so the frontend can render a top-level badge without re-walking
-the list.
+runtime (database reachable, scheduler running). Plan 30 moved this away
+from free-form `message` strings to `(code, params)` pairs so the frontend
+can translate per locale. The overall status is the worst of the children
+so the frontend can render a top-level badge without re-walking the list.
 
 Redaction rule: this endpoint never returns API key plaintext, ciphertext
 blob bytes, the master key, or the bearer auth token. Provider names,
 display names, model ids, sandbox image tags and workspace root ids are
-considered public.
+considered public — they land in `params` and the i18n template uses
+them verbatim.
 """
 from typing import Literal
 
@@ -20,6 +21,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.config import settings
+from hermes.errors import ErrorCode
 from hermes.logging import logger
 from hermes.repository import llm_credentials as llm_repo
 from hermes.repository import workspaces as workspaces_repo
@@ -29,12 +31,20 @@ router = APIRouter(prefix="/api/diagnostics", tags=["diagnostics"])
 Status = Literal["ok", "warning", "error"]
 _SEVERITY: dict[Status, int] = {"ok": 0, "warning": 1, "error": 2}
 
+# `params` is intentionally permissive: the only contract is "JSON-serialisable
+# scalars and lists". The FE renders `errors.<code>` with these values
+# interpolated. Anything user-controlled passes through `_summarise` first to
+# keep the response bounded.
+DiagParam = str | int | list[str]
+
 
 class DiagnosticsCheck(BaseModel):
     id: str
-    label: str
     status: Status
-    message: str
+    # Plan 30: the message string is gone; FE renders the localised
+    # template under `errors.<code>` with `params` interpolated in.
+    code: str
+    params: dict[str, DiagParam] = {}
 
 
 class DiagnosticsResponse(BaseModel):
@@ -44,7 +54,7 @@ class DiagnosticsResponse(BaseModel):
 
 def _summarise(value: str, *, max_len: int) -> str:
     """Compact user-controlled free text into a single-line, length-capped
-    form so the diagnostics `message` field stays predictable."""
+    form so the diagnostics `params` payload stays predictable."""
     one_line = " ".join(value.split())
     if len(one_line) <= max_len:
         return one_line
@@ -55,9 +65,8 @@ async def _check_database(db: AsyncEngine | None) -> DiagnosticsCheck:
     if db is None:
         return DiagnosticsCheck(
             id="database",
-            label="Database",
             status="error",
-            message="engine not initialised",
+            code=ErrorCode.DIAG_DB_NOT_INITIALISED.value,
         )
     try:
         async with db.connect() as conn:
@@ -66,12 +75,13 @@ async def _check_database(db: AsyncEngine | None) -> DiagnosticsCheck:
         logger.warning("diagnostics_db_error", error=str(exc))
         return DiagnosticsCheck(
             id="database",
-            label="Database",
             status="error",
-            message="unreachable",
+            code=ErrorCode.DIAG_DB_UNREACHABLE.value,
         )
     return DiagnosticsCheck(
-        id="database", label="Database", status="ok", message="reachable"
+        id="database",
+        status="ok",
+        code=ErrorCode.DIAG_DB_REACHABLE.value,
     )
 
 
@@ -80,9 +90,8 @@ async def _check_llm(db: AsyncEngine) -> DiagnosticsCheck:
     if active is None:
         return DiagnosticsCheck(
             id="llm",
-            label="LLM",
             status="warning",
-            message="no active LLM credential — chat will fail until one is configured",
+            code=ErrorCode.DIAG_LLM_NO_CREDENTIAL.value,
         )
     # display_name is user-controlled free text — truncate so an oversized
     # or multiline value can't dominate the response or push the badge
@@ -92,9 +101,9 @@ async def _check_llm(db: AsyncEngine) -> DiagnosticsCheck:
     model = active.model or settings.model
     return DiagnosticsCheck(
         id="llm",
-        label="LLM",
         status="ok",
-        message=f"active credential: {display} (model {model})",
+        code=ErrorCode.DIAG_LLM_ACTIVE.value,
+        params={"display": display, "model": model},
     )
 
 
@@ -103,9 +112,8 @@ def _check_scheduler(request: Request) -> DiagnosticsCheck:
     if scheduler is None:
         return DiagnosticsCheck(
             id="scheduler",
-            label="Scheduler",
             status="error",
-            message="agent task scheduler did not start",
+            code=ErrorCode.DIAG_SCHEDULER_NOT_STARTED.value,
         )
     # Reaching into `_task` is deliberate: the scheduler manager survives
     # a crashed background loop (the asyncio.Task transitions to done()),
@@ -114,15 +122,13 @@ def _check_scheduler(request: Request) -> DiagnosticsCheck:
     if task is None or task.done():
         return DiagnosticsCheck(
             id="scheduler",
-            label="Scheduler",
             status="error",
-            message="agent task scheduler is not running (loop stopped)",
+            code=ErrorCode.DIAG_SCHEDULER_LOOP_STOPPED.value,
         )
     return DiagnosticsCheck(
         id="scheduler",
-        label="Scheduler",
         status="ok",
-        message="agent task scheduler is running",
+        code=ErrorCode.DIAG_SCHEDULER_RUNNING.value,
     )
 
 
@@ -134,30 +140,31 @@ async def _check_workspace(db: AsyncEngine | None) -> DiagnosticsCheck:
     if db is None:
         return DiagnosticsCheck(
             id="workspace",
-            label="Workspaces",
             status="error",
-            message="cannot check — database not initialised",
+            code=ErrorCode.DIAG_WORKSPACE_NEEDS_DB.value,
         )
     rows = await workspaces_repo.list_active(db)
     if not rows:
         return DiagnosticsCheck(
             id="workspace",
-            label="Workspaces",
             status="warning",
-            message="no workspaces configured (add one in /settings/workspaces)",
+            code=ErrorCode.DIAG_WORKSPACE_NONE.value,
         )
     # `display_name` is user-controlled — apply the same single-line +
     # length-cap pass the LLM check uses so a runaway name can't dominate
     # the response. 48 chars per name is generous; first three + count
     # keeps the line short on big installs.
     preview_names = [_summarise(r.display_name, max_len=48) for r in rows[:3]]
-    suffix = "…" if len(rows) > 3 else ""
-    preview = ", ".join(preview_names) + suffix
+    truncated = len(rows) > 3
     return DiagnosticsCheck(
         id="workspace",
-        label="Workspaces",
         status="ok",
-        message=f"{len(rows)} workspace(s) configured: {preview}",
+        code=ErrorCode.DIAG_WORKSPACE_CONFIGURED.value,
+        params={
+            "count": len(rows),
+            "names": preview_names,
+            "truncated": 1 if truncated else 0,
+        },
     )
 
 
@@ -169,25 +176,23 @@ def _check_sandbox(request: Request) -> DiagnosticsCheck:
         # surfaces lazily on the first sandbox spawn.
         return DiagnosticsCheck(
             id="sandbox",
-            label="Sandbox runtime",
             status="ok",
-            message=(
-                f"rootless Podman configured "
-                f"(image {settings.sandbox_image}, network {settings.sandbox_network})"
-            ),
+            code=ErrorCode.DIAG_SANDBOX_CONFIGURED.value,
+            params={
+                "image": settings.sandbox_image,
+                "network": settings.sandbox_network,
+            },
         )
     if not settings.sandbox_socket:
         return DiagnosticsCheck(
             id="sandbox",
-            label="Sandbox runtime",
             status="warning",
-            message="HERMES_SANDBOX_SOCKET not set — tool calls that need a sandbox will fail",
+            code=ErrorCode.DIAG_SANDBOX_SOCKET_MISSING.value,
         )
     return DiagnosticsCheck(
         id="sandbox",
-        label="Sandbox runtime",
         status="error",
-        message="sandbox socket configured but manager failed to start",
+        code=ErrorCode.DIAG_SANDBOX_MANAGER_FAILED.value,
     )
 
 
@@ -203,9 +208,8 @@ async def api_diagnostics(request: Request) -> DiagnosticsResponse:
         checks.append(
             DiagnosticsCheck(
                 id="llm",
-                label="LLM",
                 status="error",
-                message="cannot check — database not initialised",
+                code=ErrorCode.DIAG_LLM_NEEDS_DB.value,
             )
         )
     checks.extend(

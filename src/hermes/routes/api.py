@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from hermes import attachments as attachments_mod
 from hermes.agent import ApprovalDecision, ChatRunCancelled, run_agent
 from hermes.config import conversation_scratch_root, settings
+from hermes.errors import ErrorCode
 from hermes.events import (
     ApprovalDecisionLiteral,
     ApprovalRequiredData,
@@ -78,7 +79,10 @@ def _validate_limit(limit: int, *, max_limit: int = MAX_LIST_LIMIT) -> int:
     if limit < 1 or limit > max_limit:
         raise HTTPException(
             status_code=400,
-            detail=f"limit must be between 1 and {max_limit}",
+            detail={
+                "code": ErrorCode.REQUEST_LIMIT_OUT_OF_RANGE.value,
+                "params": {"min": 1, "max": max_limit},
+            },
         )
     return limit
 
@@ -151,12 +155,20 @@ async def api_chat(request: Request) -> Response:
     try:
         body = await request.json()
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.REQUEST_INVALID_JSON.value
+        ) from exc
 
     try:
         payload = ChatRequest.model_validate(body)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": ErrorCode.INVALID_REQUEST.value,
+                "params": {"message": str(exc)},
+            },
+        ) from exc
 
     db: AsyncEngine = request.app.state.db
 
@@ -166,7 +178,7 @@ async def api_chat(request: Request) -> Response:
     if payload.conversation_id is None and payload.attachment_ids:
         raise HTTPException(
             status_code=400,
-            detail="attachment_ids require an existing conversation_id",
+            detail=ErrorCode.ATTACHMENT_REQUIRES_CONVERSATION.value,
         )
 
     if payload.conversation_id is None:
@@ -178,14 +190,16 @@ async def api_chat(request: Request) -> Response:
     else:
         existing = await conversations.get(db, payload.conversation_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="unknown conversation_id")
+            raise HTTPException(
+                status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
+            )
         # /api/chat is the web surface — never let it append into a Signal or
         # VSCode thread, which would blur channel semantics and bypass the
         # per-channel system prompt + tool catalog.
         if existing.channel != WEB_CHANNEL:
             raise HTTPException(
                 status_code=400,
-                detail="conversation_id must reference a web conversation",
+                detail=ErrorCode.CONVERSATION_NOT_WEB.value,
             )
         convo = existing
 
@@ -201,10 +215,7 @@ async def api_chat(request: Request) -> Response:
             ):
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        "attachment_ids must reference unsent uploads "
-                        "in this conversation"
-                    ),
+                    detail=ErrorCode.ATTACHMENT_UNKNOWN_IDS.value,
                 )
 
     user_msg = await messages.append(
@@ -496,7 +507,9 @@ async def api_chat_cancel_run(request: Request, run_id: str) -> Response:
     chat_runs: dict[str, asyncio.Event] = request.app.state.chat_runs
     event = chat_runs.get(run_id)
     if event is None:
-        raise HTTPException(status_code=404, detail="unknown run_id")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.RUN_NOT_FOUND.value
+        )
     event.set()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -542,9 +555,13 @@ async def api_resolve_approval(
     )
     future = approvals.get(approval_id)
     if future is None:
-        raise HTTPException(status_code=404, detail="unknown approval_id")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.APPROVAL_NOT_FOUND.value
+        )
     if future.done():
-        raise HTTPException(status_code=409, detail="approval already resolved")
+        raise HTTPException(
+            status_code=409, detail=ErrorCode.APPROVAL_ALREADY_RESOLVED.value
+        )
     future.set_result(
         ApprovalDecision(decision=body.decision, reason=body.reason)
     )
@@ -631,7 +648,7 @@ async def api_revoke_standing_approval(
         removed = await approvals_repo.revoke_always(db, tool_name)
         if not removed:
             raise HTTPException(
-                status_code=404, detail="tool not in always-allowed list"
+                status_code=404, detail=ErrorCode.TOOL_NOT_IN_ALWAYS_ALLOWED.value
             )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -648,7 +665,9 @@ async def api_revoke_standing_approval(
             if not tools:
                 session_state.pop(conv_id, None)
     if not touched:
-        raise HTTPException(status_code=404, detail="tool not in session-allowed list")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.TOOL_NOT_IN_SESSION_ALLOWED.value
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -707,14 +726,16 @@ async def api_list_runs(
     """
     limit = _validate_limit(limit)
     if offset < 0:
-        raise HTTPException(status_code=400, detail="offset must be >= 0")
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.REQUEST_INVALID_OFFSET.value
+        )
     if status is not None and status not in runs.VALID_STATUSES:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "status must be one of "
-                + ", ".join(sorted(runs.VALID_STATUSES))
-            ),
+            detail={
+                "code": ErrorCode.REQUEST_INVALID_STATUS.value,
+                "params": {"allowed": sorted(runs.VALID_STATUSES)},
+            },
         )
     db: AsyncEngine = request.app.state.db
     rows = await runs.list_runs(
@@ -953,7 +974,9 @@ async def api_get_conversation(
     db: AsyncEngine = request.app.state.db
     convo = await conversations.get(db, conv_id)
     if convo is None:
-        raise HTTPException(status_code=404, detail="conversation not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
+        )
     msgs = await messages.list_by_conversation(db, conv_id, limit=limit)
     atts_by_message: dict[int, list[Any]] = {}
     for att in await attachments.list_by_conversation(db, conv_id):
@@ -980,13 +1003,18 @@ async def api_upload_attachment(
     db: AsyncEngine = request.app.state.db
     convo = await conversations.get(db, conv_id)
     if convo is None:
-        raise HTTPException(status_code=404, detail="conversation not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
+        )
 
     content_type = file.content_type or "application/octet-stream"
     if not attachments_mod.is_allowed(content_type):
         raise HTTPException(
             status_code=415,
-            detail=f"unsupported file type: {content_type}",
+            detail={
+                "code": ErrorCode.ATTACHMENT_UNSUPPORTED_TYPE.value,
+                "params": {"type": content_type},
+            },
         )
 
     # Read in chunks so an oversized body is rejected without buffering the
@@ -997,10 +1025,12 @@ async def api_upload_attachment(
         if len(data) > attachments_mod.MAX_ATTACHMENT_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail=(
-                    "file exceeds the "
-                    f"{attachments_mod.MAX_ATTACHMENT_BYTES} byte limit"
-                ),
+                detail={
+                    "code": ErrorCode.ATTACHMENT_TOO_LARGE.value,
+                    "params": {
+                        "max_bytes": attachments_mod.MAX_ATTACHMENT_BYTES,
+                    },
+                },
             )
 
     # On-disk name is an opaque token, so the user-supplied filename can
@@ -1027,12 +1057,16 @@ async def api_update_conversation(
 ) -> dict[str, Any]:
     title = " ".join(body.title.split())
     if not title:
-        raise HTTPException(status_code=400, detail="title must not be blank")
+        raise HTTPException(
+            status_code=400, detail=ErrorCode.CONVERSATION_TITLE_BLANK.value
+        )
 
     db: AsyncEngine = request.app.state.db
     updated = await conversations.update_title(db, conv_id, title=title)
     if updated is None:
-        raise HTTPException(status_code=404, detail="conversation not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
+        )
     return _conversation_to_dict(updated)
 
 
@@ -1043,7 +1077,9 @@ async def api_delete_conversation(request: Request, conv_id: int) -> Response:
         db, conv_id, scratch_root=conversation_scratch_root()
     )
     if not deleted:
-        raise HTTPException(status_code=404, detail="conversation not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1059,13 +1095,17 @@ async def api_toggle_bookmark_conversation(
     db: AsyncEngine = request.app.state.db
     existing = await conversations.get(db, conv_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="conversation not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
+        )
     updated = await conversations.set_bookmarked(
         db, conv_id, bookmarked=not existing.bookmarked
     )
     if updated is None:
         # Lost-the-race between get() and set_bookmarked().
-        raise HTTPException(status_code=404, detail="conversation not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
+        )
     return _conversation_to_dict(updated)
 
 
@@ -1081,19 +1121,21 @@ async def api_retry_conversation(request: Request, conv_id: int) -> Response:
 
     convo = await conversations.get(db, conv_id)
     if convo is None:
-        raise HTTPException(status_code=404, detail="conversation not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
+        )
     # Same channel guard as /api/chat: retry is a web-only surface.
     if convo.channel != WEB_CHANNEL:
         raise HTTPException(
             status_code=400,
-            detail="conversation_id must reference a web conversation",
+            detail=ErrorCode.CONVERSATION_NOT_WEB.value,
         )
 
     last_user = await messages.last_user_message(db, conv_id)
     if last_user is None:
         raise HTTPException(
             status_code=400,
-            detail="conversation has no user message to retry",
+            detail=ErrorCode.CONVERSATION_NO_USER_MESSAGE_TO_RETRY.value,
         )
 
     # Drop the assistant/tool tail so run_agent regenerates from the same
@@ -1127,29 +1169,35 @@ async def api_edit_and_regenerate(
 
     convo = await conversations.get(db, conv_id)
     if convo is None:
-        raise HTTPException(status_code=404, detail="conversation not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
+        )
     # Same channel guard as /api/chat: edit is a web-only surface.
     if convo.channel != WEB_CHANNEL:
         raise HTTPException(
             status_code=400,
-            detail="conversation_id must reference a web conversation",
+            detail=ErrorCode.CONVERSATION_NOT_WEB.value,
         )
 
     target = await messages.get(db, message_id)
     # A message outside this conversation is a 404 (not found *here*), so the
     # path's conv_id is authoritative and clients can't edit across threads.
     if target is None or target.conversation_id != conv_id:
-        raise HTTPException(status_code=404, detail="message not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.MESSAGE_NOT_FOUND.value
+        )
     if target.role != "user":
         raise HTTPException(
-            status_code=400, detail="only user messages can be edited"
+            status_code=400, detail=ErrorCode.MESSAGE_ONLY_USER_EDITABLE.value
         )
 
     updated = await messages.update_content(db, message_id, content=body.content)
     if updated is None:
         # Lost-the-race between the get() above and the update — the message
         # was deleted concurrently. Don't trim/regenerate on a phantom edit.
-        raise HTTPException(status_code=404, detail="message not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.MESSAGE_NOT_FOUND.value
+        )
     # Drop everything after the edited turn so run_agent regenerates from the
     # corrected context (simplest persistence strategy — no superseded_at).
     # Unlink the on-disk files of any attachments on those later turns first:
@@ -1231,7 +1279,9 @@ async def api_get_note(request: Request, key: str) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
     n = await notes.get(db, key)
     if n is None:
-        raise HTTPException(status_code=404, detail="note not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.NOTE_NOT_FOUND.value
+        )
     return _note_to_dict(n)
 
 
@@ -1257,7 +1307,9 @@ async def api_update_note(
 async def api_delete_note(request: Request, key: str) -> Response:
     db: AsyncEngine = request.app.state.db
     if not await notes.delete(db, key):
-        raise HTTPException(status_code=404, detail="note not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.NOTE_NOT_FOUND.value
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1346,7 +1398,11 @@ def _validate_timezone(tz: str) -> None:
         zoneinfo.ZoneInfo(tz)
     except zoneinfo.ZoneInfoNotFoundError as exc:
         raise HTTPException(
-            status_code=400, detail=f"unknown timezone: {tz!r}"
+            status_code=400,
+            detail={
+                "code": ErrorCode.TASK_UNKNOWN_TIMEZONE.value,
+                "params": {"tz": tz},
+            },
         ) from exc
 
 
@@ -1359,13 +1415,19 @@ def _validate_task_schedule_payload(
     if (due_at is None) == (schedule is None):
         raise HTTPException(
             status_code=400,
-            detail="exactly one of due_at / schedule must be set",
+            detail=ErrorCode.TASK_DUE_OR_SCHEDULE_REQUIRED.value,
         )
     if schedule is not None:
         try:
             agent_tasks.validate_schedule(schedule)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(
+            status_code=400,
+            detail={
+                "code": ErrorCode.INVALID_REQUEST.value,
+                "params": {"message": str(exc)},
+            },
+        ) from exc
 
 
 @router.get("/tasks", response_model=list[TaskResponse])
@@ -1412,7 +1474,13 @@ async def api_patch_task(
         try:
             agent_tasks.validate_schedule(body.schedule)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(
+            status_code=400,
+            detail={
+                "code": ErrorCode.INVALID_REQUEST.value,
+                "params": {"message": str(exc)},
+            },
+        ) from exc
     if body.timezone is not None:
         _validate_timezone(body.timezone)
     try:
@@ -1429,9 +1497,17 @@ async def api_patch_task(
             clear_schedule=body.clear_schedule,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": ErrorCode.INVALID_REQUEST.value,
+                "params": {"message": str(exc)},
+            },
+        ) from exc
     if updated is None:
-        raise HTTPException(status_code=404, detail="task not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.TASK_NOT_FOUND.value
+        )
     return _task_to_dict(updated)
 
 
@@ -1439,7 +1515,9 @@ async def api_patch_task(
 async def api_delete_task(request: Request, task_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
     if not await agent_tasks.delete(db, task_id):
-        raise HTTPException(status_code=404, detail="task not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.TASK_NOT_FOUND.value
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1460,12 +1538,14 @@ async def api_run_task_now(
     db: AsyncEngine = request.app.state.db
     task = await agent_tasks.get(db, task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="task not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.TASK_NOT_FOUND.value
+        )
 
     scheduler = request.app.state.scheduler
     if scheduler is None:
         raise HTTPException(
-            status_code=503, detail="scheduler not configured"
+            status_code=503, detail=ErrorCode.TASK_SCHEDULER_NOT_CONFIGURED.value
         )
 
     asyncio.create_task(
@@ -1506,7 +1586,7 @@ def _require_sandbox_manager(request: Request) -> Any:
     if mgr is None:
         raise HTTPException(
             status_code=503,
-            detail="sandbox runtime not configured",
+            detail=ErrorCode.SANDBOX_NOT_CONFIGURED.value,
         )
     return mgr
 

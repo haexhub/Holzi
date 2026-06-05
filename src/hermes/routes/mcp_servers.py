@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.crypto import Encryptor
+from hermes.errors import ErrorCode
 from hermes.logging import logger
 from hermes.mcp_manager import McpServerHandle, McpServerManager
 from hermes.repository import mcp_servers as repo
@@ -157,7 +158,7 @@ def _require_manager(request: Request) -> McpServerManager:
     if manager is None:
         raise HTTPException(
             status_code=503,
-            detail="MCP server manager not initialised",
+            detail=ErrorCode.MCP_MANAGER_NOT_INITIALISED.value,
         )
     return manager
 
@@ -177,34 +178,31 @@ def _validate_create_shape(body: McpServerCreate) -> None:
     if not _SLUG_RE.fullmatch(body.name):
         raise HTTPException(
             status_code=422,
-            detail=(
-                "name must be kebab-case (a-z, 0-9, -), 2..32 chars, "
-                "no leading/trailing dash"
-            ),
+            detail=ErrorCode.MCP_SERVER_INVALID_NAME.value,
         )
     if body.transport == "http":
         if not body.url:
             raise HTTPException(
-                status_code=422, detail="http transport requires `url`"
+                status_code=422, detail=ErrorCode.MCP_HTTP_REQUIRES_URL.value
             )
         if body.command_argv:
             raise HTTPException(
                 status_code=422,
-                detail="http transport must not set `command_argv`",
+                detail=ErrorCode.MCP_HTTP_FORBIDS_COMMAND.value,
             )
         if body.env:
             raise HTTPException(
-                status_code=422, detail="http transport must not set `env`"
+                status_code=422, detail=ErrorCode.MCP_HTTP_FORBIDS_ENV.value
             )
     else:  # stdio
         if not body.command_argv:
             raise HTTPException(
                 status_code=422,
-                detail="stdio transport requires `command_argv`",
+                detail=ErrorCode.MCP_STDIO_REQUIRES_COMMAND.value,
             )
         if body.url:
             raise HTTPException(
-                status_code=422, detail="stdio transport must not set `url`"
+                status_code=422, detail=ErrorCode.MCP_STDIO_FORBIDS_URL.value
             )
 
 
@@ -252,10 +250,20 @@ async def create_server(
             enabled=body.enabled,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": ErrorCode.INVALID_REQUEST.value,
+                "params": {"message": str(exc)},
+            },
+        ) from exc
     except IntegrityError as exc:
         raise HTTPException(
-            status_code=409, detail=f"mcp server name {body.name!r} already exists"
+            status_code=409,
+            detail={
+                "code": ErrorCode.MCP_SERVER_NAME_CONFLICT.value,
+                "params": {"name": body.name},
+            },
         ) from exc
 
     handle: McpServerHandle | None = None
@@ -282,7 +290,9 @@ async def update_server(
 
     existing = await repo.get(db, server_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="mcp server not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.MCP_SERVER_NOT_FOUND.value
+        )
 
     keys = await _changed_keys(request)
 
@@ -320,9 +330,17 @@ async def update_server(
             **extra,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": ErrorCode.INVALID_REQUEST.value,
+                "params": {"message": str(exc)},
+            },
+        ) from exc
     if updated is None:
-        raise HTTPException(status_code=404, detail="mcp server not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.MCP_SERVER_NOT_FOUND.value
+        )
 
     # Anything that materially affects the connection triggers a restart.
     restart_triggers = {"url", "command_argv", "env", "credentials"}
@@ -357,10 +375,14 @@ async def delete_server(request: Request, server_id: int) -> Response:
     manager = _require_manager(request)
     existing = await repo.get(db, server_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="mcp server not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.MCP_SERVER_NOT_FOUND.value
+        )
     await manager.stop_server(server_id)
     if not await repo.delete(db, server_id):
-        raise HTTPException(status_code=404, detail="mcp server not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.MCP_SERVER_NOT_FOUND.value
+        )
     _refresh_catalog(request)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -375,7 +397,9 @@ async def restart_server(
     manager = _require_manager(request)
     row = await repo.get(db, server_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="mcp server not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.MCP_SERVER_NOT_FOUND.value
+        )
     handle: McpServerHandle | None = None
     try:
         handle = await manager.restart_server(server_id)
@@ -399,7 +423,9 @@ async def server_health(
     )
     row = await repo.get(db, server_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="mcp server not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.MCP_SERVER_NOT_FOUND.value
+        )
     handle = manager.get_handle(server_id) if manager is not None else None
     status_value = _status_for(row, handle)
     tool_count = len(handle.tools) if handle is not None else 0

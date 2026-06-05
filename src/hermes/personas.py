@@ -20,14 +20,18 @@ chosen persona's prompt with the chosen channel's prompt at runtime —
 the four call-sites that used to inline `*_SYSTEM_PROMPT` constants now
 go through this single function.
 """
+import json
+import time
 from typing import Final
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import capabilities
 from hermes.repository import channels as channels_repo
 from hermes.repository import personas as personas_repo
 from hermes.repository import skills as skills_repo
+from hermes.repository.models import Persona
 
 # Single source of truth for known channels. Key = exact string used as
 # the channel identifier by the call-sites and persisted in the
@@ -58,10 +62,97 @@ CHANNEL_REGISTRY: Final[dict[str, dict[str, str]]] = {
 # the user has edited — backfill is gated on "table empty" rather than
 # "row with this name absent".
 DEFAULT_PERSONA_NAME: Final[str] = "Hermes"
-DEFAULT_PERSONA_PROMPT: Final[str] = (
-    "Du bist Hermes, ein persönlicher KI-Assistent für Martin. "
-    "Sei direkt, präzise und technisch."
+
+# Plan 36: persona prompt is three typed fragments. `ensure_backfill`
+# seeds these directly; the legacy `DEFAULT_PERSONA_PROMPT` constant was
+# removed in Task 5.
+DEFAULT_PERSONA_SOUL: Final[str] = (
+    "Du bist direkt, präzise und technisch. Keine Floskeln, keine "
+    "Höflichkeitswulst — der User ist Senior-Engineer."
 )
+DEFAULT_PERSONA_IDENTITY: Final[str] = (
+    "Du bist Hermes, ein persönlicher KI-Assistent."
+)
+DEFAULT_PERSONA_AGENTS: Final[str] = (
+    "Du befolgst Test-Driven-Development: erst die Tests, dann die "
+    "Implementierung. Du fragst nach, bevor du destruktive Aktionen "
+    "ausführst."
+)
+
+
+async def _migrate_prompt_to_fragments(engine: AsyncEngine) -> None:
+    """One-shot lifespan migration: bring `personas` up to the Plan-36
+    shape (soul/identity/agents) from the pre-Plan-36 single-`prompt`
+    shape.
+
+    Plan-36 changes the `personas` table from a single `prompt` text
+    column to three typed fragments (`soul`, `identity`, `agents`).
+    SQLAlchemy's `metadata.create_all` issues `CREATE TABLE IF NOT
+    EXISTS` and does NOT alter existing tables, so on a legacy DB the
+    three new columns are missing — this helper adds them, copies the
+    old `prompt` into `identity`, writes a baseline `persona_history`
+    row per migrated persona (so the audit trail is complete from
+    day-one), and finally drops the `prompt` column.
+
+    Idempotent: a single `PRAGMA table_info(personas)` check on the
+    `prompt` column drives the whole branch — present means "legacy
+    DB, run migration"; absent means "already on Plan-36 shape, no-op".
+    Safe to delete once every deployed box has booted on Plan-36 code
+    (tracked as a follow-up; see Plan 36 Risk Register).
+
+    The `WHERE identity = ''` guard on the UPDATE prevents clobbering
+    any `identity` content a user may have written between two boot
+    cycles in the theoretical "partial migration → crash → restart"
+    scenario.
+    """
+    async with engine.connect() as conn:
+        cols = (await conn.execute(text("PRAGMA table_info(personas)"))).all()
+        has_prompt = any(row.name == "prompt" for row in cols)
+    if not has_prompt:
+        return
+
+    async with engine.begin() as conn:
+        # ALTER TABLE ADD COLUMN is idempotent only through the PRAGMA
+        # guard above; SQLite has no "ADD COLUMN IF NOT EXISTS".
+        for col in ("soul", "identity", "agents"):
+            await conn.execute(
+                text(
+                    f"ALTER TABLE personas ADD COLUMN {col} "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+            )
+        await conn.execute(
+            text("UPDATE personas SET identity = prompt WHERE identity = ''")
+        )
+        # Baseline history row per migrated persona so the Verlauf-Tab
+        # shows the migrated-from state. author='migration' distinguishes
+        # this from user-edit ('user') and seed ('system') rows. The
+        # snapshot reflects the POST-migration values (i.e. soul='',
+        # identity=<legacy prompt>, agents='').
+        now = int(time.time())
+        rows = (
+            await conn.execute(
+                text("SELECT id, name, soul, identity, agents FROM personas")
+            )
+        ).all()
+        for row in rows:
+            snapshot = json.dumps(
+                {
+                    "name": row.name,
+                    "soul": row.soul,
+                    "identity": row.identity,
+                    "agents": row.agents,
+                }
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO persona_history "
+                    "(persona_id, author, snapshot_json, created_at) "
+                    "VALUES (:pid, 'migration', :snap, :ts)"
+                ),
+                {"pid": row.id, "snap": snapshot, "ts": now},
+            )
+        await conn.execute(text("ALTER TABLE personas DROP COLUMN prompt"))
 
 
 async def ensure_backfill(engine: AsyncEngine) -> None:
@@ -72,16 +163,40 @@ async def ensure_backfill(engine: AsyncEngine) -> None:
       user has any persona, don't reintroduce "Hermes" (they may have
       renamed/deleted it intentionally).
     - Channels: per-key check via `channels_repo.ensure_seeded`.
+
+    The seed write goes through `personas_repo.create` with
+    ``history_author="system"`` so the initial `persona_history`
+    snapshot is tagged as system-emitted (distinct from `'user'`
+    edits and `'migration'` rows produced by
+    `_migrate_prompt_to_fragments`).
     """
     existing_personas = await personas_repo.list_all(engine)
     if not existing_personas:
         await personas_repo.create(
             engine,
             name=DEFAULT_PERSONA_NAME,
-            prompt=DEFAULT_PERSONA_PROMPT,
+            soul=DEFAULT_PERSONA_SOUL,
+            identity=DEFAULT_PERSONA_IDENTITY,
+            agents=DEFAULT_PERSONA_AGENTS,
             is_default=True,
+            history_author="system",
         )
     await channels_repo.ensure_seeded(engine)
+
+
+def _persona_sections(persona: Persona) -> list[tuple[str, str]]:
+    """Hardcoded section order Soul → Identity → Agents.
+
+    The resolver filters out tuples whose body is empty after `.strip()`
+    so the section header isn't rendered for an empty fragment. Order is
+    deliberately not configurable — every persona renders sections in
+    the same sequence so prompt-engineering effects are stable.
+    """
+    return [
+        ("## Soul", persona.soul),
+        ("## Identity", persona.identity),
+        ("## Agents", persona.agents),
+    ]
 
 
 async def get_effective_system_prompt(
@@ -89,16 +204,38 @@ async def get_effective_system_prompt(
 ) -> str:
     """Compose the system prompt the agent should run with for `channel`.
 
-    Composition order (Plan 33 extends 29-A by inserting skills between
-    persona and capability_index):
+    Composition order (Plan 36 extends 33 by splitting persona into
+    three labelled fragments):
 
-    `persona.prompt + skills_block + capability_index + channel.prompt`
+    ```
+    ## Soul
+    <persona.soul>
+
+    ## Identity
+    <persona.identity>
+
+    ## Agents
+    <persona.agents>
+
+    <skills_block>
+
+    <capability_index>
+
+    <channel.prompt>
+    ```
+
+    Persona-section rules:
+    - Each section is rendered as ``"## Header\\n<body>"``.
+    - Sections with empty (post-`.strip()`) body are omitted entirely —
+      no leading header without body, no double separator.
+    - Order is fixed Soul → Identity → Agents regardless of how the
+      `Persona` dataclass was constructed.
 
     `skills_block` is the join of every active (enabled=1) skill body
-    attached to the resolved persona, in `ordering` order. Any of the
-    first three components may be empty/missing and is then skipped —
-    the separator stays consistent between the parts that actually
-    appear.
+    attached to the resolved persona, in `ordering` order. `index`,
+    `skills_block`, and the persona-section group may each be empty and
+    are then skipped; the ``"\\n\\n"`` separator stays consistent between
+    the parts that actually appear.
 
     Persona resolution:
     1. `channel_prompts.default_persona_id` if set and the row exists.
@@ -141,8 +278,16 @@ async def get_effective_system_prompt(
 
     index = capabilities.load_capability_index()
     parts: list[str] = []
-    if persona is not None and persona.prompt.strip():
-        parts.append(persona.prompt)
+
+    if persona is not None:
+        persona_parts: list[str] = []
+        for header, body in _persona_sections(persona):
+            body = body.strip()
+            if body:
+                persona_parts.append(f"{header}\n{body}")
+        if persona_parts:
+            parts.append("\n\n".join(persona_parts))
+
     if skills_block:
         parts.append(skills_block)
     if index:

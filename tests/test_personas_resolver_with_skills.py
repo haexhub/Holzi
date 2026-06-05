@@ -1,9 +1,15 @@
-"""Resolver-with-Skills tests (Plan 33).
+"""Resolver-with-Skills tests (Plan 33 → 36).
 
 Plan 29-A's resolver composed `persona + capability_index + channel`;
-Plan 33 inserts active skills between persona and capability_index so
-the composition becomes `persona + skills + capability_index + channel`
-(empty parts are skipped, the existing test suite stays green).
+Plan 33 inserted active skills between persona and capability_index so
+the composition becomes `persona + skills + capability_index + channel`.
+Plan 36 splits the persona block into labelled fragments
+(`## Soul` / `## Identity` / `## Agents`); skills + index + channel
+composition is unchanged.
+
+The tests seed personas/channels directly via the repo layer instead of
+``ensure_backfill`` — that helper still emits the pre-Plan-36 single-
+prompt shape until Plan-36 Task 5 reshapes it.
 """
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -11,21 +17,43 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from hermes import capabilities
 from hermes.personas import (
     CHANNEL_REGISTRY,
-    DEFAULT_PERSONA_PROMPT,
-    ensure_backfill,
     get_effective_system_prompt,
 )
+from hermes.repository import channels as channels_repo
 from hermes.repository import personas as personas_repo
 from hermes.repository import skills as skills_repo
 
 
+async def _seed_default_persona(
+    engine: AsyncEngine,
+    *,
+    soul: str = "",
+    identity: str = "default-identity",
+    agents: str = "",
+    name: str = "Hermes",
+):
+    """Helper: seed channels + a single default persona with the given
+    fragments. Mirrors the helper in ``test_personas_resolver.py`` so the
+    two suites stay consistent.
+    """
+    await channels_repo.ensure_seeded(engine)
+    return await personas_repo.create(
+        engine,
+        name=name,
+        soul=soul,
+        identity=identity,
+        agents=agents,
+        is_default=True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_no_skills_keeps_existing_composition(conn: AsyncEngine) -> None:
-    """Persona with zero skills produces the same prompt as before Plan 33."""
-    await ensure_backfill(conn)
+    """Persona with zero skills produces only persona-block + channel."""
+    await _seed_default_persona(conn, identity="I-body")
     prompt = await get_effective_system_prompt("web", conn)
     expected = (
-        f"{DEFAULT_PERSONA_PROMPT}\n\n"
+        "## Identity\nI-body\n\n"
         f"{CHANNEL_REGISTRY['web']['default_prompt']}"
     )
     assert prompt == expected
@@ -33,9 +61,7 @@ async def test_no_skills_keeps_existing_composition(conn: AsyncEngine) -> None:
 
 @pytest.mark.asyncio
 async def test_single_active_skill_is_injected(conn: AsyncEngine) -> None:
-    await ensure_backfill(conn)
-    default = await personas_repo.get_default(conn)
-    assert default is not None
+    default = await _seed_default_persona(conn, identity="I-body")
     s = await skills_repo.create(
         conn,
         slug="strict-german",
@@ -53,8 +79,8 @@ async def test_single_active_skill_is_injected(conn: AsyncEngine) -> None:
     prompt = await get_effective_system_prompt("web", conn)
 
     expected = (
-        f"{DEFAULT_PERSONA_PROMPT}\n\n"
-        f"Antworte ausschließlich auf Deutsch.\n\n"
+        "## Identity\nI-body\n\n"
+        "Antworte ausschließlich auf Deutsch.\n\n"
         f"{CHANNEL_REGISTRY['web']['default_prompt']}"
     )
     assert prompt == expected
@@ -62,9 +88,7 @@ async def test_single_active_skill_is_injected(conn: AsyncEngine) -> None:
 
 @pytest.mark.asyncio
 async def test_skills_respect_ordering(conn: AsyncEngine) -> None:
-    await ensure_backfill(conn)
-    default = await personas_repo.get_default(conn)
-    assert default is not None
+    default = await _seed_default_persona(conn, identity="I-body")
     a = await skills_repo.create(
         conn,
         slug="a",
@@ -99,9 +123,7 @@ async def test_skills_respect_ordering(conn: AsyncEngine) -> None:
 
 @pytest.mark.asyncio
 async def test_disabled_skill_is_skipped(conn: AsyncEngine) -> None:
-    await ensure_backfill(conn)
-    default = await personas_repo.get_default(conn)
-    assert default is not None
+    default = await _seed_default_persona(conn, identity="I-body")
     a = await skills_repo.create(
         conn,
         slug="a",
@@ -138,15 +160,16 @@ async def test_skills_attach_to_resolved_persona_not_default(
     conn: AsyncEngine,
 ) -> None:
     """When a channel pins a specific persona, that persona's skills win."""
-    await ensure_backfill(conn)
-    default = await personas_repo.get_default(conn)
-    assert default is not None
+    default = await _seed_default_persona(conn, identity="default-identity")
 
     custom = await personas_repo.create(
-        conn, name="Custom", prompt="CUSTOM_PERSONA", is_default=False
+        conn,
+        name="Custom",
+        soul="",
+        identity="CUSTOM_PERSONA",
+        agents="",
+        is_default=False,
     )
-
-    from hermes.repository import channels as channels_repo
 
     await channels_repo.update(conn, "task", default_persona_id=custom.id)
 
@@ -191,9 +214,7 @@ async def test_skills_compose_with_capability_index(
     monkeypatch.setattr(
         capabilities, "load_capability_index", lambda: "INDEX-MARKER"
     )
-    await ensure_backfill(conn)
-    default = await personas_repo.get_default(conn)
-    assert default is not None
+    default = await _seed_default_persona(conn, identity="I-body")
     s = await skills_repo.create(
         conn,
         slug="s",
@@ -211,9 +232,9 @@ async def test_skills_compose_with_capability_index(
     prompt = await get_effective_system_prompt("web", conn)
 
     expected = (
-        f"{DEFAULT_PERSONA_PROMPT}\n\n"
-        f"SKILL_BODY\n\n"
-        f"INDEX-MARKER\n\n"
+        "## Identity\nI-body\n\n"
+        "SKILL_BODY\n\n"
+        "INDEX-MARKER\n\n"
         f"{CHANNEL_REGISTRY['web']['default_prompt']}"
     )
     assert prompt == expected
@@ -222,9 +243,7 @@ async def test_skills_compose_with_capability_index(
 @pytest.mark.asyncio
 async def test_all_disabled_skills_collapse_to_empty(conn: AsyncEngine) -> None:
     """Persona with only disabled skills behaves like persona with no skills."""
-    await ensure_backfill(conn)
-    default = await personas_repo.get_default(conn)
-    assert default is not None
+    default = await _seed_default_persona(conn, identity="I-body")
     s = await skills_repo.create(
         conn,
         slug="s",
@@ -242,7 +261,7 @@ async def test_all_disabled_skills_collapse_to_empty(conn: AsyncEngine) -> None:
     prompt = await get_effective_system_prompt("web", conn)
 
     expected = (
-        f"{DEFAULT_PERSONA_PROMPT}\n\n"
+        "## Identity\nI-body\n\n"
         f"{CHANNEL_REGISTRY['web']['default_prompt']}"
     )
     assert prompt == expected

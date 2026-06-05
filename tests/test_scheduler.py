@@ -93,7 +93,9 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
     (b) custom channel prompt → composition uses the override."""
     from hermes.personas import (
         CHANNEL_REGISTRY,
-        DEFAULT_PERSONA_PROMPT,
+        DEFAULT_PERSONA_AGENTS,
+        DEFAULT_PERSONA_IDENTITY,
+        DEFAULT_PERSONA_SOUL,
         ensure_backfill,
     )
     from hermes.repository import channels as channels_repo
@@ -115,6 +117,14 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
         captured.append(system_prompt)
         return "ok"
 
+    # Plan 36 default seed has all three fragments populated, so the
+    # composed prompt opens with Soul → Identity → Agents sections.
+    default_persona_block = (
+        f"## Soul\n{DEFAULT_PERSONA_SOUL}\n\n"
+        f"## Identity\n{DEFAULT_PERSONA_IDENTITY}\n\n"
+        f"## Agents\n{DEFAULT_PERSONA_AGENTS}"
+    )
+
     # (a) default backfill composition.
     await agent_tasks.create(
         conn, title="t1", prompt="run me", due_at=1_000, ts=500
@@ -122,7 +132,7 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
     sched = _scheduler(conn, runner=capturing_runner)
     await sched.fire_due(now=2_000)
     assert captured[-1] == (
-        f"{DEFAULT_PERSONA_PROMPT}\n\n"
+        f"{default_persona_block}\n\n"
         f"{CHANNEL_REGISTRY['task']['default_prompt']}"
     )
 
@@ -133,7 +143,7 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
     )
     await sched.fire_due(now=3_000)
     assert captured[-1] == (
-        f"{DEFAULT_PERSONA_PROMPT}\n\nCustom task prompt."
+        f"{default_persona_block}\n\nCustom task prompt."
     )
 
 

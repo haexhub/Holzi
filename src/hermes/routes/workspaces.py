@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.config import settings
+from hermes.errors import ErrorCode
 from hermes.repository import workspaces as repo
 from hermes.sandbox import (
     ExecExit,
@@ -335,8 +336,17 @@ async def api_create_workspace(
     except ValueError as exc:
         message = str(exc)
         if message == "workspace already exists":
-            raise HTTPException(status_code=409, detail=message) from exc
-        raise HTTPException(status_code=400, detail=message) from exc
+            raise HTTPException(
+                status_code=409,
+                detail=ErrorCode.WORKSPACE_ALREADY_EXISTS.value,
+            ) from exc
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": ErrorCode.INVALID_REQUEST.value,
+                "params": {"message": message},
+            },
+        ) from exc
     mgr = _optional_sandbox_manager(request)
     return await _aggregate(
         workspace_id=created.id,
@@ -360,9 +370,17 @@ async def api_rename_workspace(
             db, workspace_id, display_name=body.display_name
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": ErrorCode.INVALID_REQUEST.value,
+                "params": {"message": str(exc)},
+            },
+        ) from exc
     if updated is None:
-        raise HTTPException(status_code=404, detail="workspace not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.WORKSPACE_NOT_FOUND.value
+        )
     mgr = _optional_sandbox_manager(request)
     return await _aggregate(
         workspace_id=updated.id,
@@ -383,7 +401,9 @@ async def api_archive_workspace(
     db: AsyncEngine = request.app.state.db
     archived = await repo.archive(db, workspace_id)
     if archived is None:
-        raise HTTPException(status_code=404, detail="workspace not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.WORKSPACE_NOT_FOUND.value
+        )
     return None
 
 
@@ -401,7 +421,9 @@ async def api_workspace_disk(
     db: AsyncEngine = request.app.state.db
     row = await repo.get(db, workspace_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="workspace not found")
+        raise HTTPException(
+            status_code=404, detail=ErrorCode.WORKSPACE_NOT_FOUND.value
+        )
     mgr = _optional_sandbox_manager(request)
     if mgr is None:
         return WorkspaceDiskResponse(used_mb=None, quota_mb=None)

@@ -71,7 +71,7 @@ async def test_logs_503_when_log_file_unset(
         response = await c.get("/api/logs", headers=AUTH)
     assert response.status_code == 503
     body = response.json()
-    assert "HERMES_LOG_FILE" in body["detail"]
+    assert body["detail"] == "LOGS_DISABLED"
 
 
 async def test_logs_returns_empty_when_file_missing(
@@ -134,6 +134,9 @@ async def test_logs_tail_capped_at_1000(
     )
     response = await client.get("/api/logs?tail=99999", headers=AUTH)
     assert response.status_code == 400
+    body = response.json()
+    assert body["detail"]["code"] == "REQUEST_TAIL_OUT_OF_RANGE"
+    assert body["detail"]["params"]["max"] == 1000
 
 
 async def test_logs_filters_by_min_level(
@@ -160,6 +163,9 @@ async def test_logs_rejects_unknown_min_level(
 ) -> None:
     response = await client.get("/api/logs?min_level=fatal", headers=AUTH)
     assert response.status_code == 400
+    body = response.json()
+    assert body["detail"]["code"] == "REQUEST_INVALID_MIN_LEVEL"
+    assert "warning" in body["detail"]["params"]["allowed"]
 
 
 # ---------------------------------------------------------------------------

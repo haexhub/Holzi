@@ -584,7 +584,10 @@ async def test_commit_propagates_git_error(
         headers=AUTH,
     )
     assert resp.status_code == 400
-    assert "nothing to commit" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert detail["code"] == "WORKSPACE_GIT_COMMAND_FAILED"
+    assert detail["params"]["command"] == "commit"
+    assert "nothing to commit" in detail["params"]["stderr"]
 
 
 # --- fetch / pull / push --------------------------------------------------

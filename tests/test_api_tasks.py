@@ -142,7 +142,9 @@ async def test_api_tasks_create_rejects_unknown_timezone(
         },
     )
     assert response.status_code == 400
-    assert "timezone" in response.json()["detail"].lower()
+    detail = response.json()["detail"]
+    assert detail["code"] == "TASK_UNKNOWN_TIMEZONE"
+    assert detail["params"]["tz"] == "Mars/Olympus_Mons"
 
 
 async def test_api_tasks_patch_rejects_unknown_timezone(

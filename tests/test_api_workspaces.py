@@ -187,6 +187,7 @@ async def test_create_workspace_409_on_duplicate(
         json={"id": "ws-dup", "display_name": "Second"},
     )
     assert second.status_code == 409
+    assert second.json()["detail"] == "WORKSPACE_ALREADY_EXISTS"
 
 
 async def test_rename_workspace_updates_display_name(
@@ -217,6 +218,7 @@ async def test_rename_unknown_404(client: httpx.AsyncClient) -> None:
         json={"display_name": "Whatever"},
     )
     assert patch.status_code == 404
+    assert patch.json()["detail"] == "WORKSPACE_NOT_FOUND"
 
 
 async def test_archive_unknown_404(client: httpx.AsyncClient) -> None:
@@ -224,6 +226,7 @@ async def test_archive_unknown_404(client: httpx.AsyncClient) -> None:
         "/api/workspaces/no-such-ws", headers=AUTH
     )
     assert response.status_code == 404
+    assert response.json()["detail"] == "WORKSPACE_NOT_FOUND"
 
 
 async def test_disk_endpoint_404_for_unknown(
@@ -233,6 +236,7 @@ async def test_disk_endpoint_404_for_unknown(
         "/api/workspaces/no-such-ws/disk", headers=AUTH
     )
     assert response.status_code == 404
+    assert response.json()["detail"] == "WORKSPACE_NOT_FOUND"
 
 
 # --- env backfill ----------------------------------------------------------
