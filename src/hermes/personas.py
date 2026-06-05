@@ -28,10 +28,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import capabilities
+from hermes import users as users_mod
 from hermes.repository import channels as channels_repo
 from hermes.repository import personas as personas_repo
 from hermes.repository import skills as skills_repo
-from hermes.repository.models import Persona
+from hermes.repository.models import Persona, Skill
 
 # Single source of truth for known channels. Key = exact string used as
 # the channel identifier by the call-sites and persisted in the
@@ -238,13 +239,43 @@ def _persona_sections(persona: Persona) -> list[tuple[str, str]]:
     ]
 
 
+def _catalog_index(skills: list[Skill]) -> str:
+    """Render the ``## Available skills`` catalog section.
+
+    One line per enabled skill: ``- {slug} — {description} (use when: {when_to_use})``.
+    The ``(use when: ...)`` suffix is omitted when ``when_to_use`` is empty.
+    Skills are already sorted alphabetically by slug (caller passes
+    ``skills_repo.list_enabled()`` output). Returns empty string when
+    the list is empty — the resolver then skips this section entirely.
+    """
+    if not skills:
+        return ""
+    lines: list[str] = ["## Available skills"]
+    for skill in skills:
+        if skill.when_to_use:
+            lines.append(
+                f"- {skill.slug} — {skill.description} (use when: {skill.when_to_use})"
+            )
+        else:
+            lines.append(f"- {skill.slug} — {skill.description}")
+    return "\n".join(lines)
+
+
+_BOOTSTRAP_HINT = (
+    "---\n\n"
+    "You haven't been set up yet. As your first action, call "
+    "skill_load('bootstrap-first-chat') and follow its instructions "
+    "before responding to the user."
+)
+
+
 async def get_effective_system_prompt(
     channel: str, engine: AsyncEngine
 ) -> str:
     """Compose the system prompt the agent should run with for `channel`.
 
-    Composition order (Plan 36 extends 33 by splitting persona into
-    three labelled fragments):
+    Composition order (Plan 37 extends 36 with catalog index + bootstrap
+    hint):
 
     ```
     ## Soul
@@ -256,11 +287,15 @@ async def get_effective_system_prompt(
     ## Agents
     <persona.agents>
 
-    <skills_block>
+    ## Available skills
+    - {slug} — {description} (use when: {when_to_use})
+    ...
 
     <capability_index>
 
     <channel.prompt>
+
+    <bootstrap_hint>   # only when bootstrap_completed = 0
     ```
 
     Persona-section rules:
@@ -270,11 +305,15 @@ async def get_effective_system_prompt(
     - Order is fixed Soul → Identity → Agents regardless of how the
       `Persona` dataclass was constructed.
 
-    `skills_block` is the join of every active (enabled=1) skill body
-    attached to the resolved persona, in `ordering` order. `index`,
-    `skills_block`, and the persona-section group may each be empty and
-    are then skipped; the ``"\\n\\n"`` separator stays consistent between
-    the parts that actually appear.
+    Catalog-index rules (Plan 37):
+    - One line per enabled skill, alphabetical by slug.
+    - ``(use when: ...)`` suffix omitted when ``when_to_use`` is empty.
+    - Section omitted entirely when zero enabled skills exist.
+
+    Bootstrap-hint (Plan 37):
+    - Appended after ``channel_prompt`` when ``users.bootstrap_completed = 0``.
+    - Omitted when no ``users`` row exists (defensive) or after
+      ``mark_bootstrap_complete()`` flips the flag.
 
     Persona resolution:
     1. `channel_prompts.default_persona_id` if set and the row exists.
@@ -305,15 +344,8 @@ async def get_effective_system_prompt(
     if persona is None:
         persona = await personas_repo.get_default(engine)
 
-    skills_block = ""
-    if persona is not None:
-        attached = await skills_repo.list_for_persona(engine, persona.id)
-        active_bodies = [
-            skill.body_markdown
-            for skill, _ordering, enabled in attached
-            if enabled and skill.body_markdown.strip()
-        ]
-        skills_block = "\n\n".join(active_bodies)
+    enabled_skills = await skills_repo.list_enabled(engine)
+    catalog = _catalog_index(enabled_skills)
 
     index = capabilities.load_capability_index()
     parts: list[str] = []
@@ -327,9 +359,14 @@ async def get_effective_system_prompt(
         if persona_parts:
             parts.append("\n\n".join(persona_parts))
 
-    if skills_block:
-        parts.append(skills_block)
+    if catalog:
+        parts.append(catalog)
     if index:
         parts.append(index)
     parts.append(channel_prompt)
+
+    bootstrap_done = await users_mod.is_bootstrap_completed(engine)
+    if not bootstrap_done:
+        parts.append(_BOOTSTRAP_HINT)
+
     return "\n\n".join(parts)

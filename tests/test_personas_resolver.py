@@ -10,6 +10,7 @@ layer instead of going through ``ensure_backfill``, which still seeds
 the old single-prompt shape until Plan-36 Task 5 reshapes it.
 """
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import capabilities
@@ -29,12 +30,15 @@ async def _seed_default_persona(
     identity: str = "",
     agents: str = "",
     name: str = "Hermes",
+    bootstrap_completed: int = 1,
 ):
     """Helper: seed channels + a single default persona with the given
-    fragments. Returns the created persona row.
+    fragments. Also seeds the users row so the bootstrap hint is
+    controlled. Returns the created persona row.
     """
+    import time
     await channels_repo.ensure_seeded(engine)
-    return await personas_repo.create(
+    persona = await personas_repo.create(
         engine,
         name=name,
         soul=soul,
@@ -42,6 +46,15 @@ async def _seed_default_persona(
         agents=agents,
         is_default=True,
     )
+    async with engine.begin() as txn:
+        await txn.execute(
+            text(
+                "INSERT OR IGNORE INTO users(id, bootstrap_completed, created_at) "
+                "VALUES (1, :bc, :ts)"
+            ),
+            {"bc": bootstrap_completed, "ts": int(time.time())},
+        )
+    return persona
 
 
 @pytest.mark.asyncio
@@ -108,15 +121,14 @@ async def test_composition_skips_whitespace_only_section(
 async def test_composition_section_order_stable(conn: AsyncEngine) -> None:
     """Even if the dataclass is constructed with kwargs in a different
     order, the resolver always renders Soul → Identity → Agents."""
-    await channels_repo.ensure_seeded(conn)
-    # Construct with kwargs in a non-canonical order to make the point.
-    await personas_repo.create(
+    # Use the helper so the users row is seeded (bootstrap_completed=1)
+    # and the bootstrap hint doesn't pollute the exact-match assertion.
+    await _seed_default_persona(
         conn,
         name="Mixed",
         agents="A-body",
         identity="I-body",
         soul="S-body",
-        is_default=True,
     )
     await channels_repo.update(conn, "web", prompt="C")
 
@@ -132,47 +144,42 @@ async def test_composition_section_order_stable(conn: AsyncEngine) -> None:
 
 
 @pytest.mark.asyncio
-async def test_composition_skills_between_persona_and_channel(
+async def test_composition_catalog_between_persona_and_channel(
     conn: AsyncEngine,
 ) -> None:
-    """Skills block sits between the persona-section group and the
-    channel prompt; capability_index goes after skills."""
-    persona = await _seed_default_persona(
-        conn, identity="I-body"
-    )
+    """Catalog index sits between the persona-section group and the
+    channel prompt; capability_index goes after the catalog.
+
+    Plan 37: skills are shown as a catalog index (slug + description),
+    not as inlined bodies. Two enabled skills produce two catalog lines.
+    """
+    await _seed_default_persona(conn, identity="I-body")
     await channels_repo.update(conn, "web", prompt="C")
 
-    skill_one = await skills_repo.create(
+    await skills_repo.create(
         conn,
         slug="alpha",
         name="Alpha",
-        description="d",
-        when_to_use=None,
+        description="alpha-desc",
+        when_to_use="",
         body_markdown="ALPHA-BODY",
     )
-    skill_two = await skills_repo.create(
+    await skills_repo.create(
         conn,
         slug="beta",
         name="Beta",
-        description="d",
-        when_to_use=None,
+        description="beta-desc",
+        when_to_use="",
         body_markdown="BETA-BODY",
-    )
-    await skills_repo.set_persona_skills(
-        conn,
-        persona.id,
-        [
-            {"skill_id": skill_one.id, "ordering": 0, "enabled": True},
-            {"skill_id": skill_two.id, "ordering": 1, "enabled": True},
-        ],
     )
 
     prompt = await get_effective_system_prompt("web", conn)
 
     expected = (
         "## Identity\nI-body\n\n"
-        "ALPHA-BODY\n\n"
-        "BETA-BODY\n\n"
+        "## Available skills\n"
+        "- alpha — alpha-desc\n"
+        "- beta — beta-desc\n\n"
         "C"
     )
     assert prompt == expected
@@ -198,7 +205,17 @@ async def test_composition_falls_back_to_default_persona_when_channel_persona_un
 ) -> None:
     """When the channel row's `default_persona_id` is NULL, the resolver
     falls back to the globally-default persona (`is_default = 1`)."""
+    import time
     await channels_repo.ensure_seeded(conn)
+    # Seed users so bootstrap hint is suppressed.
+    async with conn.begin() as txn:
+        await txn.execute(
+            text(
+                "INSERT OR IGNORE INTO users(id, bootstrap_completed, created_at) "
+                "VALUES (1, 1, :ts)"
+            ),
+            {"ts": int(time.time())},
+        )
     # Non-default persona that should NOT win.
     await personas_repo.create(
         conn,
@@ -229,7 +246,17 @@ async def test_channel_specific_persona_wins_over_global_default(
     conn: AsyncEngine,
 ) -> None:
     """`channel_prompts.default_persona_id` overrides the global default."""
+    import time
     await channels_repo.ensure_seeded(conn)
+    # Seed users so bootstrap hint is suppressed.
+    async with conn.begin() as txn:
+        await txn.execute(
+            text(
+                "INSERT OR IGNORE INTO users(id, bootstrap_completed, created_at) "
+                "VALUES (1, 1, :ts)"
+            ),
+            {"ts": int(time.time())},
+        )
     await personas_repo.create(
         conn,
         name="Global",

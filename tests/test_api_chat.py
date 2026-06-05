@@ -191,9 +191,13 @@ async def test_api_chat_passes_composed_persona_channel_system_prompt(
         DEFAULT_PERSONA_SOUL,
     )
 
+    from hermes.personas import _BOOTSTRAP_HINT
+
     # (a) Default composition. Backfill seeds all three fragments
     # (Plan 36), so the resolver emits Soul → Identity → Agents
-    # sections before the channel prompt.
+    # sections before the channel prompt. Plan 37: bootstrap hint is
+    # appended because the fresh lifespan seeds users with
+    # bootstrap_completed=0.
     seen = _install_upstream_responses([_assistant_oneshot("a")])
     async with client.stream(
         "POST", "/api/chat", headers=AUTH, json={"message": "first"}
@@ -206,7 +210,8 @@ async def test_api_chat_passes_composed_persona_channel_system_prompt(
         f"## Soul\n{DEFAULT_PERSONA_SOUL}\n\n"
         f"## Identity\n{DEFAULT_PERSONA_IDENTITY}\n\n"
         f"## Agents\n{DEFAULT_PERSONA_AGENTS}\n\n"
-        f"{CHANNEL_REGISTRY['web']['default_prompt']}"
+        f"{CHANNEL_REGISTRY['web']['default_prompt']}\n\n"
+        f"{_BOOTSTRAP_HINT}"
     )
 
     # (b) Customised: new persona (identity-only) + custom channel prompt.
@@ -238,7 +243,8 @@ async def test_api_chat_passes_composed_persona_channel_system_prompt(
     assert sys_b["role"] == "system"
     assert sys_b["content"] == (
         "## Identity\nBe merciless about types.\n\n"
-        "Custom web prompt."
+        f"Custom web prompt.\n\n"
+        f"{_BOOTSTRAP_HINT}"
     )
 
 

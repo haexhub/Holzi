@@ -99,8 +99,22 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
         ensure_backfill,
     )
     from hermes.repository import channels as channels_repo
+    from hermes.users import ensure_users_seeded
+    from sqlalchemy import text
+    import time
 
     await ensure_backfill(conn)
+    # Seed users with bootstrap_completed=1 so the bootstrap hint is
+    # suppressed — this test pins the exact system-prompt composition
+    # and doesn't care about onboarding.
+    async with conn.begin() as txn:
+        await txn.execute(
+            text(
+                "INSERT OR IGNORE INTO users(id, bootstrap_completed, created_at) "
+                "VALUES (1, 1, :ts)"
+            ),
+            {"ts": int(time.time())},
+        )
 
     captured: list[str] = []
 
