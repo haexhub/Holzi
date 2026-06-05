@@ -374,6 +374,12 @@ personas = Table(
     Column("is_default", Integer, nullable=False, server_default="0"),
     Column("created_at", Integer, nullable=False),
     Column("updated_at", Integer, nullable=False),
+    Column(
+        "llm_credential_id",
+        Integer,
+        ForeignKey("llm_credentials.id", ondelete="SET NULL"),
+    ),
+    Column("model", Text),
 )
 
 

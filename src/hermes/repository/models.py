@@ -162,6 +162,8 @@ class Persona:
     is_default: bool
     created_at: int
     updated_at: int
+    llm_credential_id: int | None = None
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

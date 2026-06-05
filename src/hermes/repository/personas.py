@@ -23,6 +23,8 @@ from hermes.repository import persona_history as history_repo
 from hermes.repository.models import Persona
 from hermes.schema import personas as t_personas
 
+_UNSET = object()
+
 
 def _row_to_persona(row) -> Persona:
     return Persona(
@@ -34,6 +36,8 @@ def _row_to_persona(row) -> Persona:
         is_default=bool(row.is_default),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        llm_credential_id=row.llm_credential_id,
+        model=row.model,
     )
 
 
@@ -84,6 +88,8 @@ async def create(
     identity: str,
     agents: str,
     is_default: bool = False,
+    llm_credential_id: int | None = None,
+    model: str | None = None,
     ts: int | None = None,
     history_author: str = "user",
 ) -> Persona:
@@ -107,6 +113,8 @@ async def create(
                 identity=identity,
                 agents=agents,
                 is_default=1 if is_default else 0,
+                llm_credential_id=llm_credential_id,
+                model=model,
                 created_at=now,
                 updated_at=now,
             )
@@ -119,6 +127,8 @@ async def create(
                 t_personas.c.is_default,
                 t_personas.c.created_at,
                 t_personas.c.updated_at,
+                t_personas.c.llm_credential_id,
+                t_personas.c.model,
             )
         )
         row = result.first()
@@ -142,6 +152,8 @@ async def update(
     identity: str | None = None,
     agents: str | None = None,
     is_default: bool | None = None,
+    llm_credential_id: int | None | object = _UNSET,
+    model: str | None | object = _UNSET,
     ts: int | None = None,
     history_author: str = "user",
 ) -> Persona | None:
@@ -166,18 +178,23 @@ async def update(
     )
 
     now = ts if ts is not None else int(time.time())
+    updates: dict = {
+        t_personas.c.name: new_name,
+        t_personas.c.soul: new_soul,
+        t_personas.c.identity: new_identity,
+        t_personas.c.agents: new_agents,
+        t_personas.c.is_default: 1 if new_is_default else 0,
+        t_personas.c.updated_at: now,
+    }
+    if llm_credential_id is not _UNSET:
+        updates[t_personas.c.llm_credential_id] = llm_credential_id
+    if model is not _UNSET:
+        updates[t_personas.c.model] = model
     async with engine.begin() as conn:
         await conn.execute(
             t_personas.update()
             .where(t_personas.c.id == persona_id)
-            .values(
-                name=new_name,
-                soul=new_soul,
-                identity=new_identity,
-                agents=new_agents,
-                is_default=1 if new_is_default else 0,
-                updated_at=now,
-            )
+            .values(updates)
         )
         # Read the post-update row on the same connection so the
         # snapshot reflects exactly what the UPDATE produced (including
