@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import json
+import re
 import uuid
 import zoneinfo
 from collections.abc import AsyncIterator
@@ -107,24 +108,55 @@ class ChatRequest(BaseModel):
     attachment_ids: list[int] = Field(default_factory=list)
 
 
-def _classify_chat_error(exc: BaseException) -> tuple[str, int, str]:
-    """Map an exception raised inside the agent loop to an error code and the
-    HTTP status it would correspond to in a non-streaming world.
+_API_KEY_RE = re.compile(
+    r"\b("
+    r"sk-ant-[A-Za-z0-9_\-]{20,}"   # Anthropic
+    r"|sk-[A-Za-z0-9]{20,}"          # OpenAI
+    r"|gsk_[A-Za-z0-9]{20,}"         # Google AI Studio
+    r"|AIza[A-Za-z0-9_\-]{35,}"      # Google
+    r")\b"
+    r"|Bearer [A-Za-z0-9_\-\.]{20,}" # Generic bearer
+)
 
-    The /api/chat response is already 200 by the time we see the error
-    (StreamingResponse has flushed headers), so the status code is reported
-    to the client *inside* the SSE error event — the frontend uses it to
-    distinguish "upstream provider is down" (502) from "upstream too slow"
-    (504) from "our agent blew up" (500). Same triage logic mirrors what
-    `routes/llm.py` does for `GET /models`.
+
+def _sanitize_upstream_message(body: bytes, status: int) -> str:
+    """Extract a safe-to-display message from a provider error response body.
+
+    Parses JSON, extracts .error.message or top-level .message, redacts
+    known API key patterns, and truncates to 300 chars. Returns
+    "HTTP <status>" on parse failure or empty body.
+    """
+    if not body:
+        return f"HTTP {status}"
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return f"HTTP {status}"
+    msg = ""
+    if isinstance(data.get("error"), dict):
+        msg = str(data["error"].get("message", ""))
+    if not msg:
+        msg = str(data.get("message", ""))
+    if not msg:
+        return f"HTTP {status}"
+    msg = _API_KEY_RE.sub("[REDACTED]", msg)
+    return msg[:300]
+
+
+def _classify_chat_error(exc: BaseException) -> tuple[str, int, str]:
+    """Map an agent-loop exception to (sse_code, status_code, message).
+
+    status_code is the HTTP status the upstream actually returned (or the
+    equivalent synthetic one for network errors). The frontend uses it to
+    distinguish 429 (rate-limit) from 5xx (provider error) from 50x (our side).
     """
     if isinstance(exc, httpx.HTTPStatusError):
         upstream_status = exc.response.status_code
-        return (
-            "upstream_http_error",
-            502,
-            f"upstream returned {upstream_status}",
-        )
+        body = exc.response.content  # populated for non-streaming raises
+        message = _sanitize_upstream_message(body, upstream_status)
+        if upstream_status == 429:
+            return ("upstream_rate_limited", 429, message)
+        return ("upstream_http_error", upstream_status, message)
     if isinstance(exc, httpx.TimeoutException):
         return ("upstream_timeout", 504, "upstream timed out")
     if isinstance(exc, httpx.RequestError):
