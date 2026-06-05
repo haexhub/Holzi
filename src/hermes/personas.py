@@ -37,6 +37,7 @@ from hermes.repository import personas as personas_repo
 from hermes.repository import skills as skills_repo
 from hermes.repository.models import LlmCredential, Persona, Skill
 
+
 @dataclass
 class PersonaContext:
     """Resolved agent context for a single chat turn.
@@ -527,6 +528,7 @@ async def resolve_persona_context(
     3. model: persona.model → credential.model → settings.model.
     """
     from fastapi import HTTPException
+
     from hermes.config import settings
 
     system_prompt = await get_effective_system_prompt(channel, engine)
