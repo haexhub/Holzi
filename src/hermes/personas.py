@@ -155,6 +155,45 @@ async def _migrate_prompt_to_fragments(engine: AsyncEngine) -> None:
         await conn.execute(text("ALTER TABLE personas DROP COLUMN prompt"))
 
 
+async def _drop_persona_skills_table(engine: AsyncEngine) -> None:
+    """One-shot: drop the Plan-33 `persona_skills` table if it still
+    exists. Idempotent.
+    """
+    async with engine.connect() as conn:
+        tables = (
+            await conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name='persona_skills'"
+                )
+            )
+        ).all()
+    if not tables:
+        return
+    async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE persona_skills"))
+
+
+async def _migrate_skills_add_enabled(engine: AsyncEngine) -> None:
+    """One-shot: add `skills.enabled` if missing. Idempotent —
+    PRAGMA-gated. Existing rows default to 1 (enabled).
+    """
+    async with engine.connect() as conn:
+        cols = (
+            await conn.execute(text("PRAGMA table_info(skills)"))
+        ).all()
+        has_enabled = any(row.name == "enabled" for row in cols)
+    if has_enabled:
+        return
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "ALTER TABLE skills ADD COLUMN enabled INTEGER "
+                "NOT NULL DEFAULT 1"
+            )
+        )
+
+
 async def ensure_backfill(engine: AsyncEngine) -> None:
     """Seed the default persona + every channel row that's missing.
 

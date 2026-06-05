@@ -198,19 +198,22 @@ class ChannelPromptRow:
 
 @dataclass(frozen=True, slots=True)
 class Skill:
-    """A row from `skills` (Plan 33).
+    """A row from `skills` (Plan 33 → Plan 37).
 
     The `description` / `when_to_use` fields are the Anthropic-skill
     frontmatter promoted to columns; `body_markdown` is the prompt
-    content the resolver mixes into the effective system prompt.
+    content loaded via `skill_load`. `enabled=False` means the skill
+    is invisible to the agent (not in the catalog index, not loadable
+    via `skill_load`) but still editable via the UI.
     """
 
     id: int
     slug: str
     name: str
     description: str
-    when_to_use: str | None
+    when_to_use: str
     body_markdown: str
+    enabled: bool
     created_at: int
     updated_at: int
 
