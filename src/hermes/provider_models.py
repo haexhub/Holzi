@@ -30,6 +30,11 @@ class ProviderModelsError(RuntimeError):
 class ModelChoice:
     id: str
     label: str
+    # Provider-reported parameter list (OpenRouter only — surfaces
+    # capabilities like "reasoning", "tools"). None when the provider
+    # doesn't expose this metadata; downstream falls back to curated
+    # rules in `hermes.thinking`.
+    supported_parameters: tuple[str, ...] | None = None
 
 
 # Curated fallback for `oauth_claude` credentials: Anthropic's /v1/models
@@ -134,9 +139,14 @@ async def _list_openai_like(
     http: httpx.AsyncClient,
     encryptor: Encryptor,
     default_base: str,
+    capture_supported_parameters: bool = False,
 ) -> tuple[ModelChoice, ...]:
     """OpenAI + OpenRouter share the same wire format (`{data:[{id,name?}]}`)
-    and the same `Authorization: Bearer …` header."""
+    and the same `Authorization: Bearer …` header.
+
+    OpenRouter additionally returns `supported_parameters: [...]` per
+    model — when `capture_supported_parameters` is True it's preserved
+    on `ModelChoice` so the capability layer can read it later."""
     key = _decrypt_api_key(cred, encryptor)
     base = cred.base_url or default_base
     data = await _fetch_json(
@@ -151,7 +161,18 @@ async def _list_openai_like(
         if not mid:
             continue
         name = m.get("name")
-        out.append(ModelChoice(id=mid, label=f"{name} ({mid})" if name else mid))
+        sp: tuple[str, ...] | None = None
+        if capture_supported_parameters:
+            params = m.get("supported_parameters")
+            if isinstance(params, list):
+                sp = tuple(p for p in params if isinstance(p, str))
+        out.append(
+            ModelChoice(
+                id=mid,
+                label=f"{name} ({mid})" if name else mid,
+                supported_parameters=sp,
+            )
+        )
     out.sort(key=lambda m: m.id)
     return tuple(out)
 
@@ -250,6 +271,7 @@ async def list_provider_models(
             http=http,
             encryptor=encryptor,
             default_base=_DEFAULT_BASE_URLS["openrouter"],
+            capture_supported_parameters=True,
         )
     elif cred.provider == "anthropic":
         models = await _list_anthropic(cred, http=http, encryptor=encryptor)

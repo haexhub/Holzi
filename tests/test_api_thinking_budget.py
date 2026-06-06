@@ -79,3 +79,103 @@ async def test_no_thinking_budget_omits_thinking_field(client, _mock_upstream):
     await client.post("/api/chat", headers=AUTH, json={"message": "hello"})
     assert len(_mock_upstream) > 0
     assert "thinking" not in _mock_upstream[-1]
+
+
+def _patch_persona_to(monkeypatch, *, provider: str):
+    """Swap the autouse persona-context fixture for one that reports the
+    requested provider. Routes `run_agent` via that credential so
+    `build_thinking_payload` sees the right wire format."""
+    from hermes.personas import PersonaContext
+    from hermes.repository.models import LlmCredential
+    from hermes.routes import api as api_mod
+
+    cred = LlmCredential(
+        id=0,
+        provider=provider,
+        mode="api_key",
+        display_name=f"test-{provider}",
+        base_url=None,
+        model=None,
+        is_active=True,
+        api_key_iv=b"",
+        api_key_tag=b"",
+        api_key_data=b"",
+        oauth_status=None,
+        oauth_authorized_at=None,
+        oauth_iv=None,
+        oauth_tag=None,
+        oauth_data=None,
+        created_at=0,
+        updated_at=0,
+    )
+
+    async def _resolve(channel, engine, *, model_override=None, persona_id_override=None):
+        return PersonaContext(
+            system_prompt="sys",
+            credential=cred,
+            model=model_override or "o1-mini",
+        )
+
+    monkeypatch.setattr(api_mod, "resolve_persona_context", _resolve)
+
+
+async def test_thinking_budget_openai_uses_reasoning_effort(
+    client, _mock_upstream, monkeypatch
+):
+    """OpenAI credentials must send reasoning_effort, never the Anthropic
+    `thinking` block."""
+    _patch_persona_to(monkeypatch, provider="openai")
+    await client.post(
+        "/api/chat",
+        headers=AUTH,
+        json={
+            "message": "hello",
+            "thinking_budget": "medium",
+            "model_override": "o1-mini",
+        },
+    )
+    assert len(_mock_upstream) > 0
+    sent = _mock_upstream[-1]
+    assert sent.get("reasoning_effort") == "medium"
+    assert "thinking" not in sent
+
+
+async def test_thinking_budget_openai_unsupported_model_silently_dropped(
+    client, _mock_upstream, monkeypatch
+):
+    """A budget aimed at gpt-4o (no reasoning support) must NOT inject
+    reasoning_effort — the provider would 400 on it."""
+    _patch_persona_to(monkeypatch, provider="openai")
+    await client.post(
+        "/api/chat",
+        headers=AUTH,
+        json={
+            "message": "hello",
+            "thinking_budget": "high",
+            "model_override": "gpt-4o",
+        },
+    )
+    assert len(_mock_upstream) > 0
+    sent = _mock_upstream[-1]
+    assert "reasoning_effort" not in sent
+    assert "thinking" not in sent
+
+
+async def test_thinking_budget_anthropic_includes_max_tokens(
+    client, _mock_upstream
+):
+    """The Anthropic path must add max_tokens > budget_tokens; otherwise
+    the upstream rejects the request."""
+    resp = await client.post(
+        "/api/chat",
+        headers=AUTH,
+        json={
+            "message": "hello",
+            "thinking_budget": "high",
+            "model_override": "claude-opus-4-7",
+        },
+    )
+    assert resp.status_code == 200
+    sent = _mock_upstream[-1]
+    assert sent["thinking"]["budget_tokens"] == 16000
+    assert sent["max_tokens"] > 16000

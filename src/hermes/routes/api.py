@@ -44,6 +44,7 @@ from hermes.events import (
 )
 from hermes.logging import logger
 from hermes.personas import resolve_chat_context_meta, resolve_persona_context
+from hermes.provider_models import ProviderModelsError, list_provider_models
 from hermes.repository import (
     agent_tasks,
     attachments,
@@ -63,6 +64,7 @@ from hermes.repository import (
 )
 from hermes.run_tracker import track_run
 from hermes.sandbox import WorkspaceCrash
+from hermes.thinking import resolve_thinking_support
 from hermes.tool_catalog import build_tool_catalog
 from hermes.upstream import build_client_for_credential
 
@@ -130,10 +132,17 @@ class ChatContextResponse(BaseModel):
     model: str
 
 
+class ThinkingSupportDTO(BaseModel):
+    supported: bool
+    levels: list[str]
+
+
 class ModelEntry(BaseModel):
     id: str
     credential_id: int
     credential_name: str
+    provider: str
+    thinking: ThinkingSupportDTO
 
 
 class ModelsResponse(BaseModel):
@@ -504,6 +513,7 @@ async def _stream_web_agent_run(
                         cancel_event=cancel_event,
                         metrics=metrics,
                         thinking_budget=thinking_budget,
+                        provider=persona_ctx.credential.provider,
                     )
             finally:
                 await queue.put(None)
@@ -634,50 +644,63 @@ async def api_chat_context(request: Request) -> ChatContextResponse:
 async def api_models(request: Request) -> ModelsResponse:
     """Return all models available across all configured credentials.
 
-    Calls each credential's GET /v1/models endpoint. Falls back to the
-    credential's configured model field when the provider doesn't support
-    model listing. Models are returned in credential order.
+    Delegates the actual listing to `provider_models.list_provider_models`
+    so we share its 10 min per-credential cache and pick up OpenRouter's
+    `supported_parameters` metadata for capability resolution. Falls back
+    to `cred.model` when the lister raises (network / non-listing
+    provider). Each entry carries a `thinking` block telling the composer
+    which budgets to offer.
     """
     db: AsyncEngine = request.app.state.db
     credentials = await llm_credentials_repo.list_all(db)
+    encryptor = request.app.state.encryptor
+    http: httpx.AsyncClient = request.app.state.external_http
 
     entries: list[ModelEntry] = []
     for cred in credentials:
-        fetched: list[str] = []
         try:
-            async with build_client_for_credential(
-                cred,
-                encryptor=request.app.state.encryptor,
-                fallback_proxy_url=settings.llm_url,
-            ) as upstream:
-                resp = await upstream.get("/v1/models", timeout=5.0)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    items = data.get("data") or []
-                    fetched = [
-                        item["id"] for item in items
-                        if isinstance(item, dict) and "id" in item
-                    ]
-        except Exception as exc:
+            choices = await list_provider_models(
+                cred, http=http, encryptor=encryptor
+            )
+        except ProviderModelsError as exc:
             logger.debug(
                 "model listing failed for credential %s; falling back to "
                 "configured model: %s",
                 cred.id,
                 exc,
             )
+            choices = ()
 
-        if fetched:
-            for model_id in fetched:
+        if choices:
+            for choice in choices:
+                support = resolve_thinking_support(
+                    cred.provider,
+                    choice.id,
+                    list(choice.supported_parameters)
+                    if choice.supported_parameters is not None
+                    else None,
+                )
                 entries.append(ModelEntry(
-                    id=model_id,
+                    id=choice.id,
                     credential_id=cred.id,
                     credential_name=cred.display_name,
+                    provider=cred.provider,
+                    thinking=ThinkingSupportDTO(
+                        supported=support.supported,
+                        levels=list(support.levels),
+                    ),
                 ))
         elif cred.model:
+            support = resolve_thinking_support(cred.provider, cred.model, None)
             entries.append(ModelEntry(
                 id=cred.model,
                 credential_id=cred.id,
                 credential_name=cred.display_name,
+                provider=cred.provider,
+                thinking=ThinkingSupportDTO(
+                    supported=support.supported,
+                    levels=list(support.levels),
+                ),
             ))
 
     return ModelsResponse(models=entries)
