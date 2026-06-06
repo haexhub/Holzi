@@ -35,6 +35,15 @@ async def test_models_returns_list(client):
     for m in data["models"]:
         assert "id" in m
         assert "credential_id" in m
+        assert isinstance(m.get("provider"), str)
+        thinking = m.get("thinking")
+        assert isinstance(thinking, dict)
+        assert isinstance(thinking["supported"], bool)
+        assert isinstance(thinking["levels"], list)
+        if thinking["supported"]:
+            assert thinking["levels"] == ["low", "medium", "high"]
+        else:
+            assert thinking["levels"] == []
 
 
 async def test_models_fallback_when_provider_unreachable(client, monkeypatch):

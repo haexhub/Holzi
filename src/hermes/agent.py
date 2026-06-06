@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -11,6 +11,7 @@ from hermes import attachments as attachments_mod
 from hermes.events import ApprovalDecisionLiteral
 from hermes.repository import attachments, messages
 from hermes.repository.models import Attachment
+from hermes.thinking import ThinkingBudget, build_thinking_payload
 
 CHAT_PATH = "/v1/chat/completions"
 
@@ -100,9 +101,6 @@ def _raise_if_cancelled(cancel_event: asyncio.Event | None) -> None:
         raise ChatRunCancelled()
 
 
-_THINKING_TOKENS: dict[str, int] = {"low": 1024, "medium": 5000, "high": 16000}
-
-
 async def run_agent(
     *,
     upstream: httpx.AsyncClient,
@@ -119,7 +117,8 @@ async def run_agent(
     on_approval: OnApproval | None = None,
     cancel_event: asyncio.Event | None = None,
     metrics: dict[str, Any] | None = None,
-    thinking_budget: Literal["low", "medium", "high"] | None = None,
+    thinking_budget: ThinkingBudget | None = None,
+    provider: str | None = None,
 ) -> str:
     """Run a single agent turn until the assistant stops requesting tool calls.
 
@@ -163,11 +162,8 @@ async def run_agent(
         _raise_if_cancelled(cancel_event)
 
         body: dict[str, Any] = {"model": model, "messages": request_messages}
-        if thinking_budget is not None:
-            body["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": _THINKING_TOKENS[thinking_budget],
-            }
+        if thinking_budget is not None and provider is not None:
+            body.update(build_thinking_payload(provider, model, thinking_budget))
         if tools_payload:
             body["tools"] = tools_payload
 
