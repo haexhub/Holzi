@@ -356,6 +356,17 @@ async def _stream_web_agent_run(
         persona_id_override=persona_id_override,
     )
     model = persona_ctx.model
+
+    if skill_hints:
+        from hermes.repository import skills as skills_repo
+
+        hinted = [s for s in await skills_repo.list_all(db) if s.slug in skill_hints]
+        if hinted:
+            skill_blocks = "\n\n".join(
+                f"## Skill: {s.name}\n\n{s.body_markdown}" for s in hinted
+            )
+            persona_ctx.system_prompt = skill_blocks + "\n\n" + persona_ctx.system_prompt
+
     persona_upstream = build_client_for_credential(
         persona_ctx.credential,
         encryptor=request.app.state.encryptor,
