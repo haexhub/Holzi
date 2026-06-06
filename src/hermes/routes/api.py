@@ -55,6 +55,9 @@ from hermes.repository import (
 from hermes.repository import (
     approvals as approvals_repo,
 )
+from hermes.repository import (
+    llm_credentials as llm_credentials_repo,
+)
 from hermes.run_tracker import track_run
 from hermes.sandbox import WorkspaceCrash
 from hermes.tool_catalog import build_tool_catalog
@@ -120,6 +123,16 @@ class ChatContextResponse(BaseModel):
     persona_id: int | None
     persona_name: str | None
     model: str
+
+
+class ModelEntry(BaseModel):
+    id: str
+    credential_id: int
+    credential_name: str
+
+
+class ModelsResponse(BaseModel):
+    models: list[ModelEntry]
 
 
 _API_KEY_RE = re.compile(
@@ -596,6 +609,50 @@ async def api_chat_context(request: Request) -> ChatContextResponse:
         persona_name=persona_name,
         model=model,
     )
+
+
+@router.get("/models")
+async def api_models(request: Request) -> ModelsResponse:
+    """Return all models available across all configured credentials.
+
+    Calls each credential's GET /v1/models endpoint. Falls back to the
+    credential's configured model field when the provider doesn't support
+    model listing. Models are returned in credential order.
+    """
+    db: AsyncEngine = request.app.state.db
+    credentials = await llm_credentials_repo.list_all(db)
+
+    entries: list[ModelEntry] = []
+    for cred in credentials:
+        fetched: list[str] = []
+        try:
+            async with build_client_for_credential(cred, settings) as upstream:
+                resp = await upstream.get("/v1/models", timeout=5.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    items = data.get("data") or []
+                    fetched = [
+                        item["id"] for item in items
+                        if isinstance(item, dict) and "id" in item
+                    ]
+        except Exception:
+            pass
+
+        if fetched:
+            for model_id in fetched:
+                entries.append(ModelEntry(
+                    id=model_id,
+                    credential_id=cred.id,
+                    credential_name=cred.display_name,
+                ))
+        elif cred.model:
+            entries.append(ModelEntry(
+                id=cred.model,
+                credential_id=cred.id,
+                credential_name=cred.display_name,
+            ))
+
+    return ModelsResponse(models=entries)
 
 
 # ---------------------------------------------------------------------------
