@@ -66,6 +66,21 @@ def test_openrouter_payload_low():
     assert payload == {"reasoning": {"effort": "low"}}
 
 
+def test_openrouter_payload_without_metadata_trusts_budget():
+    # The wire path (run_agent) has no supported_parameters; the picker was
+    # already gated by /api/models, so a requested budget must reach upstream.
+    payload = build_thinking_payload("openrouter", "anthropic/claude-x", "high")
+    assert payload == {"reasoning": {"effort": "high"}}
+
+
+def test_openrouter_payload_metadata_without_reasoning_returns_empty():
+    payload = build_thinking_payload(
+        "openrouter", "anthropic/claude-x", "high",
+        supported_parameters=["tools"],
+    )
+    assert payload == {}
+
+
 def test_unsupported_model_returns_empty():
     assert build_thinking_payload("openai", "gpt-4o", "high") == {}
 

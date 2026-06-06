@@ -136,6 +136,16 @@ def build_thinking_payload(
     Empty dict when the model / provider can't express the budget —
     callers should always be able to `body.update(...)` the result
     safely. A `logger`-level note is the caller's job; this stays pure."""
+    # OpenRouter capability is metadata-driven, but the wire path doesn't
+    # carry `supported_parameters` (it lives on /api/models, not on the
+    # run). When metadata is absent we trust the requested budget — the
+    # picker is already gated by /api/models' `thinking.supported`. When
+    # metadata IS supplied and says no reasoning, honour it.
+    if provider == "openrouter":
+        if supported_parameters is not None and "reasoning" not in supported_parameters:
+            return {}
+        return {"reasoning": {"effort": budget}}
+
     support = resolve_thinking_support(provider, model_id, supported_parameters)
     if not support.supported:
         return {}
@@ -148,8 +158,6 @@ def build_thinking_payload(
         }
     if provider == "openai":
         return {"reasoning_effort": budget}
-    if provider == "openrouter":
-        return {"reasoning": {"effort": budget}}
 
     # google chat path isn't wired upstream yet — leave the body alone
     # rather than guessing at a translation that may not match the
