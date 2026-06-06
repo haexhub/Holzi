@@ -112,6 +112,8 @@ class ChatRequest(BaseModel):
     # One-turn overrides. Not persisted. Cleared after the agent run.
     model_override: str | None = Field(default=None, min_length=1)
     persona_id_override: int | None = Field(default=None, ge=1)
+    thinking_budget: Literal["low", "medium", "high"] | None = None
+    skill_hints: list[str] = Field(default_factory=list)
 
 
 class ChatContextResponse(BaseModel):
@@ -294,6 +296,8 @@ async def api_chat(request: Request) -> Response:
         convo,
         model_override=payload.model_override,
         persona_id_override=payload.persona_id_override,
+        thinking_budget=payload.thinking_budget,
+        skill_hints=payload.skill_hints,
     )
 
 
@@ -303,6 +307,8 @@ async def _stream_web_agent_run(
     *,
     model_override: str | None = None,
     persona_id_override: int | None = None,
+    thinking_budget: Literal["low", "medium", "high"] | None = None,
+    skill_hints: list[str] | None = None,
 ) -> Response:
     """Run the web agent over the conversation's current message history and
     stream it as SSE. Shared by /api/chat (after appending the new user
@@ -485,6 +491,7 @@ async def _stream_web_agent_run(
                         on_approval=on_approval,
                         cancel_event=cancel_event,
                         metrics=metrics,
+                        thinking_budget=thinking_budget,
                     )
             finally:
                 await queue.put(None)
