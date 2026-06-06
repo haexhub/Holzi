@@ -1488,3 +1488,46 @@ async def test_approval_endpoint_rejects_invalid_decision(
         assert not future.done()
     finally:
         app.state.approvals.pop("bad-approval", None)
+
+
+async def test_api_chat_can_continue_cline_conversation(
+    client: httpx.AsyncClient,
+) -> None:
+    from hermes.repository import conversations as conv_repo
+
+    cline_conv = await conv_repo.create(app.state.db, channel="cline")
+    _install_upstream_responses([_assistant_oneshot("hello from upstream")])
+
+    # Should NOT return 400 CONVERSATION_NOT_WEB — cline is an interactive channel
+    async with client.stream(
+        "POST",
+        "/api/chat",
+        headers=AUTH,
+        json={"message": "hello from web", "conversation_id": cline_conv.id},
+    ) as response:
+        assert response.status_code == 200
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+
+    events = _parse_sse(body)
+    event_names = [name for name, _ in events]
+    assert "done" in event_names
+
+
+async def test_api_chat_task_channel_still_blocked(
+    client: httpx.AsyncClient,
+) -> None:
+    from hermes.repository import conversations as conv_repo
+
+    task_conv = await conv_repo.create(app.state.db, channel="task")
+    response = await client.post(
+        "/api/chat",
+        headers=AUTH,
+        json={
+            "message": "sneak into task",
+            "conversation_id": task_conv.id,
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "CONVERSATION_NOT_WEB"
