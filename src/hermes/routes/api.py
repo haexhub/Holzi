@@ -58,6 +58,9 @@ from hermes.repository import (
 from hermes.repository import (
     llm_credentials as llm_credentials_repo,
 )
+from hermes.repository import (
+    skills as skills_repo,
+)
 from hermes.run_tracker import track_run
 from hermes.sandbox import WorkspaceCrash
 from hermes.tool_catalog import build_tool_catalog
@@ -358,8 +361,6 @@ async def _stream_web_agent_run(
     model = persona_ctx.model
 
     if skill_hints:
-        from hermes.repository import skills as skills_repo
-
         hinted = [s for s in await skills_repo.list_all(db) if s.slug in skill_hints]
         if hinted:
             skill_blocks = "\n\n".join(
@@ -657,8 +658,13 @@ async def api_models(request: Request) -> ModelsResponse:
                         item["id"] for item in items
                         if isinstance(item, dict) and "id" in item
                     ]
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "model listing failed for credential %s; falling back to "
+                "configured model: %s",
+                cred.id,
+                exc,
+            )
 
         if fetched:
             for model_id in fetched:

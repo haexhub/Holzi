@@ -2,6 +2,7 @@
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
+
 from hermes.main import app
 
 VALID_TOKEN = "test-token-for-pytest"

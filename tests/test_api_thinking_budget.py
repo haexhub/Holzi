@@ -1,8 +1,10 @@
 """Tests for thinking_budget on POST /api/chat."""
 import json
+
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
+
 from hermes.main import app
 
 VALID_TOKEN = "test-token-for-pytest"

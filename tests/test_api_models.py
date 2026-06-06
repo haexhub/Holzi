@@ -2,6 +2,7 @@
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
+
 from hermes.main import app
 
 VALID_TOKEN = "test-token-for-pytest"
@@ -41,8 +42,6 @@ async def test_models_fallback_when_provider_unreachable(client, monkeypatch):
     appears as a fallback entry so the picker is never empty."""
     import hermes.routes.api as api_module
 
-    original = api_module.build_client_for_credential
-
     class _FailingClient:
         async def __aenter__(self):
             raise httpx.ConnectError("unreachable")
@@ -50,7 +49,11 @@ async def test_models_fallback_when_provider_unreachable(client, monkeypatch):
         async def __aexit__(self, *_):
             pass
 
-    monkeypatch.setattr(api_module, "build_client_for_credential", lambda *a, **kw: _FailingClient())
+    monkeypatch.setattr(
+        api_module,
+        "build_client_for_credential",
+        lambda *a, **kw: _FailingClient(),
+    )
 
     resp = await client.get("/api/models", headers=AUTH)
     assert resp.status_code == 200
