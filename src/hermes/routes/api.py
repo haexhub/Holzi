@@ -644,7 +644,11 @@ async def api_models(request: Request) -> ModelsResponse:
     for cred in credentials:
         fetched: list[str] = []
         try:
-            async with build_client_for_credential(cred, settings) as upstream:
+            async with build_client_for_credential(
+                cred,
+                encryptor=request.app.state.encryptor,
+                fallback_proxy_url=settings.llm_url,
+            ) as upstream:
                 resp = await upstream.get("/v1/models", timeout=5.0)
                 if resp.status_code == 200:
                     data = resp.json()
