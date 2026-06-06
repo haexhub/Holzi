@@ -69,6 +69,7 @@ from hermes.upstream import build_client_for_credential
 router = APIRouter(prefix="/api")
 
 WEB_CHANNEL = "web"
+CLINE_CHANNEL = "cline"
 
 # Approvals can take minutes; idle proxies (Traefik, mobile carriers) close
 # silent SSE connections. Emit a comment heartbeat at this cadence whenever no
@@ -258,10 +259,10 @@ async def api_chat(request: Request) -> Response:
             raise HTTPException(
                 status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
             )
-        # /api/chat is the web surface — never let it append into a Signal or
-        # VSCode thread, which would blur channel semantics and bypass the
+        # /api/chat is the interactive surface — never let it append into a
+        # task thread, which would blur channel semantics and bypass the
         # per-channel system prompt + tool catalog.
-        if existing.channel != WEB_CHANNEL:
+        if existing.channel not in (WEB_CHANNEL, CLINE_CHANNEL):
             raise HTTPException(
                 status_code=400,
                 detail=ErrorCode.CONVERSATION_NOT_WEB.value,
@@ -1293,8 +1294,8 @@ async def api_retry_conversation(request: Request, conv_id: int) -> Response:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
         )
-    # Same channel guard as /api/chat: retry is a web-only surface.
-    if convo.channel != WEB_CHANNEL:
+    # Same channel guard as /api/chat: retry is an interactive surface.
+    if convo.channel not in (WEB_CHANNEL, CLINE_CHANNEL):
         raise HTTPException(
             status_code=400,
             detail=ErrorCode.CONVERSATION_NOT_WEB.value,
@@ -1341,8 +1342,8 @@ async def api_edit_and_regenerate(
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
         )
-    # Same channel guard as /api/chat: edit is a web-only surface.
-    if convo.channel != WEB_CHANNEL:
+    # Same channel guard as /api/chat: edit is an interactive surface.
+    if convo.channel not in (WEB_CHANNEL, CLINE_CHANNEL):
         raise HTTPException(
             status_code=400,
             detail=ErrorCode.CONVERSATION_NOT_WEB.value,

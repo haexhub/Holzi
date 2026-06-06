@@ -276,3 +276,88 @@ async def test_chat_completions_streaming_with_upstream_5xx_returns_error_not_st
     # Caller should NOT see a 200 + SSE-wrapped error; they see the actual status.
     assert response.status_code == 503
     assert not response.headers.get("content-type", "").startswith("text/event-stream")
+
+
+async def test_chat_completions_sticky_session_resumes_same_workspace(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream(_non_stream_handler(content="first"))
+    r1 = await client.post(
+        "/v1/chat/completions",
+        headers={**AUTH, "X-Holzi-Workspace": "my-project"},
+        json={"model": "m", "messages": [{"role": "user", "content": "hello"}]},
+    )
+    assert r1.status_code == 200
+    session_id = int(r1.headers["x-hermes-session"])
+
+    _install_upstream(_non_stream_handler(content="second"))
+    r2 = await client.post(
+        "/v1/chat/completions",
+        headers={**AUTH, "X-Holzi-Workspace": "my-project"},
+        json={"model": "m", "messages": [{"role": "user", "content": "follow-up"}]},
+    )
+    assert r2.status_code == 200
+    assert int(r2.headers["x-hermes-session"]) == session_id
+
+    msgs = await messages.list_by_conversation(app.state.db, session_id)
+    assert [m.content for m in msgs] == ["hello", "first", "follow-up", "second"]
+
+
+async def test_chat_completions_different_workspaces_get_different_sessions(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream(_non_stream_handler())
+    r1 = await client.post(
+        "/v1/chat/completions",
+        headers={**AUTH, "X-Holzi-Workspace": "project-a"},
+        json={"model": "m", "messages": [{"role": "user", "content": "hi a"}]},
+    )
+    _install_upstream(_non_stream_handler())
+    r2 = await client.post(
+        "/v1/chat/completions",
+        headers={**AUTH, "X-Holzi-Workspace": "project-b"},
+        json={"model": "m", "messages": [{"role": "user", "content": "hi b"}]},
+    )
+    assert int(r1.headers["x-hermes-session"]) != int(r2.headers["x-hermes-session"])
+
+
+async def test_chat_completions_no_workspace_header_is_sticky(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream(_non_stream_handler())
+    r1 = await client.post(
+        "/v1/chat/completions",
+        headers=AUTH,
+        json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    _install_upstream(_non_stream_handler())
+    r2 = await client.post(
+        "/v1/chat/completions",
+        headers=AUTH,
+        json={"model": "m", "messages": [{"role": "user", "content": "hi again"}]},
+    )
+    assert int(r1.headers["x-hermes-session"]) == int(r2.headers["x-hermes-session"])
+
+
+async def test_chat_completions_explicit_session_overrides_sticky(
+    client: httpx.AsyncClient,
+) -> None:
+    _install_upstream(_non_stream_handler())
+    r1 = await client.post(
+        "/v1/chat/completions",
+        headers={**AUTH, "X-Holzi-Workspace": "ws"},
+        json={"model": "m", "messages": [{"role": "user", "content": "hello"}]},
+    )
+    sticky_id = int(r1.headers["x-hermes-session"])
+
+    other = await conversations.create(app.state.db, channel="cline", ts=1000)
+
+    _install_upstream(_non_stream_handler())
+    r2 = await client.post(
+        "/v1/chat/completions",
+        headers={**AUTH, "X-Hermes-Session": str(other.id)},
+        json={"model": "m", "messages": [{"role": "user", "content": "direct"}]},
+    )
+    assert r2.status_code == 200
+    assert int(r2.headers["x-hermes-session"]) == other.id
+    assert other.id != sticky_id

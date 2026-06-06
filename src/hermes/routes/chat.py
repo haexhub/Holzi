@@ -14,6 +14,8 @@ from hermes.repository.models import Conversation
 router = APIRouter()
 
 CHAT_PATH = "/v1/chat/completions"
+CLINE_CHANNEL = "cline"
+_DEFAULT_WORKSPACE = "default"
 
 
 @router.post(CHAT_PATH)
@@ -39,28 +41,31 @@ async def chat_completions(request: Request) -> Response:
     return await _oneshot_forward(upstream, body, response_headers, db, convo.id)
 
 
-async def _resolve_conversation(
-    request: Request, db: AsyncEngine
-) -> Conversation:
+async def _resolve_conversation(request: Request, db: AsyncEngine) -> Conversation:
     header = request.headers.get("x-hermes-session")
-    channel = request.headers.get("x-hermes-channel", "vscode")
+    if header is not None:
+        try:
+            conv_id = int(header)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=ErrorCode.CHAT_INVALID_SESSION.value
+            ) from exc
+        convo = await conversations.get(db, conv_id)
+        if convo is None:
+            raise HTTPException(
+                status_code=404, detail=ErrorCode.CHAT_SESSION_NOT_FOUND.value
+            )
+        return convo
 
-    if header is None:
-        return await conversations.create(db, channel=channel)
-
-    try:
-        conv_id = int(header)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400, detail=ErrorCode.CHAT_INVALID_SESSION.value
-        ) from exc
-
-    convo = await conversations.get(db, conv_id)
-    if convo is None:
-        raise HTTPException(
-            status_code=404, detail=ErrorCode.CHAT_SESSION_NOT_FOUND.value
-        )
-    return convo
+    workspace = request.headers.get("x-holzi-workspace", _DEFAULT_WORKSPACE)
+    existing = await conversations.find_latest_by_external_id(
+        db, channel=CLINE_CHANNEL, external_id=workspace
+    )
+    if existing is not None:
+        return existing
+    return await conversations.create(
+        db, channel=CLINE_CHANNEL, external_id=workspace
+    )
 
 
 async def _persist_last_user_message(
