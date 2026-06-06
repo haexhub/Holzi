@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -100,6 +100,9 @@ def _raise_if_cancelled(cancel_event: asyncio.Event | None) -> None:
         raise ChatRunCancelled()
 
 
+_THINKING_TOKENS: dict[str, int] = {"low": 1024, "medium": 5000, "high": 16000}
+
+
 async def run_agent(
     *,
     upstream: httpx.AsyncClient,
@@ -116,6 +119,7 @@ async def run_agent(
     on_approval: OnApproval | None = None,
     cancel_event: asyncio.Event | None = None,
     metrics: dict[str, Any] | None = None,
+    thinking_budget: Literal["low", "medium", "high"] | None = None,
 ) -> str:
     """Run a single agent turn until the assistant stops requesting tool calls.
 
@@ -159,6 +163,11 @@ async def run_agent(
         _raise_if_cancelled(cancel_event)
 
         body: dict[str, Any] = {"model": model, "messages": request_messages}
+        if thinking_budget is not None:
+            body["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": _THINKING_TOKENS[thinking_budget],
+            }
         if tools_payload:
             body["tools"] = tools_payload
 

@@ -55,6 +55,12 @@ from hermes.repository import (
 from hermes.repository import (
     approvals as approvals_repo,
 )
+from hermes.repository import (
+    llm_credentials as llm_credentials_repo,
+)
+from hermes.repository import (
+    skills as skills_repo,
+)
 from hermes.run_tracker import track_run
 from hermes.sandbox import WorkspaceCrash
 from hermes.tool_catalog import build_tool_catalog
@@ -109,6 +115,8 @@ class ChatRequest(BaseModel):
     # One-turn overrides. Not persisted. Cleared after the agent run.
     model_override: str | None = Field(default=None, min_length=1)
     persona_id_override: int | None = Field(default=None, ge=1)
+    thinking_budget: Literal["low", "medium", "high"] | None = None
+    skill_hints: list[str] = Field(default_factory=list)
 
 
 class ChatContextResponse(BaseModel):
@@ -120,6 +128,16 @@ class ChatContextResponse(BaseModel):
     persona_id: int | None
     persona_name: str | None
     model: str
+
+
+class ModelEntry(BaseModel):
+    id: str
+    credential_id: int
+    credential_name: str
+
+
+class ModelsResponse(BaseModel):
+    models: list[ModelEntry]
 
 
 _API_KEY_RE = re.compile(
@@ -281,6 +299,8 @@ async def api_chat(request: Request) -> Response:
         convo,
         model_override=payload.model_override,
         persona_id_override=payload.persona_id_override,
+        thinking_budget=payload.thinking_budget,
+        skill_hints=payload.skill_hints,
     )
 
 
@@ -290,6 +310,8 @@ async def _stream_web_agent_run(
     *,
     model_override: str | None = None,
     persona_id_override: int | None = None,
+    thinking_budget: Literal["low", "medium", "high"] | None = None,
+    skill_hints: list[str] | None = None,
 ) -> Response:
     """Run the web agent over the conversation's current message history and
     stream it as SSE. Shared by /api/chat (after appending the new user
@@ -337,6 +359,15 @@ async def _stream_web_agent_run(
         persona_id_override=persona_id_override,
     )
     model = persona_ctx.model
+
+    if skill_hints:
+        hinted = [s for s in await skills_repo.list_all(db) if s.slug in skill_hints]
+        if hinted:
+            skill_blocks = "\n\n".join(
+                f"## Skill: {s.name}\n\n{s.body_markdown}" for s in hinted
+            )
+            persona_ctx.system_prompt = skill_blocks + "\n\n" + persona_ctx.system_prompt
+
     persona_upstream = build_client_for_credential(
         persona_ctx.credential,
         encryptor=request.app.state.encryptor,
@@ -472,6 +503,7 @@ async def _stream_web_agent_run(
                         on_approval=on_approval,
                         cancel_event=cancel_event,
                         metrics=metrics,
+                        thinking_budget=thinking_budget,
                     )
             finally:
                 await queue.put(None)
@@ -596,6 +628,59 @@ async def api_chat_context(request: Request) -> ChatContextResponse:
         persona_name=persona_name,
         model=model,
     )
+
+
+@router.get("/models")
+async def api_models(request: Request) -> ModelsResponse:
+    """Return all models available across all configured credentials.
+
+    Calls each credential's GET /v1/models endpoint. Falls back to the
+    credential's configured model field when the provider doesn't support
+    model listing. Models are returned in credential order.
+    """
+    db: AsyncEngine = request.app.state.db
+    credentials = await llm_credentials_repo.list_all(db)
+
+    entries: list[ModelEntry] = []
+    for cred in credentials:
+        fetched: list[str] = []
+        try:
+            async with build_client_for_credential(
+                cred,
+                encryptor=request.app.state.encryptor,
+                fallback_proxy_url=settings.llm_url,
+            ) as upstream:
+                resp = await upstream.get("/v1/models", timeout=5.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    items = data.get("data") or []
+                    fetched = [
+                        item["id"] for item in items
+                        if isinstance(item, dict) and "id" in item
+                    ]
+        except Exception as exc:
+            logger.debug(
+                "model listing failed for credential %s; falling back to "
+                "configured model: %s",
+                cred.id,
+                exc,
+            )
+
+        if fetched:
+            for model_id in fetched:
+                entries.append(ModelEntry(
+                    id=model_id,
+                    credential_id=cred.id,
+                    credential_name=cred.display_name,
+                ))
+        elif cred.model:
+            entries.append(ModelEntry(
+                id=cred.model,
+                credential_id=cred.id,
+                credential_name=cred.display_name,
+            ))
+
+    return ModelsResponse(models=entries)
 
 
 # ---------------------------------------------------------------------------
