@@ -157,15 +157,12 @@ async def ws_agent(ws: WebSocket, token: str | None = None) -> None:
                 await _service_agent_turn(session, agent_task)
                 await ws.send_json({"type": "stream_done"})
 
-            elif msg_type == "tool_result":
-                session.resolve_tool_result(
-                    msg.get("id", ""), msg.get("result"), msg.get("error")
-                )
-
-            elif msg_type == "update_permission_mode":
-                new_mode = msg.get("mode", "ask")
-                session.permission_mode = new_mode
-                await ws.send_json({"type": "permission_mode_ack", "mode": new_mode})
+            else:
+                # tool_result + update_permission_mode (and any future inner
+                # message types) share one handler with the in-turn loop in
+                # _service_agent_turn so behaviour stays identical regardless
+                # of whether the client sends them mid-turn or between turns.
+                await _handle_inner_msg(session, msg)
 
     except WebSocketDisconnect:
         pass
