@@ -43,6 +43,7 @@ from hermes.routes.skills import router as skills_router
 from hermes.routes.tools import router as tools_router
 from hermes.routes.workspace import router as workspace_router
 from hermes.routes.workspaces import router as workspaces_router
+from hermes.routes.ws_agent import router as ws_agent_router
 from hermes.sandbox import WorkspaceCrash
 from hermes.sandbox.factory import build_sandbox_manager
 from hermes.scheduler import AgentTaskScheduler, ConversationSweepScheduler
@@ -359,6 +360,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Hermes", version=__version__, lifespan=lifespan)
 app.add_middleware(BaseHTTPMiddleware, dispatch=bearer_auth_middleware)
 app.include_router(chat_router)
+app.include_router(ws_agent_router)
 app.include_router(api_router)
 app.include_router(llm_router)
 app.include_router(workspace_router)

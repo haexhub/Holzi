@@ -74,6 +74,14 @@ CHANNEL_REGISTRY: Final[dict[str, dict[str, str]]] = {
             "Resultat."
         ),
     },
+    "vscode": {
+        "label": "VS Code Extension",
+        "default_prompt": (
+            "Du sprichst durch die Holzi VS Code Extension. "
+            "Der User arbeitet aktiv im Editor. Antworte präzise, "
+            "Code-Blöcke sind bevorzugt."
+        ),
+    },
 }
 
 # Seeded into `personas` on first boot. Re-creates carry forward whatever
