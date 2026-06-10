@@ -6,6 +6,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import Receive, Scope, Send
 
@@ -359,6 +360,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Hermes", version=__version__, lifespan=lifespan)
 app.add_middleware(BaseHTTPMiddleware, dispatch=bearer_auth_middleware)
+# CORS for the VS Code webview, whose origin is vscode-webview://<random-uuid>.
+# Added last so it sits outermost and answers the OPTIONS preflight before the
+# bearer-auth middleware (which would 401 the header-less preflight). Auth stays
+# the real gate — the bearer token lives in the extension secret; CORS only lets
+# the webview read responses. No credentials/cookies are used.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"vscode-webview://.*",
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(chat_router)
 app.include_router(ws_agent_router)
 app.include_router(api_router)
