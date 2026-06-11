@@ -5,35 +5,201 @@ os.environ.setdefault("HERMES_PLATFORM_ADMIN_EMAIL", "admin@test.local")
 os.environ.setdefault("HERMES_LOG_LEVEL", "WARNING")
 # DATABASE_URL is provided per-test by the testcontainers fixture (Task 18).
 
-from pathlib import Path  # noqa: E402
+import secrets  # noqa: E402
 
 import pytest  # noqa: E402
+from alembic import command  # noqa: E402
+from alembic.config import Config  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
-from hermes import config as hermes_config  # noqa: E402
-from hermes.db import init_db  # noqa: E402
+from hermes.config import settings  # noqa: E402
+
+# --- testcontainers Postgres -------------------------------------------------
+#
+# The shipped migrations hardcode the database name `holzi` (0002:
+# `GRANT CONNECT ON DATABASE holzi`, 0003: `ALTER DATABASE holzi SET app.user_id`)
+# and the holzi_app password `holzi_app_dev_pw` (0002 CREATE ROLE). So the test
+# container's database MUST be named `holzi`, and the app DSN MUST use that
+# password — otherwise migrations raise `database "holzi" does not exist` or the
+# app engine fails authentication.
+#
+# Roles are cluster-global and the db name is fixed, so rather than create/drop
+# a database per test we boot ONE session container named `holzi`, migrate it
+# once, and isolate per test by TRUNCATE ... RESTART IDENTITY CASCADE (as owner,
+# which RLS does not apply to). RESTART IDENTITY resets sequences so the
+# freshly-seeded platform_admin is always user_id=1.
+
+_OWNER_USER = "holzi_owner"
+_OWNER_PASSWORD = "holzi_owner_test_pw"
+# holzi_app's password is baked into migration 0002 — do not change it here.
+_APP_USER = "holzi_app"
+_APP_PASSWORD = "holzi_app_dev_pw"
+_DB_NAME = "holzi"
+
+
+def _dsn(user: str, password: str, host: str, port: int) -> str:
+    return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{_DB_NAME}"
+
+
+@pytest.fixture(scope="session")
+def _pg_container():
+    """Session-scoped Postgres container. Sync fixture: testcontainers is sync
+    and needs no event loop. The database is named `holzi` (migrations require
+    it). Yields a dict of the owner + app asyncpg DSNs."""
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer(
+        "postgres:16-alpine",
+        username=_OWNER_USER,
+        password=_OWNER_PASSWORD,
+        dbname=_DB_NAME,
+    ) as pg:
+        host = pg.get_container_host_ip()
+        port = int(pg.get_exposed_port(5432))
+        yield {
+            "owner_url": _dsn(_OWNER_USER, _OWNER_PASSWORD, host, port),
+            "app_url": _dsn(_APP_USER, _APP_PASSWORD, host, port),
+        }
+
+
+@pytest.fixture(scope="session")
+def _migrated_pg(_pg_container):
+    """Run Alembic to head exactly once against the owner DSN. Sync fixture:
+    `alembic/env.py` does `asyncio.run(run_migrations_online())`, which requires
+    NO running loop — a sync fixture has none.
+
+    Creates the schema, the holzi_app role (password holzi_app_dev_pw), the RLS
+    policies, and the `ALTER DATABASE holzi SET app.user_id TO '0'` GUC.
+    """
+    owner_url = _pg_container["owner_url"]
+    # Mutate the singleton in place — do NOT importlib.reload hermes.config.
+    # alembic/env.py overrides sqlalchemy.url via cfg.set_main_option below, but
+    # init_db() (called by app code under test) reads settings.database_url.
+    settings.database_url = owner_url
+
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", owner_url)
+    command.upgrade(cfg, "head")
+
+    return _pg_container
 
 
 @pytest.fixture
-async def conn(tmp_path: Path):
-    """Yields an AsyncEngine bound to a fresh per-test SQLite DB.
+async def pg_db(_migrated_pg, monkeypatch):
+    """Per-test clean Postgres. Points the config singleton (and env, belt-and-
+    suspenders) at the migrated `holzi` database, then truncates every table for
+    a clean slate. Yields the owner + app DSNs."""
+    owner_url = _migrated_pg["owner_url"]
+    app_url = _migrated_pg["app_url"]
 
-    Fixture name stayed `conn` for diff-minimisation across the test
-    suite during the SQLAlchemy refactor — repo functions take an engine
-    now, so all callsites compile, just with a slightly misleading name.
+    monkeypatch.setattr(settings, "database_url", owner_url)
+    monkeypatch.setattr(settings, "runtime_database_url", app_url)
+    monkeypatch.setenv("HERMES_DATABASE_URL", owner_url)
+    monkeypatch.setenv("HERMES_RUNTIME_DATABASE_URL", app_url)
 
-    Seeds the admin user (id=1) so repo-level tests can create
-    conversations owned by user 1 without tripping the `user_id` foreign
-    key (FK enforcement is ON for every connection). Mirrors what the
-    production lifespan does via `ensure_users_seeded`.
-    """
-    engine = await init_db(str(tmp_path / "hermes.db"))
-    from hermes.users import ensure_users_seeded
+    # The dev .env ships an invalid HERMES_SECRET_KEY (`dev-secret-key-not-real`),
+    # which crypto.resolve_master_key rejects (needs 64 hex chars) and would
+    # crash the app_with_pg lifespan boot. Pin a deterministic valid 32-byte
+    # key so the full lifespan boots without depending on the local .env or
+    # writing a keyfile into the worktree.
+    monkeypatch.setattr(settings, "secret_key", "00" * 32)
+    monkeypatch.setenv("HERMES_SECRET_KEY", "00" * 32)
 
-    await ensure_users_seeded(engine)
+    # Truncate as owner — RLS does not apply to TRUNCATE, and owner owns the
+    # tables. RESTART IDENTITY resets sequences so a freshly-seeded admin is
+    # id=1 again. CASCADE follows FKs so we don't have to order the tables.
+    truncate_engine = create_async_engine(owner_url, pool_pre_ping=True)
     try:
-        yield engine
+        async with truncate_engine.begin() as conn:
+            rows = (await conn.execute(text(
+                "SELECT tablename FROM pg_tables "
+                "WHERE schemaname='public' AND tablename <> 'alembic_version'"
+            ))).all()
+            tables = [r.tablename for r in rows]
+            if tables:
+                joined = ", ".join(f'"{t}"' for t in tables)
+                await conn.execute(text(
+                    f"TRUNCATE TABLE {joined} RESTART IDENTITY CASCADE"
+                ))
     finally:
-        await engine.dispose()
+        await truncate_engine.dispose()
+
+    yield {"owner_url": owner_url, "app_url": app_url}
+
+
+@pytest.fixture
+async def engine(pg_db):
+    """holzi_app engine — subject to RLS (NOBYPASSRLS). The per-request engine."""
+    eng = create_async_engine(pg_db["app_url"], pool_pre_ping=True)
+    try:
+        yield eng
+    finally:
+        await eng.dispose()
+
+
+@pytest.fixture
+async def owner_engine(pg_db):
+    """holzi_owner engine — used to seed rows bypassing RLS in test setup."""
+    eng = create_async_engine(pg_db["owner_url"], pool_pre_ping=True)
+    try:
+        yield eng
+    finally:
+        await eng.dispose()
+
+
+@pytest.fixture
+async def seed_user(owner_engine):
+    """Insert a `member` user and return its id. Email is unique per call so
+    tests can request more than one."""
+    email = f"u_{secrets.token_hex(4)}@test.local"
+    async with owner_engine.begin() as conn:
+        row = (await conn.execute(
+            text(
+                "INSERT INTO users(email, role, bootstrap_completed, created_at) "
+                "VALUES (:e, 'member', false, 0) RETURNING id"
+            ),
+            {"e": email},
+        )).first()
+    return row.id
+
+
+@pytest.fixture
+async def app_with_pg(pg_db):
+    """Boot the full app lifespan against the per-test Postgres.
+
+    `pg_db` already pointed `settings` at the container, so the lifespan's
+    `init_db()` + `ensure_platform_admin_seeded` run against it — seeding the
+    platform_admin as user_id=1 (fresh truncated DB) with a session keyed on
+    the conftest-level HERMES_PLATFORM_ADMIN_TOKEN (`test-admin-token`).
+    """
+    from asgi_lifespan import LifespanManager
+
+    from hermes.db import get_current_user
+    from hermes.main import app
+
+    # Idempotently register a test probe route that echoes the current-user
+    # ContextVar populated by the auth middleware.
+    if not any(getattr(r, "path", None) == "/__test/whoami" for r in app.routes):
+        async def _whoami():
+            return {"user_id": get_current_user()}
+
+        app.add_api_route("/__test/whoami", _whoami, methods=["GET"])
+
+    async with LifespanManager(app):
+        yield app
+
+
+@pytest.fixture
+async def client(app_with_pg):
+    """httpx AsyncClient bound to the lifespan-booted app via ASGITransport."""
+    import httpx
+
+    transport = httpx.ASGITransport(app=app_with_pg)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as c:
+        yield c
 
 
 @pytest.fixture(autouse=True)
