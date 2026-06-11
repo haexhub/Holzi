@@ -1,27 +1,42 @@
 """Single-user state (Plan 37).
 
 Wave-C-vorbereitend: minimal `users` table with bootstrap_completed flag.
-Wave C will extend with email/password_hash/role/parent_user_id via
-ALTER TABLE ADD COLUMN.
+The `users` table now carries email/role/parent_user_id (Wave C1); user 1 is
+the admin and gets a never-expiring bootstrap session mapping the operator's
+`HERMES_AUTH_TOKEN` to the admin identity via SessionResolver.
 """
 import time
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.config import settings
+from hermes.identity import hash_token
+
 
 async def ensure_users_seeded(engine: AsyncEngine) -> None:
-    """First-boot seed: insert the single-user row (id=1,
-    bootstrap_completed=0). Idempotent — INSERT OR IGNORE matches on PK.
+    """First-boot seed: insert the admin user row (id=1, role='admin',
+    bootstrap_completed=0) and a never-expiring bootstrap session mapping
+    hash_token(settings.auth_token) → user 1. Idempotent — INSERT OR IGNORE
+    matches the users PK and the sessions UNIQUE(token_hash).
     """
     now = int(time.time())
+    token_hash = hash_token(settings.auth_token)
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT OR IGNORE INTO users(id, bootstrap_completed, created_at) "
-                "VALUES (1, 0, :now)"
+                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, created_at) "
+                "VALUES (1, 'admin', 0, :now)"
             ),
             {"now": now},
+        )
+        await conn.execute(
+            text(
+                "INSERT OR IGNORE INTO sessions"
+                "(user_id, token_hash, label, created_at, expires_at) "
+                "VALUES (1, :h, 'bootstrap admin', :now, NULL)"
+            ),
+            {"h": token_hash, "now": now},
         )
 
 
