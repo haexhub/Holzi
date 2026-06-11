@@ -4,6 +4,7 @@ from sqlalchemy import desc, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.db import tx_for_user
 from hermes.repository.models import Note
 from hermes.schema import notes as t_notes
 
@@ -50,7 +51,7 @@ async def upsert(
         t_notes.c.updated_at,
         t_notes.c.user_id,
     )
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(upsert_stmt)
         row = result.first()
     if row is None:
@@ -59,7 +60,7 @@ async def upsert(
 
 
 async def get(engine: AsyncEngine, key: str, *, user_id: int) -> Note | None:
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_notes).where(
                 t_notes.c.key == key,
@@ -76,7 +77,7 @@ async def list_all(
     user_id: int,
     limit: int = 100,
 ) -> list[Note]:
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_notes)
             .where(t_notes.c.user_id == user_id)
@@ -90,7 +91,7 @@ async def list_all(
 async def delete(engine: AsyncEngine, key: str, *, user_id: int) -> bool:
     """Remove a note the caller owns. A note belonging to another user is a
     no-op (returns False) — the `user_id` filter is part of the DELETE WHERE."""
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             t_notes.delete().where(
                 t_notes.c.key == key,
@@ -117,7 +118,7 @@ async def find(
         "WHERE notes_fts MATCH :q AND n.user_id = :user_id "
         "ORDER BY rank LIMIT :limit"
     )
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             sql, {"q": query, "limit": limit, "user_id": user_id}
         )
