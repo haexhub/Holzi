@@ -152,7 +152,11 @@ async def ws_agent(ws: WebSocket, token: str | None = None) -> None:
                 if msg_type == "message":
                     user_content = _build_user_content(msg)
                     await messages.append(
-                        db, conversation_id=conv.id, role="user", content=user_content
+                        db,
+                        user_id=identity.user_id,
+                        conversation_id=conv.id,
+                        role="user",
+                        content=user_content,
                     )
 
                     tools = _build_tools(tool_names, session) or None
@@ -164,6 +168,7 @@ async def ws_agent(ws: WebSocket, token: str | None = None) -> None:
                         run_agent(
                             upstream=upstream,
                             db=db,
+                            user_id=identity.user_id,
                             conversation_id=conv.id,
                             system_prompt=system_prompt,
                             model=model,

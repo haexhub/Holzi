@@ -24,9 +24,9 @@ def _recall_memory(db: AsyncEngine) -> Tool:
         query = str(args.get("query", ""))
         limit = int(args.get("limit", 10))
 
-        msg_hits = await messages.fts_search(db, query=query, limit=limit)
         # TODO(Wave C): thread the agent's user_id into the tool catalog;
         # scoped to the admin (id=1) until the catalog carries user context.
+        msg_hits = await messages.fts_search(db, user_id=1, query=query, limit=limit)
         note_hits = await notes.find(db, user_id=1, query=query, limit=limit)
 
         return json.dumps(
@@ -135,7 +135,7 @@ def _get_conversation(db: AsyncEngine) -> Tool:
         if convo is None:
             return json.dumps({"error": f"conversation {conv_id} not found"})
 
-        msgs = await messages.list_by_conversation(db, conv_id, limit=limit)
+        msgs = await messages.list_by_conversation(db, conv_id, user_id=1, limit=limit)
         return json.dumps(
             {
                 "conversation": {

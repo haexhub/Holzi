@@ -495,7 +495,9 @@ async def list_persona_history(
                 "params": {"id": persona_id},
             },
         )
-    rows = await persona_history_repo.list_for_persona(db, persona_id)
+    rows = await persona_history_repo.list_for_persona(
+        db, persona_id, user_id=current_user_id(request)
+    )
     return {"history": [_history_to_dict(r) for r in rows]}
 
 
@@ -517,7 +519,7 @@ async def restore_persona_history(
                 "params": {"id": persona_id},
             },
         )
-    snapshot = await persona_history_repo.get(db, snapshot_id)
+    snapshot = await persona_history_repo.get(db, snapshot_id, user_id=uid)
     if snapshot is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

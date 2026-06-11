@@ -298,7 +298,11 @@ async def api_chat(request: Request) -> Response:
                 )
 
     user_msg = await messages.append(
-        db, conversation_id=convo.id, role="user", content=payload.message
+        db,
+        user_id=current_user_id(request),
+        conversation_id=convo.id,
+        role="user",
+        content=payload.message,
     )
     if payload.attachment_ids:
         await attachments.link_to_message(
@@ -507,6 +511,7 @@ async def _stream_web_agent_run(
                     await run_agent(
                         upstream=persona_upstream,
                         db=db,
+                        user_id=current_user_id(request),
                         conversation_id=convo.id,
                         system_prompt=persona_ctx.system_prompt,
                         model=model,
@@ -1182,7 +1187,9 @@ async def api_get_conversation(
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
         )
-    msgs = await messages.list_by_conversation(db, conv_id, limit=limit)
+    msgs = await messages.list_by_conversation(
+        db, conv_id, user_id=current_user_id(request), limit=limit
+    )
     atts_by_message: dict[int, list[Any]] = {}
     for att in await attachments.list_by_conversation(db, conv_id):
         if att.message_id is not None:
@@ -1330,7 +1337,8 @@ async def api_retry_conversation(request: Request, conv_id: int) -> Response:
     """
     db: AsyncEngine = request.app.state.db
 
-    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
+    uid = current_user_id(request)
+    convo = await conversations.get(db, conv_id, user_id=uid)
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1342,7 +1350,7 @@ async def api_retry_conversation(request: Request, conv_id: int) -> Response:
             detail=ErrorCode.CONVERSATION_NOT_WEB.value,
         )
 
-    last_user = await messages.last_user_message(db, conv_id)
+    last_user = await messages.last_user_message(db, conv_id, user_id=uid)
     if last_user is None:
         raise HTTPException(
             status_code=400,
@@ -1352,7 +1360,7 @@ async def api_retry_conversation(request: Request, conv_id: int) -> Response:
     # Drop the assistant/tool tail so run_agent regenerates from the same
     # context that produced the original reply (simplest persistence
     # strategy — no superseded_at bookkeeping).
-    await messages.delete_after(db, conv_id, after_id=last_user.id)
+    await messages.delete_after(db, conv_id, user_id=uid, after_id=last_user.id)
 
     return await _stream_web_agent_run(request, convo)
 
@@ -1378,7 +1386,8 @@ async def api_edit_and_regenerate(
     """
     db: AsyncEngine = request.app.state.db
 
-    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
+    uid = current_user_id(request)
+    convo = await conversations.get(db, conv_id, user_id=uid)
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1390,7 +1399,7 @@ async def api_edit_and_regenerate(
             detail=ErrorCode.CONVERSATION_NOT_WEB.value,
         )
 
-    target = await messages.get(db, message_id)
+    target = await messages.get(db, message_id, user_id=uid)
     # A message outside this conversation is a 404 (not found *here*), so the
     # path's conv_id is authoritative and clients can't edit across threads.
     if target is None or target.conversation_id != conv_id:
@@ -1402,7 +1411,9 @@ async def api_edit_and_regenerate(
             status_code=400, detail=ErrorCode.MESSAGE_ONLY_USER_EDITABLE.value
         )
 
-    updated = await messages.update_content(db, message_id, content=body.content)
+    updated = await messages.update_content(
+        db, message_id, user_id=uid, content=body.content
+    )
     if updated is None:
         # Lost-the-race between the get() above and the update — the message
         # was deleted concurrently. Don't trim/regenerate on a phantom edit.
@@ -1414,7 +1425,7 @@ async def api_edit_and_regenerate(
     # Unlink the on-disk files of any attachments on those later turns first:
     # delete_after's CASCADE reclaims the rows but not the scratch-dir blobs.
     await _unlink_attachment_files_after(db, conv_id, after_id=message_id)
-    await messages.delete_after(db, conv_id, after_id=message_id)
+    await messages.delete_after(db, conv_id, user_id=uid, after_id=message_id)
 
     return await _stream_web_agent_run(request, convo)
 
