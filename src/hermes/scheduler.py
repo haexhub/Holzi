@@ -56,6 +56,7 @@ class AgentTaskScheduler:
         self,
         db: AsyncEngine,
         *,
+        owner_db: AsyncEngine,
         encryptor: Encryptor,
         fallback_proxy_url: str,
         tool_factory: ToolFactory,
@@ -66,6 +67,7 @@ class AgentTaskScheduler:
         agent_runner: Callable[..., Awaitable[str]] | None = None,
     ) -> None:
         self.db = db
+        self.owner_db = owner_db
         self._encryptor = encryptor
         self._fallback_proxy_url = fallback_proxy_url
         self._tool_factory = tool_factory
@@ -107,7 +109,7 @@ class AgentTaskScheduler:
     async def fire_due(self, *, now: int | None = None) -> int:
         """Fire every task whose `due_at` is past. Returns count fired."""
         current = now if now is not None else int(time.time())
-        due = await agent_tasks_repo.list_due(self.db, now=current)
+        due = await agent_tasks_repo.list_due(self.owner_db, now=current)
         fired = 0
         for task in due:
             try:
@@ -136,7 +138,7 @@ class AgentTaskScheduler:
         # fires tasks on behalf of every user. The API endpoint already
         # authorised the caller against the task's owner before delegating
         # here.
-        task = await agent_tasks_repo._get_unscoped(self.db, task_id)
+        task = await agent_tasks_repo._get_unscoped(self.owner_db, task_id)
         if task is None:
             raise LookupError(f"agent_task {task_id} not found")
         return await self._fire_one(task, now=int(time.time()), advance_due_at=False)
@@ -158,6 +160,7 @@ class AgentTaskScheduler:
         )
         await messages_repo.append(
             self.db,
+            user_id=task.user_id,
             conversation_id=convo.id,
             role="user",
             content=task.prompt,
@@ -208,7 +211,7 @@ class AgentTaskScheduler:
             # firing or disable a one-shot prematurely.
             try:
                 await agent_tasks_repo.mark_run(
-                    self.db,
+                    self.owner_db,
                     task.id,
                     run_id=run_id,
                     status=run_status,
@@ -233,9 +236,11 @@ class ConversationSweepScheduler:
         db: AsyncEngine,
         scratch_root: Path | None,
         *,
+        owner_db: AsyncEngine,
         poll_interval: int = DEFAULT_CONVERSATION_SWEEP_INTERVAL_SECONDS,
     ) -> None:
         self.db = db
+        self.owner_db = owner_db
         self.scratch_root = scratch_root
         self.poll_interval = poll_interval
         self._task: asyncio.Task[None] | None = None
@@ -275,7 +280,10 @@ class ConversationSweepScheduler:
     async def sweep(self, *, now: int | None = None) -> list[int]:
         current = now if now is not None else int(time.time())
         deleted = await conversations_repo.sweep_expired(
-            self.db, now=current, scratch_root=self.scratch_root
+            self.db,
+            owner_engine=self.owner_db,
+            now=current,
+            scratch_root=self.scratch_root,
         )
         if deleted:
             logger.info(

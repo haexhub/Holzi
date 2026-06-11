@@ -152,7 +152,7 @@ async def get_active(
     engine: AsyncEngine, *, user_id: int
 ) -> LlmCredential | None:
     async with tx_for_user(engine, user_id=user_id) as conn:
-        result = await conn.execute(select(t).where(t.c.is_active == 1))
+        result = await conn.execute(select(t).where(t.c.is_active.is_(True)))
         row = result.first()
     return _row_to_credential(row) if row is not None else None
 
@@ -218,12 +218,12 @@ async def activate(engine: AsyncEngine, cred_id: int, *, user_id: int) -> bool:
         await conn.execute(
             t.update()
             .where(t.c.id != cred_id)
-            .where(t.c.is_active == 1)
-            .values(is_active=0, updated_at=now)
+            .where(t.c.is_active.is_(True))
+            .values(is_active=False, updated_at=now)
         )
         result = await conn.execute(
             t.update()
             .where(t.c.id == cred_id)
-            .values(is_active=1, updated_at=now)
+            .values(is_active=True, updated_at=now)
         )
     return (result.rowcount or 0) > 0

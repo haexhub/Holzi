@@ -62,7 +62,7 @@ async def list_enabled(engine: AsyncEngine) -> list[Skill]:
     """Alphabetical by slug — for the resolver catalog index."""
     stmt = (
         select(t_skills)
-        .where(t_skills.c.enabled == 1)
+        .where(t_skills.c.enabled.is_(True))
         .order_by(asc(t_skills.c.slug))
     )
     async with engine.connect() as conn:

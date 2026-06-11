@@ -106,18 +106,22 @@ async def rebuild_upstream_from_db(
     app: FastAPI,
     *,
     db: AsyncEngine,
+    user_id: int,
     encryptor: Encryptor,
     fallback_llm_url: str,
     fallback_llm_api_key: str,
 ) -> None:
-    """Swap `app.state.upstream` for the client matching the currently
-    active credential (or the env-var fallback when there is none).
+    """Swap `app.state.upstream` for the client matching `user_id`'s
+    currently active credential (or the env-var fallback when there is
+    none). Called at boot with the platform admin's id so the global
+    fallback client carries the admin's active credential — per-user
+    credentials are resolved per-request through `resolve_persona_context`.
 
     Closes the previously installed client so connection pools don't
     pile up across rebuilds. Safe to call concurrently with in-flight
     requests on the old client — httpx keeps the underlying TCP sockets
     open until the requests finish."""
-    active = await repo.get_active(db)
+    active = await repo.get_active(db, user_id=user_id)
     if active is None:
         new_client = build_fallback_client(
             llm_url=fallback_llm_url, llm_api_key=fallback_llm_api_key

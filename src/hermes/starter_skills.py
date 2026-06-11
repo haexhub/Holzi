@@ -485,22 +485,24 @@ kritische Bewertung, klare Synthese. Kein Copy-Paste — echtes Analysieren.
 
 
 async def ensure_starter_skills_seeded(engine: AsyncEngine) -> None:
-    """Idempotent: INSERT OR IGNORE all 8 starter skill rows.
+    """Idempotent: insert all 8 starter skill rows.
 
     Called once per boot. If a skill's slug row already exists (because
     the user edited the body or a previous boot seeded it), the INSERT is
-    silently skipped — user edits are never overwritten.
+    silently skipped — user edits are never overwritten. `skills` is a
+    global table (no RLS), so a direct `engine.begin()` is fine.
     """
     now = int(time.time())
     async with engine.begin() as conn:
         for skill in STARTER_SKILLS:
             await conn.execute(
                 text(
-                    "INSERT OR IGNORE INTO skills"
+                    "INSERT INTO skills"
                     "(slug, name, description, when_to_use, body_markdown,"
                     " enabled, created_at, updated_at) "
                     "VALUES (:slug, :name, :description, :when_to_use,"
-                    " :body_markdown, 1, :now, :now)"
+                    " :body_markdown, true, :now, :now) "
+                    "ON CONFLICT (slug) DO NOTHING"
                 ),
                 {
                     "slug": skill["slug"],

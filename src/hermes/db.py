@@ -93,7 +93,12 @@ async def tx_for_user(
             "(ContextVar empty and no explicit kwarg)"
         )
     async with engine.begin() as conn:
-        await conn.execute(text("SET LOCAL app.user_id = :u"), {"u": str(uid)})
+        # `SET LOCAL` doesn't accept bind parameters (parser-level restriction),
+        # so route through `set_config(name, value, is_local=true)` which does.
+        await conn.execute(
+            text("SELECT set_config('app.user_id', :u, true)"),
+            {"u": str(uid)},
+        )
         yield conn
 
 

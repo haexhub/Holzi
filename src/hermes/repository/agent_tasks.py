@@ -190,7 +190,7 @@ async def list_due(owner_engine: AsyncEngine, *, now: int) -> list[AgentTask]:
     async with tx_as_owner(owner_engine) as conn:
         result = await conn.execute(
             select(t_agent_tasks)
-            .where(t_agent_tasks.c.enabled == 1)
+            .where(t_agent_tasks.c.enabled.is_(True))
             .where(t_agent_tasks.c.due_at.is_not(None))
             .where(t_agent_tasks.c.due_at <= now)
             .order_by(asc(t_agent_tasks.c.due_at))

@@ -274,6 +274,7 @@ async def _refresh_upstream(request: Request) -> None:
     await rebuild_upstream_from_db(
         request.app,
         db=request.app.state.db,
+        user_id=request.state.user_id,
         encryptor=request.app.state.encryptor,
         fallback_llm_url=settings.llm_url,
         fallback_llm_api_key=settings.llm_api_key,

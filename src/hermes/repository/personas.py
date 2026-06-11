@@ -96,7 +96,7 @@ async def get_default(engine: AsyncEngine, *, user_id: int) -> Persona | None:
     async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_personas).where(
-                t_personas.c.is_default == 1,
+                t_personas.c.is_default.is_(True),
                 t_personas.c.user_id == user_id,
             )
         )
@@ -267,7 +267,7 @@ async def delete(engine: AsyncEngine, persona_id: int, *, user_id: int) -> bool:
         result = await conn.execute(
             t_personas.delete().where(
                 (t_personas.c.id == persona_id)
-                & (t_personas.c.is_default == 0)
+                & (t_personas.c.is_default.is_(False))
                 & (t_personas.c.user_id == user_id)
             )
         )

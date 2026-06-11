@@ -340,17 +340,11 @@ async def _migrate_personas_add_credential_columns(engine: AsyncEngine) -> None:
         )
 
 
-# Plan 35 §C1: the seeded persona belongs to the admin user (id=1). Backfill
-# only ever runs for the admin — real multi-user persona seeding is a C2
-# concern.
-ADMIN_USER_ID: Final[int] = 1
-
-
-async def ensure_backfill(engine: AsyncEngine) -> None:
-    """Seed the admin's (user_id=1) default persona + every channel row.
+async def ensure_backfill(engine: AsyncEngine, *, user_id: int) -> None:
+    """Seed `user_id`'s default persona + every channel row.
 
     Idempotent — safe to call on every boot. Two guards:
-    - Personas: only inserts the default if the admin has no persona. Once
+    - Personas: only inserts the default if the user has no persona. Once
       the user has any persona, don't reintroduce "Hermes" (they may have
       renamed/deleted it intentionally).
     - Channels: per-key check via `channels_repo.ensure_seeded`.
@@ -358,14 +352,13 @@ async def ensure_backfill(engine: AsyncEngine) -> None:
     The seed write goes through `personas_repo.create` with
     ``history_author="system"`` so the initial `persona_history`
     snapshot is tagged as system-emitted (distinct from `'user'`
-    edits and `'migration'` rows produced by
-    `_migrate_prompt_to_fragments`).
+    edits and `'migration'` rows).
     """
-    existing_personas = await personas_repo.list_all(engine, user_id=ADMIN_USER_ID)
+    existing_personas = await personas_repo.list_all(engine, user_id=user_id)
     if not existing_personas:
         await personas_repo.create(
             engine,
-            user_id=ADMIN_USER_ID,
+            user_id=user_id,
             name=DEFAULT_PERSONA_NAME,
             soul=DEFAULT_PERSONA_SOUL,
             identity=DEFAULT_PERSONA_IDENTITY,
@@ -572,7 +565,7 @@ async def get_effective_system_prompt(
         parts.append(index)
     parts.append(channel_prompt)
 
-    bootstrap_done = await users_mod.is_bootstrap_completed(engine)
+    bootstrap_done = await users_mod.is_bootstrap_completed(engine, user_id)
     bootstrap_loadable = any(
         s.slug == "bootstrap-first-chat" for s in enabled_skills
     )
@@ -668,21 +661,23 @@ async def resolve_chat_context_meta(
 
 
 async def ensure_bootstrap_skill_seeded(engine: AsyncEngine) -> None:
-    """Idempotent: INSERT OR IGNORE the bootstrap-first-chat skill row.
+    """Idempotent: insert the bootstrap-first-chat skill row.
 
-    Called once per boot (after ``ensure_users_seeded``). If the user
-    has edited the body via the Skills-Page, ``INSERT OR IGNORE`` matched
-    on the UNIQUE slug leaves the row untouched — no overwrite.
+    Called once per boot (after ``ensure_platform_admin_seeded``). If the
+    user has edited the body via the Skills-Page, ``ON CONFLICT (slug) DO
+    NOTHING`` leaves the row untouched — no overwrite. `skills` is a
+    global table (no RLS), so a direct `engine.begin()` is fine.
     """
     now = int(time.time())
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT OR IGNORE INTO skills"
+                "INSERT INTO skills"
                 "(slug, name, description, when_to_use, body_markdown,"
                 " enabled, created_at, updated_at) "
                 "VALUES (:slug, :name, :description, :when_to_use,"
-                " :body_markdown, 1, :now, :now)"
+                " :body_markdown, true, :now, :now) "
+                "ON CONFLICT (slug) DO NOTHING"
             ),
             {
                 "slug": "bootstrap-first-chat",

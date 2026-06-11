@@ -1,9 +1,9 @@
-"""Single-user state (Plan 37).
+"""Platform admin bootstrap (§1, refined by §2).
 
-Wave-C-vorbereitend: minimal `users` table with bootstrap_completed flag.
-The `users` table now carries email/role/parent_user_id (Wave C1); user 1 is
-the admin and gets a never-expiring bootstrap session mapping the operator's
-`HERMES_AUTH_TOKEN` to the admin identity via SessionResolver.
+Single source of truth for the env-seeded `platform_admin`: a users row
+(email + role='platform_admin'), idempotent, plus a never-expiring session
+mapping HERMES_PLATFORM_ADMIN_TOKEN → that user. Rotating the env token
+drops the previous bootstrap session so the old token stops working.
 """
 import time
 
@@ -13,49 +13,61 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from hermes.config import settings
 from hermes.identity import hash_token
 
+BOOTSTRAP_LABEL = "bootstrap platform_admin"
 
-async def ensure_users_seeded(engine: AsyncEngine) -> None:
-    """First-boot seed: insert the admin user row (id=1, role='admin',
-    bootstrap_completed=0) and a never-expiring bootstrap session mapping
-    hash_token(settings.auth_token) → user 1. Idempotent — INSERT OR IGNORE
-    matches the users PK and the sessions UNIQUE(token_hash).
+
+async def ensure_platform_admin_seeded(owner_engine: AsyncEngine) -> int:
+    """Idempotent. Returns the platform_admin's user id. Run from lifespan
+    against the OWNER engine — bypasses RLS by design, since at boot there
+    is no resolved user yet.
     """
     now = int(time.time())
-    token_hash = hash_token(settings.auth_token)
-    async with engine.begin() as conn:
-        await conn.execute(
+    token_hash = hash_token(settings.platform_admin_token)
+    email = settings.platform_admin_email
+
+    async with owner_engine.begin() as conn:
+        row = (await conn.execute(
             text(
-                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, created_at) "
-                "VALUES (1, 'admin', 0, :now)"
+                "INSERT INTO users(email, role, bootstrap_completed, created_at) "
+                "VALUES (:e, 'platform_admin', false, :now) "
+                "ON CONFLICT (email) DO UPDATE SET role = 'platform_admin' "
+                "RETURNING id"
             ),
-            {"now": now},
-        )
-        # The bootstrap session is singular: if HERMES_AUTH_TOKEN was rotated,
-        # drop any stale 'bootstrap admin' row whose token_hash no longer
-        # matches — otherwise the old token would keep resolving forever.
+            {"e": email, "now": now},
+        )).first()
+        if row is None:
+            raise RuntimeError("ensure_platform_admin_seeded: users upsert returned no row")
+        user_id = row.id
+
+        # Drop any stale bootstrap session whose token_hash no longer matches
+        # — token rotation must invalidate the previous token.
         await conn.execute(
-            text(
-                "DELETE FROM sessions WHERE label = 'bootstrap admin' "
-                "AND token_hash != :h"
-            ),
-            {"h": token_hash},
-        )
-        await conn.execute(
-            text(
-                "INSERT OR IGNORE INTO sessions"
-                "(user_id, token_hash, label, created_at, expires_at) "
-                "VALUES (1, :h, 'bootstrap admin', :now, NULL)"
-            ),
-            {"h": token_hash, "now": now},
+            text("DELETE FROM sessions WHERE label = :l AND token_hash != :h"),
+            {"l": BOOTSTRAP_LABEL, "h": token_hash},
         )
 
+        await conn.execute(
+            text(
+                "INSERT INTO sessions(user_id, token_hash, label, created_at, expires_at) "
+                "VALUES (:uid, :h, :l, :now, NULL) "
+                "ON CONFLICT (token_hash) DO NOTHING"
+            ),
+            {"uid": user_id, "h": token_hash, "l": BOOTSTRAP_LABEL, "now": now},
+        )
 
-async def is_bootstrap_completed(engine: AsyncEngine) -> bool:
-    """Returns False if the row is missing entirely (defensive)."""
+    return user_id
+
+
+async def is_bootstrap_completed(engine: AsyncEngine, user_id: int) -> bool:
+    """Returns False if the row is missing entirely (defensive).
+
+    `users` is not under RLS (it's the lookup table the policies depend
+    on), so a direct SELECT works against either engine — lifespan calls
+    with the owner engine, request flow calls with the runtime engine.
+    """
     async with engine.connect() as conn:
-        row = (
-            await conn.execute(
-                text("SELECT bootstrap_completed FROM users WHERE id = 1")
-            )
-        ).first()
+        row = (await conn.execute(
+            text("SELECT bootstrap_completed FROM users WHERE id = :uid"),
+            {"uid": user_id},
+        )).first()
     return bool(row and row.bootstrap_completed)
