@@ -10,6 +10,8 @@ down_revision = "0001"
 
 # Tables holzi_app needs DML on. Excludes nothing — RLS, not GRANT, is the
 # isolation mechanism. The role is the *vehicle* RLS uses (NOBYPASSRLS).
+# Names are interpolated into raw SQL unquoted: every entry must be lowercase
+# ASCII and not a reserved word. Add quoting if you need anything else.
 RUNTIME_TABLES = [
     "users", "sessions",
     "conversations", "messages", "attachments", "agent_runs",
@@ -39,6 +41,9 @@ def upgrade() -> None:
     op.execute("GRANT USAGE ON SCHEMA public TO holzi_app;")
     for t in RUNTIME_TABLES:
         op.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {t} TO holzi_app;")
+    # `ON ALL SEQUENCES` covers what exists today; the `ALTER DEFAULT
+    # PRIVILEGES` lines below cover sequences/tables created by holzi_owner
+    # AFTER this revision (e.g. future migrations).
     op.execute("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO holzi_app;")
     op.execute("""
         ALTER DEFAULT PRIVILEGES IN SCHEMA public
