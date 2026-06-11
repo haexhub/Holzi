@@ -247,10 +247,11 @@ async def test_oauth_authorize_rebuilds_when_active(
     # the proxy URL with no Authorization header.
     ct = app.state.encryptor.encrypt("dummy-creds-json")
     row = await repo.create_oauth_pending(
-        app.state.db, display_name="claude-oauth-test"
+        app.state.db, user_id=1, display_name="claude-oauth-test"
     )
     await repo.update_oauth_authorized(
         app.state.db,
+        user_id=1,
         cred_id=row.id,
         ciphertext=EncryptedBlob(iv=ct.iv, tag=ct.tag, data=ct.data),
         authorized_at=1,
