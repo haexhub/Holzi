@@ -1,10 +1,8 @@
-import hmac
 from collections.abc import Awaitable, Callable
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 
-from hermes.config import settings
 from hermes.logging import logger
 
 PUBLIC_PATHS: frozenset[str] = frozenset({"/healthz"})
@@ -23,10 +21,21 @@ async def bearer_auth_middleware(
         return _unauthorized(request, reason="missing_or_malformed")
 
     provided = header[len(BEARER_PREFIX) :]
-    if not hmac.compare_digest(provided, settings.auth_token):
-        return _unauthorized(request, reason="invalid_token")
+    identity = await request.app.state.identity_resolver.resolve(provided)
+    if identity is None:
+        return _unauthorized(request, reason="invalid_or_expired_session")
 
+    request.state.user_id = identity.user_id
+    request.state.role = identity.role
     return await call_next(request)
+
+
+def current_user_id(request: Request) -> int:
+    return request.state.user_id
+
+
+def current_role(request: Request) -> str:
+    return request.state.role
 
 
 def _unauthorized(request: Request, *, reason: str) -> JSONResponse:

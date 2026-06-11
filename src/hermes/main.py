@@ -15,6 +15,7 @@ from hermes.auth import bearer_auth_middleware
 from hermes.config import conversation_scratch_root, settings
 from hermes.crypto import Encryptor, resolve_master_key
 from hermes.db import init_db
+from hermes.identity import SessionResolver
 from hermes.logging import configure_logging, logger
 from hermes.mcp_manager import McpServerManager
 from hermes.mcp_server import mcp_session_manager, tool_manifest
@@ -98,6 +99,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model=settings.model,
     )
     app.state.db = None
+    app.state.identity_resolver = None
     # run_id → asyncio.Event for in-flight /api/chat turns. See
     # routes/api.py and hermes/agent.py for the contract.
     app.state.chat_runs = {}
@@ -130,6 +132,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     try:
         app.state.db = await init_db(settings.db_path)
+        app.state.identity_resolver = SessionResolver(app.state.db)
 
         # Plan 36: one-shot migration — copy the legacy `personas.prompt`
         # column into `identity` and drop it. No-op on fresh and
