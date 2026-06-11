@@ -24,7 +24,7 @@ async def test_authenticated_request_populates_contextvar(client):
     """
     r = await client.get(
         "/__test/whoami",
-        headers={"Authorization": "Bearer test-admin-token"},
+        headers={"Authorization": "Bearer test-token-for-pytest"},
     )
     assert r.status_code == 200
     assert r.json() == {"user_id": 1}

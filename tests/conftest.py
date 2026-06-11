@@ -1,6 +1,6 @@
 import os
 
-os.environ.setdefault("HERMES_PLATFORM_ADMIN_TOKEN", "test-admin-token")
+os.environ.setdefault("HERMES_PLATFORM_ADMIN_TOKEN", "test-token-for-pytest")
 os.environ.setdefault("HERMES_PLATFORM_ADMIN_EMAIL", "admin@test.local")
 os.environ.setdefault("HERMES_LOG_LEVEL", "WARNING")
 # DATABASE_URL is provided per-test by the testcontainers fixture (Task 18).
@@ -8,11 +8,11 @@ os.environ.setdefault("HERMES_LOG_LEVEL", "WARNING")
 import secrets  # noqa: E402
 
 import pytest  # noqa: E402
-from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
+from alembic import command  # noqa: E402
 from hermes.config import settings  # noqa: E402
 
 # --- testcontainers Postgres -------------------------------------------------
@@ -172,13 +172,29 @@ async def seed_user(owner_engine):
 
 
 @pytest.fixture
+async def conn(engine, owner_engine):
+    """Compatibility shim for repo-level tests written against the old SQLite
+    `conn` fixture: yields the holzi_app (RLS-bound) engine with a user id=1
+    pre-seeded, mirroring what the old fixture did via ensure_users_seeded.
+    Repo functions called with user_id=1 then work under RLS (tx_for_user sets
+    app.user_id=1). Seed via owner_engine because `users` has no RLS but the row
+    must exist before personal-table inserts (FK)."""
+    async with owner_engine.begin() as c:
+        await c.execute(text(
+            "INSERT INTO users(email, role, bootstrap_completed, created_at) "
+            "VALUES ('admin@test.local','platform_admin',false,0)"
+        ))
+    yield engine
+
+
+@pytest.fixture
 async def app_with_pg(pg_db):
     """Boot the full app lifespan against the per-test Postgres.
 
     `pg_db` already pointed `settings` at the container, so the lifespan's
     `init_db()` + `ensure_platform_admin_seeded` run against it — seeding the
     platform_admin as user_id=1 (fresh truncated DB) with a session keyed on
-    the conftest-level HERMES_PLATFORM_ADMIN_TOKEN (`test-admin-token`).
+    the conftest-level HERMES_PLATFORM_ADMIN_TOKEN (`test-token-for-pytest`).
     """
     from asgi_lifespan import LifespanManager
 
