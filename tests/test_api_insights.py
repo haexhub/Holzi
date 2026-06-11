@@ -49,6 +49,7 @@ async def _seed_run(
     db = app.state.db
     await runs_repo.insert(
         db,
+        user_id=1,
         run_id=run_id,
         conversation_id=conversation_id,
         channel="web",
@@ -59,6 +60,7 @@ async def _seed_run(
         await runs_repo.finalize(
             db,
             run_id,
+            user_id=1,
             status=status,
             finished_at=started_at + 1,
             error_code=error_code,

@@ -112,7 +112,7 @@ def _drain_until_done(ws) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def test_ws_agent_rejects_missing_token():
+def test_ws_agent_rejects_missing_token(pg_db):
     with (
         TestClient(app) as client,
         pytest.raises(WebSocketDisconnect) as exc_info,
@@ -122,7 +122,7 @@ def test_ws_agent_rejects_missing_token():
     assert exc_info.value.code == 4001
 
 
-def test_ws_agent_rejects_invalid_token():
+def test_ws_agent_rejects_invalid_token(pg_db):
     with (
         TestClient(app) as client,
         pytest.raises(WebSocketDisconnect) as exc_info,
@@ -134,7 +134,7 @@ def test_ws_agent_rejects_invalid_token():
     assert exc_info.value.code == 4001
 
 
-def test_ws_agent_accepts_valid_bearer_header():
+def test_ws_agent_accepts_valid_bearer_header(pg_db):
     with TestClient(app) as client:
         _install_upstream(_stream_handler(["hello"]))
         with client.websocket_connect("/ws/agent", headers=AUTH) as ws:
@@ -143,7 +143,7 @@ def test_ws_agent_accepts_valid_bearer_header():
             _drain_until_done(ws)
 
 
-def test_ws_agent_accepts_token_query_param():
+def test_ws_agent_accepts_token_query_param(pg_db):
     with TestClient(app) as client:
         _install_upstream(_stream_handler(["hello"]))
         with client.websocket_connect(f"/ws/agent?token={VALID_TOKEN}") as ws:
@@ -157,7 +157,7 @@ def test_ws_agent_accepts_token_query_param():
 # ---------------------------------------------------------------------------
 
 
-def test_ws_agent_message_returns_stream_chunks_then_done():
+def test_ws_agent_message_returns_stream_chunks_then_done(pg_db):
     with TestClient(app) as client:
         _install_upstream(_stream_handler(["Hello", " world"]))
         with client.websocket_connect("/ws/agent", headers=AUTH) as ws:
@@ -172,7 +172,7 @@ def test_ws_agent_message_returns_stream_chunks_then_done():
     assert "".join(deltas) == "Hello world"
 
 
-def test_ws_agent_start_session_creates_vscode_conversation():
+def test_ws_agent_start_session_creates_vscode_conversation(pg_db):
     """Verifies a conversation with channel=vscode is queryable after the turn."""
     with TestClient(app) as client:
         _install_upstream(_stream_handler(["ok"]))
@@ -194,7 +194,7 @@ def test_ws_agent_start_session_creates_vscode_conversation():
 # ---------------------------------------------------------------------------
 
 
-def test_ws_agent_tool_call_round_trip():
+def test_ws_agent_tool_call_round_trip(pg_db):
     """Agent sends tool_call; client returns tool_result; agent continues."""
     with TestClient(app) as client:
         _install_upstream(
@@ -226,7 +226,7 @@ def test_ws_agent_tool_call_round_trip():
             _drain_until_done(ws)
 
 
-def test_ws_agent_user_denied_allows_graceful_response():
+def test_ws_agent_user_denied_allows_graceful_response(pg_db):
     """error: user_denied is fed to the agent; it should respond, not crash."""
     with TestClient(app) as client:
         _install_upstream(
@@ -258,7 +258,7 @@ def test_ws_agent_user_denied_allows_graceful_response():
 # ---------------------------------------------------------------------------
 
 
-def test_ws_agent_plan_mode_blocks_write_tools():
+def test_ws_agent_plan_mode_blocks_write_tools(pg_db):
     """In plan mode, write_file is not forwarded as tool_call to the client."""
     with TestClient(app) as client:
         _install_upstream(
@@ -283,7 +283,7 @@ def test_ws_agent_plan_mode_blocks_write_tools():
     assert not any(m["type"] == "tool_call" for m in msgs)
 
 
-def test_ws_agent_plan_mode_allows_read_tools():
+def test_ws_agent_plan_mode_allows_read_tools(pg_db):
     """In plan mode, read_file is still forwarded as tool_call."""
     with TestClient(app) as client:
         _install_upstream(
@@ -314,7 +314,7 @@ def test_ws_agent_plan_mode_allows_read_tools():
 # ---------------------------------------------------------------------------
 
 
-def test_ws_agent_update_permission_mode_sends_ack():
+def test_ws_agent_update_permission_mode_sends_ack(pg_db):
     with TestClient(app) as client:
         _install_upstream(_stream_handler(["ok"]))
         with client.websocket_connect("/ws/agent", headers=AUTH) as ws:
@@ -327,7 +327,7 @@ def test_ws_agent_update_permission_mode_sends_ack():
             assert ack["mode"] == "auto"
 
 
-def test_ws_agent_permission_mode_update_affects_subsequent_turns():
+def test_ws_agent_permission_mode_update_affects_subsequent_turns(pg_db):
     """Mode update to 'plan' mid-session blocks write tools on next turn."""
     # First turn: auto mode → write_file forwarded as tool_call
     # Second turn: after updating to plan → write_file blocked

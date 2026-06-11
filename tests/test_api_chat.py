@@ -101,6 +101,11 @@ async def client(pg_db):
             base_url="http://testserver",
         ) as c,
     ):
+        # Several tests anchor conversations at an ancient `ts=1000`, putting
+        # `expires_at` in the past. Stop the background ConversationSweepScheduler
+        # so it can't race the test and DELETE those rows mid-request.
+        if app.state.conversation_sweeper is not None:
+            await app.state.conversation_sweeper.stop()
         yield c
 
 
@@ -169,7 +174,7 @@ async def test_api_chat_creates_new_conversation_when_none_provided(
     assert convo is not None
     assert convo.channel == "web"
     assert convo.title == "hi"
-    msgs = await messages.list_by_conversation(app.state.db, conv_id)
+    msgs = await messages.list_by_conversation(app.state.db, conv_id, user_id=1)
     assert [(m.role, m.content) for m in msgs] == [
         ("user", "hi"),
         ("assistant", "hello back"),
@@ -291,7 +296,7 @@ async def test_api_chat_continues_existing_conversation(
 
     events = _parse_sse(body)
     assert events[0][1]["conversation_id"] == convo.id
-    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    msgs = await messages.list_by_conversation(app.state.db, convo.id, user_id=1)
     assert [(m.role, m.content) for m in msgs] == [
         ("user", "round 2"),
         ("assistant", "ack"),
@@ -424,7 +429,7 @@ async def test_api_chat_rejects_non_web_conversation(
     )
     assert response.status_code == 400
     # Nothing should have been written into the task conversation.
-    msgs = await messages.list_by_conversation(app.state.db, task_convo.id)
+    msgs = await messages.list_by_conversation(app.state.db, task_convo.id, user_id=1)
     assert msgs == []
 
 
@@ -470,13 +475,14 @@ async def test_api_chat_uses_active_credential_model(
     ct = app.state.encryptor.encrypt("sk-x")
     row = await repo.create_api_key(
         app.state.db,
+        user_id=1,
         provider="openai",
         display_name="t",
         base_url=None,
         ciphertext=ct,
     )
-    await repo.set_model(app.state.db, row.id, "gpt-99-custom")
-    await repo.activate(app.state.db, row.id)
+    await repo.set_model(app.state.db, row.id, "gpt-99-custom", user_id=1)
+    await repo.activate(app.state.db, row.id, user_id=1)
 
     async with client.stream(
         "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
@@ -739,7 +745,7 @@ async def test_api_chat_emits_cancelled_terminal_when_event_set_during_run(
     session_evt = dict(events).get("session")
     assert session_evt is not None
     msgs = await messages.list_by_conversation(
-        app.state.db, session_evt["conversation_id"]
+        app.state.db, session_evt["conversation_id"], user_id=1
     )
     assert [(m.role, m.content) for m in msgs] == [("user", "hi")]
 
@@ -777,10 +783,11 @@ async def test_retry_replaces_last_assistant_turn(
     same user message, streaming with the same SSE semantics as /api/chat."""
     convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     await messages.append(
-        app.state.db, conversation_id=convo.id, role="user", content="ask", ts=1001
+        app.state.db, user_id=1, conversation_id=convo.id, role="user", content="ask", ts=1001
     )
     await messages.append(
         app.state.db,
+        user_id=1,
         conversation_id=convo.id,
         role="assistant",
         content="old answer",
@@ -803,7 +810,7 @@ async def test_retry_replaces_last_assistant_turn(
     assert events[2][1]["content"] == "new answer"
 
     # The old assistant turn is gone; the user message stays, new reply appended.
-    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    msgs = await messages.list_by_conversation(app.state.db, convo.id, user_id=1)
     assert [(m.role, m.content) for m in msgs] == [
         ("user", "ask"),
         ("assistant", "new answer"),
@@ -818,10 +825,11 @@ async def test_retry_drops_tool_turns_after_last_user_message(
 ) -> None:
     convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     await messages.append(
-        app.state.db, conversation_id=convo.id, role="user", content="ask", ts=1001
+        app.state.db, user_id=1, conversation_id=convo.id, role="user", content="ask", ts=1001
     )
     await messages.append(
         app.state.db,
+        user_id=1,
         conversation_id=convo.id,
         role="assistant",
         content="",
@@ -831,6 +839,7 @@ async def test_retry_drops_tool_turns_after_last_user_message(
     )
     await messages.append(
         app.state.db,
+        user_id=1,
         conversation_id=convo.id,
         role="tool",
         content="saved",
@@ -839,6 +848,7 @@ async def test_retry_drops_tool_turns_after_last_user_message(
     )
     await messages.append(
         app.state.db,
+        user_id=1,
         conversation_id=convo.id,
         role="assistant",
         content="done earlier",
@@ -854,7 +864,7 @@ async def test_retry_drops_tool_turns_after_last_user_message(
             body += chunk
         assert response.status_code == 200
 
-    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    msgs = await messages.list_by_conversation(app.state.db, convo.id, user_id=1)
     assert [(m.role, m.content) for m in msgs] == [
         ("user", "ask"),
         ("assistant", "regenerated"),
@@ -869,6 +879,7 @@ async def test_retry_rejects_conversation_without_user_message(
     convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     await messages.append(
         app.state.db,
+        user_id=1,
         conversation_id=convo.id,
         role="assistant",
         content="orphan",
@@ -881,7 +892,7 @@ async def test_retry_rejects_conversation_without_user_message(
     )
     assert response.status_code == 400
     # Nothing was deleted.
-    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    msgs = await messages.list_by_conversation(app.state.db, convo.id, user_id=1)
     assert [m.content for m in msgs] == ["orphan"]
 
 
@@ -890,10 +901,11 @@ async def test_retry_rejects_non_web_conversation(
 ) -> None:
     convo = await conversations.create(app.state.db, user_id=1, channel="task", ts=1000)
     await messages.append(
-        app.state.db, conversation_id=convo.id, role="user", content="hi", ts=1001
+        app.state.db, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
     await messages.append(
         app.state.db,
+        user_id=1,
         conversation_id=convo.id,
         role="assistant",
         content="reply",
@@ -906,7 +918,7 @@ async def test_retry_rejects_non_web_conversation(
     )
     assert response.status_code == 400
     # The task conversation is untouched.
-    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    msgs = await messages.list_by_conversation(app.state.db, convo.id, user_id=1)
     assert [(m.role, m.content) for m in msgs] == [
         ("user", "hi"),
         ("assistant", "reply"),
@@ -942,10 +954,11 @@ async def test_edit_last_user_message_regenerates(
     tail, and regenerates from the edited content with /api/chat SSE semantics."""
     convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     user = await messages.append(
-        app.state.db, conversation_id=convo.id, role="user", content="old ask", ts=1001
+        app.state.db, user_id=1, conversation_id=convo.id, role="user", content="old ask", ts=1001
     )
     await messages.append(
         app.state.db,
+        user_id=1,
         conversation_id=convo.id,
         role="assistant",
         content="old answer",
@@ -967,7 +980,7 @@ async def test_edit_last_user_message_regenerates(
     assert events[0][1]["conversation_id"] == convo.id
     assert events[2][1]["content"] == "new answer"
 
-    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    msgs = await messages.list_by_conversation(app.state.db, convo.id, user_id=1)
     assert [(m.role, m.content) for m in msgs] == [
         ("user", "new ask"),
         ("assistant", "new answer"),
@@ -982,16 +995,16 @@ async def test_edit_earlier_user_message_drops_everything_after(
 ) -> None:
     convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     first = await messages.append(
-        app.state.db, conversation_id=convo.id, role="user", content="first", ts=1001
+        app.state.db, user_id=1, conversation_id=convo.id, role="user", content="first", ts=1001
     )
     await messages.append(
-        app.state.db, conversation_id=convo.id, role="assistant", content="r1", ts=1002
+        app.state.db, user_id=1, conversation_id=convo.id, role="assistant", content="r1", ts=1002
     )
     await messages.append(
-        app.state.db, conversation_id=convo.id, role="user", content="second", ts=1003
+        app.state.db, user_id=1, conversation_id=convo.id, role="user", content="second", ts=1003
     )
     await messages.append(
-        app.state.db, conversation_id=convo.id, role="assistant", content="r2", ts=1004
+        app.state.db, user_id=1, conversation_id=convo.id, role="assistant", content="r2", ts=1004
     )
     seen = _install_upstream_responses([_assistant_oneshot("regenerated")])
 
@@ -1003,7 +1016,7 @@ async def test_edit_earlier_user_message_drops_everything_after(
             body += chunk
         assert response.status_code == 200
 
-    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    msgs = await messages.list_by_conversation(app.state.db, convo.id, user_id=1)
     assert [(m.role, m.content) for m in msgs] == [
         ("user", "edited first"),
         ("assistant", "regenerated"),
@@ -1017,10 +1030,10 @@ async def test_edit_rejects_assistant_message(
 ) -> None:
     convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     await messages.append(
-        app.state.db, conversation_id=convo.id, role="user", content="ask", ts=1001
+        app.state.db, user_id=1, conversation_id=convo.id, role="user", content="ask", ts=1001
     )
     assistant = await messages.append(
-        app.state.db, conversation_id=convo.id, role="assistant", content="reply", ts=1002
+        app.state.db, user_id=1, conversation_id=convo.id, role="assistant", content="reply", ts=1002
     )
     _install_upstream_responses([_assistant_oneshot("never reached")])
 
@@ -1029,7 +1042,7 @@ async def test_edit_rejects_assistant_message(
     )
     assert response.status_code == 400
     # Nothing changed.
-    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    msgs = await messages.list_by_conversation(app.state.db, convo.id, user_id=1)
     assert [(m.role, m.content) for m in msgs] == [
         ("user", "ask"),
         ("assistant", "reply"),
@@ -1042,7 +1055,7 @@ async def test_edit_rejects_message_from_other_conversation(
     convo_a = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     convo_b = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     user_b = await messages.append(
-        app.state.db, conversation_id=convo_b.id, role="user", content="b ask", ts=1001
+        app.state.db, user_id=1, conversation_id=convo_b.id, role="user", content="b ask", ts=1001
     )
     _install_upstream_responses([_assistant_oneshot("never reached")])
 
@@ -1051,7 +1064,7 @@ async def test_edit_rejects_message_from_other_conversation(
         _edit_url(convo_a.id, user_b.id), headers=AUTH, json={"content": "x"}
     )
     assert response.status_code == 404
-    msgs = await messages.list_by_conversation(app.state.db, convo_b.id)
+    msgs = await messages.list_by_conversation(app.state.db, convo_b.id, user_id=1)
     assert [m.content for m in msgs] == ["b ask"]
 
 
@@ -1060,7 +1073,7 @@ async def test_edit_rejects_non_web_conversation(
 ) -> None:
     convo = await conversations.create(app.state.db, user_id=1, channel="task", ts=1000)
     user = await messages.append(
-        app.state.db, conversation_id=convo.id, role="user", content="hi", ts=1001
+        app.state.db, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
     _install_upstream_responses([_assistant_oneshot("never reached")])
 
@@ -1068,7 +1081,7 @@ async def test_edit_rejects_non_web_conversation(
         _edit_url(convo.id, user.id), headers=AUTH, json={"content": "x"}
     )
     assert response.status_code == 400
-    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    msgs = await messages.list_by_conversation(app.state.db, convo.id, user_id=1)
     assert [m.content for m in msgs] == ["hi"]
 
 
@@ -1098,7 +1111,7 @@ async def test_edit_rejects_empty_content(
 ) -> None:
     convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     user = await messages.append(
-        app.state.db, conversation_id=convo.id, role="user", content="ask", ts=1001
+        app.state.db, user_id=1, conversation_id=convo.id, role="user", content="ask", ts=1001
     )
     _install_upstream_responses([_assistant_oneshot("never reached")])
     response = await client.post(
@@ -1106,7 +1119,7 @@ async def test_edit_rejects_empty_content(
     )
     # Empty content fails the declared-body validation → FastAPI 422.
     assert response.status_code == 422
-    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    msgs = await messages.list_by_conversation(app.state.db, convo.id, user_id=1)
     assert [m.content for m in msgs] == ["ask"]
 
 

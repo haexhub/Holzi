@@ -159,7 +159,7 @@ async def test_api_chat_writes_success_run_row(client: httpx.AsyncClient) -> Non
     run_id = events["run"]["run_id"]
     conv_id = events["session"]["conversation_id"]
 
-    row = await runs.get(app.state.db, run_id)
+    row = await runs.get(app.state.db, run_id, user_id=1)
     assert row is not None
     assert row.id == run_id
     assert row.conversation_id == conv_id
@@ -188,7 +188,7 @@ async def test_api_chat_writes_success_row_without_usage(
             body += chunk
 
     run_id = dict(_parse_sse(body))["run"]["run_id"]
-    row = await runs.get(app.state.db, run_id)
+    row = await runs.get(app.state.db, run_id, user_id=1)
     assert row is not None
     assert row.status == "success"
     assert row.input_tokens is None
@@ -219,7 +219,7 @@ async def test_api_chat_writes_error_row_on_upstream_timeout(
             body += chunk
 
     run_id = dict(_parse_sse(body))["run"]["run_id"]
-    row = await runs.get(app.state.db, run_id)
+    row = await runs.get(app.state.db, run_id, user_id=1)
     assert row is not None
     assert row.status == "error"
     assert row.error_code == "upstream_timeout"
@@ -247,7 +247,7 @@ async def test_api_chat_writes_error_row_on_upstream_unreachable(
             body += chunk
 
     run_id = dict(_parse_sse(body))["run"]["run_id"]
-    row = await runs.get(app.state.db, run_id)
+    row = await runs.get(app.state.db, run_id, user_id=1)
     assert row is not None
     assert row.status == "error"
     assert row.error_code == "upstream_unreachable"
@@ -289,7 +289,7 @@ async def test_api_chat_writes_cancelled_row_when_event_set(
     events = dict(_parse_sse(body))
     assert "cancelled" in events
     run_id = events["run"]["run_id"]
-    row = await runs.get(app.state.db, run_id)
+    row = await runs.get(app.state.db, run_id, user_id=1)
     assert row is not None
     assert row.status == "cancelled"
     assert row.finished_at is not None
@@ -426,13 +426,14 @@ async def test_runs_repository_insert_and_finalize(conn) -> None:
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await runs.insert(
         conn,
+        user_id=1,
         run_id="r1",
         conversation_id=convo.id,
         channel="web",
         model="m",
         started_at=1000,
     )
-    row = await runs.get(conn, "r1")
+    row = await runs.get(conn, "r1", user_id=1)
     assert row is not None
     assert row.status == "running"
     assert row.finished_at is None
@@ -440,12 +441,13 @@ async def test_runs_repository_insert_and_finalize(conn) -> None:
     await runs.finalize(
         conn,
         "r1",
+        user_id=1,
         status="success",
         finished_at=1100,
         input_tokens=5,
         output_tokens=7,
     )
-    row = await runs.get(conn, "r1")
+    row = await runs.get(conn, "r1", user_id=1)
     assert row is not None
     assert row.status == "success"
     assert row.finished_at == 1100
@@ -457,6 +459,7 @@ async def test_runs_repository_finalize_with_error(conn) -> None:
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await runs.insert(
         conn,
+        user_id=1,
         run_id="r1",
         conversation_id=convo.id,
         channel="web",
@@ -466,13 +469,14 @@ async def test_runs_repository_finalize_with_error(conn) -> None:
     await runs.finalize(
         conn,
         "r1",
+        user_id=1,
         status="error",
         finished_at=1050,
         error_code="upstream_timeout",
         error_message="too slow",
         error_trace="Traceback...",
     )
-    row = await runs.get(conn, "r1")
+    row = await runs.get(conn, "r1", user_id=1)
     assert row is not None
     assert row.status == "error"
     assert row.error_code == "upstream_timeout"
@@ -486,23 +490,25 @@ async def test_runs_finalize_does_not_clobber_terminal_row(conn) -> None:
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await runs.insert(
         conn,
+        user_id=1,
         run_id="r1",
         conversation_id=convo.id,
         channel="web",
         model="m",
         started_at=1000,
     )
-    await runs.finalize(conn, "r1", status="success", finished_at=1100)
+    await runs.finalize(conn, "r1", user_id=1, status="success", finished_at=1100)
     # Late/duplicate finalize (e.g. a racing cancel path) must be ignored.
     await runs.finalize(
         conn,
         "r1",
+        user_id=1,
         status="error",
         finished_at=2000,
         error_code="agent_error",
         error_message="should not stick",
     )
-    row = await runs.get(conn, "r1")
+    row = await runs.get(conn, "r1", user_id=1)
     assert row is not None
     assert row.status == "success"
     assert row.finished_at == 1100
@@ -522,24 +528,25 @@ async def test_runs_repository_list_filters(conn) -> None:
         rid = f"r{i}"
         await runs.insert(
             conn,
+            user_id=1,
             run_id=rid,
             conversation_id=cid,
             channel=channel,
             model="m",
             started_at=1000 + i,
         )
-        await runs.finalize(conn, rid, status=status, finished_at=1100 + i)
+        await runs.finalize(conn, rid, user_id=1, status=status, finished_at=1100 + i)
 
-    all_rows = await runs.list_runs(conn)
+    all_rows = await runs.list_runs(conn, user_id=1)
     assert {r.id for r in all_rows} == {"r0", "r1", "r2"}
 
-    only_c1 = await runs.list_runs(conn, conversation_id=c1.id)
+    only_c1 = await runs.list_runs(conn, user_id=1, conversation_id=c1.id)
     assert {r.id for r in only_c1} == {"r0", "r1"}
 
-    only_errors = await runs.list_runs(conn, status="error")
+    only_errors = await runs.list_runs(conn, user_id=1, status="error")
     assert {r.id for r in only_errors} == {"r1"}
 
-    page = await runs.list_runs(conn, limit=2)
+    page = await runs.list_runs(conn, user_id=1, limit=2)
     assert len(page) == 2
     # Newest-first.
     assert page[0].started_at >= page[1].started_at
@@ -567,6 +574,6 @@ async def test_cancel_endpoint_flips_event_and_run_finalises_to_cancelled(
         assert resp.status_code == 204
         assert evt.is_set()
         # No agent_runs row was ever inserted for this fabricated run.
-        assert await runs.get(app.state.db, "never-existed") is None
+        assert await runs.get(app.state.db, "never-existed", user_id=1) is None
     finally:
         app.state.chat_runs.pop("never-existed", None)

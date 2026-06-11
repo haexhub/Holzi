@@ -251,7 +251,7 @@ async def test_mcp_install_redacts_event_and_persisted_records(
     # (b) persisted message rows (assistant tool_calls + tool args) redacted.
     session_evt = next(d for n, d in events if n == "session")
     conv_id = session_evt["conversation_id"]
-    rows = await messages.list_by_conversation(app.state.db, conv_id)
+    rows = await messages.list_by_conversation(app.state.db, conv_id, user_id=1)
     meta_blob = "\n".join(r.meta_json for r in rows if r.meta_json)
     assert SECRET_CRED not in meta_blob
     assert SECRET_ENV not in meta_blob

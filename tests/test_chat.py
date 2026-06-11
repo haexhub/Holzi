@@ -68,6 +68,8 @@ async def client(pg_db):
             base_url="http://testserver",
         ) as c,
     ):
+        if app.state.conversation_sweeper is not None:
+            await app.state.conversation_sweeper.stop()
         yield c
 
 
@@ -96,7 +98,7 @@ async def test_chat_completions_non_streaming_creates_conversation_and_persists(
     assert response.json()["choices"][0]["message"]["content"] == "hello back"
     session_id = int(response.headers["x-hermes-session"])
 
-    msgs = await messages.list_by_conversation(app.state.db, session_id)
+    msgs = await messages.list_by_conversation(app.state.db, session_id, user_id=1)
     assert [m.role for m in msgs] == ["user", "assistant"]
     assert [m.content for m in msgs] == ["hi", "hello back"]
 
@@ -118,7 +120,7 @@ async def test_chat_completions_uses_existing_session_header(
     assert response.status_code == 200
     assert int(response.headers["x-hermes-session"]) == convo.id
 
-    msgs = await messages.list_by_conversation(app.state.db, convo.id)
+    msgs = await messages.list_by_conversation(app.state.db, convo.id, user_id=1)
     assert [m.content for m in msgs] == ["round 2", "canned reply"]
 
 
@@ -180,7 +182,7 @@ async def test_chat_completions_streaming_passes_sse_and_persists(
     assert b"data: [DONE]" in body
     assert b"Hello" in body and b"world" in body
 
-    msgs = await messages.list_by_conversation(app.state.db, session_id)
+    msgs = await messages.list_by_conversation(app.state.db, session_id, user_id=1)
     assert [m.role for m in msgs] == ["user", "assistant"]
     assert msgs[1].content == "Hello world"
 
@@ -299,7 +301,7 @@ async def test_chat_completions_sticky_session_resumes_same_workspace(
     assert r2.status_code == 200
     assert int(r2.headers["x-hermes-session"]) == session_id
 
-    msgs = await messages.list_by_conversation(app.state.db, session_id)
+    msgs = await messages.list_by_conversation(app.state.db, session_id, user_id=1)
     assert [m.content for m in msgs] == ["hello", "first", "follow-up", "second"]
 
 

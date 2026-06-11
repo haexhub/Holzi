@@ -71,10 +71,11 @@ async def test_models_anthropic_oauth_uses_curated_list(
 
     ct = app.state.encryptor.encrypt("fake-creds")
     row = await repo.create_oauth_pending(
-        app.state.db, display_name="claude-oauth"
+        app.state.db, user_id=1, display_name="claude-oauth"
     )
     await repo.update_oauth_authorized(
         app.state.db,
+        user_id=1,
         cred_id=row.id,
         ciphertext=EncryptedBlob(iv=ct.iv, tag=ct.tag, data=ct.data),
         authorized_at=1,
