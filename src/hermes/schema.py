@@ -517,9 +517,8 @@ users = Table(
 
 
 # Plan 35 §C1: per-request bearer is a SESSION token (sha256-hashed at rest).
-# token_hash is UNIQUE; expires_at NULL = never. New table → created by
-# metadata.create_all on fresh DBs; only its non-UNIQUE index needs an
-# explicit CREATE INDEX IF NOT EXISTS in _apply_lightweight_migrations.
+# token_hash is UNIQUE; expires_at NULL = never. New table → created (with its
+# index below) by metadata.create_all on both fresh and existing DBs.
 sessions = Table(
     "sessions",
     metadata,
@@ -536,3 +535,4 @@ sessions = Table(
     Column("last_used_at", Integer),
     Column("expires_at", Integer),  # NULL = never
 )
+Index("sessions_user", sessions.c.user_id)

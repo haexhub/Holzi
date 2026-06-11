@@ -40,5 +40,21 @@ async def test_resolver_rejects_expired_session(conn) -> None:
     assert await SessionResolver(conn).resolve(token) is None
 
 
+async def test_resolver_resolves_far_future_session(conn) -> None:
+    token = "future-xyz"
+    async with conn.begin() as db:
+        await db.execute(
+            text("INSERT INTO users(id, role, bootstrap_completed, created_at) "
+                 "VALUES (9, 'member', 0, 0)")
+        )
+        await db.execute(
+            text("INSERT INTO sessions(user_id, token_hash, created_at, expires_at) "
+                 "VALUES (9, :h, 0, 9999999999)"),
+            {"h": hash_token(token)},
+        )
+    ident = await SessionResolver(conn).resolve(token)
+    assert ident == Identity(user_id=9, role="member")
+
+
 async def test_resolver_returns_none_for_unknown_token(conn) -> None:
     assert await SessionResolver(conn).resolve("nope") is None

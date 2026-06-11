@@ -164,9 +164,9 @@ async def _apply_lightweight_migrations(conn) -> None:
             text("ALTER TABLE agent_runs ADD COLUMN agent_task_id INTEGER")
         )
 
-    # Plan 35 §C1: extend the minimal `users` table with identity columns.
-    # The `sessions` table itself is auto-created by metadata.create_all;
-    # only the existing-DB ALTERs + the non-UNIQUE index need handling here.
+    # Plan 35 §C1: extend the minimal `users` table with identity columns on
+    # existing DBs. The `sessions` table + its index are auto-created by
+    # metadata.create_all, so only these ALTERs need handling here.
     cols = await conn.execute(text("PRAGMA table_info(users)"))
     existing = {row[1] for row in cols.all()}
     if "email" not in existing:
@@ -179,10 +179,6 @@ async def _apply_lightweight_migrations(conn) -> None:
         await conn.execute(text("UPDATE users SET role = 'admin' WHERE id = 1"))
     if "parent_user_id" not in existing:
         await conn.execute(text("ALTER TABLE users ADD COLUMN parent_user_id INTEGER"))
-
-    await conn.execute(
-        text("CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id)")
-    )
 
 
 def _split_statements(sql: str) -> list[str]:
