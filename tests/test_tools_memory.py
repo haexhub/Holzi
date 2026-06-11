@@ -37,15 +37,17 @@ async def test_build_memory_tools_returns_expected_catalog(
 async def test_recall_memory_finds_messages_and_notes(
     conn: AsyncEngine,
 ) -> None:
-    convo = await conversations.create(conn, channel="task", ts=1)
+    convo = await conversations.create(conn, user_id=1, channel="task", ts=1)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="reschedule standup", ts=10
     )
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="buy milk", ts=20
     )
-    await notes.upsert(conn, key="standup.tips", content="rotate facilitator weekly", ts=5)
-    await notes.upsert(conn, key="other", content="unrelated", ts=6)
+    await notes.upsert(
+        conn, user_id=1, key="standup.tips", content="rotate facilitator weekly", ts=5
+    )
+    await notes.upsert(conn, user_id=1, key="other", content="unrelated", ts=6)
 
     tool = _by_name(build_memory_tools(conn), "recall_memory")
     payload = await tool.handler({"query": "standup"})
@@ -56,7 +58,7 @@ async def test_recall_memory_finds_messages_and_notes(
 
 
 async def test_recall_memory_respects_limit(conn: AsyncEngine) -> None:
-    convo = await conversations.create(conn, channel="task", ts=1)
+    convo = await conversations.create(conn, user_id=1, channel="task", ts=1)
     for i in range(5):
         await messages.append(
             conn, conversation_id=convo.id, role="user", content="alpha", ts=i + 10
@@ -74,8 +76,8 @@ async def test_recall_memory_respects_limit(conn: AsyncEngine) -> None:
 async def test_list_conversations_returns_all_with_message_count(
     conn: AsyncEngine,
 ) -> None:
-    a = await conversations.create(conn, channel="task", title="A", ts=1)
-    b = await conversations.create(conn, channel="web", title="B", ts=3)
+    a = await conversations.create(conn, user_id=1, channel="task", title="A", ts=1)
+    b = await conversations.create(conn, user_id=1, channel="web", title="B", ts=3)
     await messages.append(conn, conversation_id=a.id, role="user", content="x", ts=10)
     await messages.append(conn, conversation_id=a.id, role="assistant", content="y", ts=11)
     await messages.append(conn, conversation_id=b.id, role="user", content="z", ts=12)
@@ -94,9 +96,9 @@ async def test_list_conversations_returns_all_with_message_count(
 async def test_list_conversations_can_filter_by_channel(
     conn: AsyncEngine,
 ) -> None:
-    await conversations.create(conn, channel="task", ts=1)
-    await conversations.create(conn, channel="web", ts=2)
-    await conversations.create(conn, channel="task", ts=3)
+    await conversations.create(conn, user_id=1, channel="task", ts=1)
+    await conversations.create(conn, user_id=1, channel="web", ts=2)
+    await conversations.create(conn, user_id=1, channel="task", ts=3)
 
     tool = _by_name(build_memory_tools(conn), "list_conversations")
     payload = await tool.handler({"channel": "task"})
@@ -111,7 +113,7 @@ async def test_list_conversations_can_filter_by_channel(
 async def test_get_conversation_returns_metadata_and_messages(
     conn: AsyncEngine,
 ) -> None:
-    convo = await conversations.create(conn, channel="task", title="t", ts=1)
+    convo = await conversations.create(conn, user_id=1, channel="task", title="t", ts=1)
     await messages.append(conn, conversation_id=convo.id, role="user", content="a", ts=10)
     await messages.append(conn, conversation_id=convo.id, role="assistant", content="b", ts=11)
 
@@ -166,7 +168,7 @@ async def test_get_note_returns_null_for_missing(
 async def test_get_note_returns_stored_note(
     conn: AsyncEngine,
 ) -> None:
-    await notes.upsert(conn, key="k", content="hello", tags="x,y", ts=1)
+    await notes.upsert(conn, user_id=1, key="k", content="hello", tags="x,y", ts=1)
     tool = _by_name(build_memory_tools(conn), "get_note")
     data = json.loads(await tool.handler({"key": "k"}))
     assert data["content"] == "hello"
@@ -174,8 +176,8 @@ async def test_get_note_returns_stored_note(
 
 
 async def test_find_notes_returns_matches(conn: AsyncEngine) -> None:
-    await notes.upsert(conn, key="a", content="standup notes", ts=1)
-    await notes.upsert(conn, key="b", content="grocery", ts=2)
+    await notes.upsert(conn, user_id=1, key="a", content="standup notes", ts=1)
+    await notes.upsert(conn, user_id=1, key="b", content="grocery", ts=2)
 
     tool = _by_name(build_memory_tools(conn), "find_notes")
     data = json.loads(await tool.handler({"query": "standup"}))
@@ -183,9 +185,9 @@ async def test_find_notes_returns_matches(conn: AsyncEngine) -> None:
 
 
 async def test_find_notes_filters_by_tags(conn: AsyncEngine) -> None:
-    await notes.upsert(conn, key="a", content="something", tags="urgent,work", ts=1)
-    await notes.upsert(conn, key="b", content="something else", tags="urgent", ts=2)
-    await notes.upsert(conn, key="c", content="another", tags="later", ts=3)
+    await notes.upsert(conn, user_id=1, key="a", content="something", tags="urgent,work", ts=1)
+    await notes.upsert(conn, user_id=1, key="b", content="something else", tags="urgent", ts=2)
+    await notes.upsert(conn, user_id=1, key="c", content="another", tags="later", ts=3)
 
     tool = _by_name(build_memory_tools(conn), "find_notes")
     data = json.loads(await tool.handler({"query": "something", "tags": ["work"]}))

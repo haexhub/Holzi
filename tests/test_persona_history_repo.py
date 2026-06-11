@@ -46,6 +46,7 @@ async def test_write_snapshot_returns_row_with_json_body(
     # Need a real persona FK target — create one via the personas repo.
     persona = await personas_repo.create(
         conn,
+        user_id=1,
         name="Hermes",
         soul="be calm",
         identity="be useful",
@@ -75,6 +76,7 @@ async def test_write_snapshot_returns_row_with_json_body(
 async def test_write_snapshot_default_author(conn: AsyncEngine) -> None:
     persona = await personas_repo.create(
         conn,
+        user_id=1,
         name="A",
         soul="",
         identity="i",
@@ -90,6 +92,7 @@ async def test_write_snapshot_default_author(conn: AsyncEngine) -> None:
 async def test_write_snapshot_explicit_author(conn: AsyncEngine) -> None:
     persona = await personas_repo.create(
         conn,
+        user_id=1,
         name="A",
         soul="",
         identity="i",
@@ -107,6 +110,7 @@ async def test_write_snapshot_explicit_author(conn: AsyncEngine) -> None:
 async def test_list_for_persona_newest_first(conn: AsyncEngine) -> None:
     persona = await personas_repo.create(
         conn,
+        user_id=1,
         name="A",
         soul="",
         identity="i0",

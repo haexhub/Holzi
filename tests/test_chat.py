@@ -105,7 +105,7 @@ async def test_chat_completions_uses_existing_session_header(
     client: httpx.AsyncClient,
 ) -> None:
     _install_upstream(_non_stream_handler())
-    convo = await conversations.create(app.state.db, channel="vscode", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="vscode", ts=1000)
 
     response = await client.post(
         "/v1/chat/completions",
@@ -350,7 +350,7 @@ async def test_chat_completions_explicit_session_overrides_sticky(
     )
     sticky_id = int(r1.headers["x-hermes-session"])
 
-    other = await conversations.create(app.state.db, channel="cline", ts=1000)
+    other = await conversations.create(app.state.db, user_id=1, channel="cline", ts=1000)
 
     _install_upstream(_non_stream_handler())
     r2 = await client.post(

@@ -77,7 +77,7 @@ def _mock_upstream(handler) -> httpx.AsyncClient:
 async def test_run_agent_with_on_chunk_streams_each_text_delta(
     conn: AsyncEngine,
 ) -> None:
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -109,7 +109,7 @@ async def test_run_agent_with_on_chunk_streams_each_text_delta(
 async def test_run_agent_with_on_chunk_sets_stream_true_on_upstream(
     conn: AsyncEngine,
 ) -> None:
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -148,7 +148,7 @@ async def test_run_agent_streaming_requests_usage_when_metrics_provided(
     """When the caller passes a `metrics` dict, the upstream streaming
     request must opt into usage reporting via stream_options — otherwise
     OpenAI-compatible providers omit the terminal usage chunk."""
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -184,7 +184,7 @@ async def test_run_agent_streaming_requests_usage_when_metrics_provided(
 async def test_run_agent_streaming_handles_tool_call_round(
     conn: AsyncEngine,
 ) -> None:
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="echo me", ts=1001
     )
@@ -259,7 +259,7 @@ async def test_run_agent_streaming_raises_on_truncated_stream(
 ) -> None:
     """If the upstream connection drops before [DONE], the partial text must
     not be silently persisted as a completed assistant turn."""
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -304,7 +304,7 @@ async def test_run_agent_streaming_accepts_finish_reason_as_terminal(
 ) -> None:
     """Some providers don't emit `[DONE]` but do set finish_reason on the
     last chunk — that should also count as a clean completion."""
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -347,7 +347,7 @@ async def test_run_agent_raises_cancelled_if_event_set_before_upstream(
 
     from hermes.agent import ChatRunCancelled
 
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -398,7 +398,7 @@ async def test_run_agent_raises_cancelled_after_stream_chunk(
 
     from hermes.agent import ChatRunCancelled
 
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -442,7 +442,7 @@ async def test_run_agent_raises_cancelled_before_tool_execution(
 
     from hermes.agent import ChatRunCancelled
 
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -516,7 +516,7 @@ async def test_run_agent_without_on_chunk_stays_non_streaming(
 ) -> None:
     """Backwards-compat: callers without on_chunk (Signal worker, MCP, tests)
     keep getting the JSON-response path."""
-    convo = await conversations.create(conn, channel="task", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -558,7 +558,7 @@ async def test_run_agent_streaming_emits_tool_callbacks_and_persists_metadata(
     """A tool round fires on_tool_call before execution and on_tool_result
     after, and persists name/arguments/status in the tool message's meta_json
     so the conversation can be reconstructed on reload."""
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="echo me", ts=1001
     )
@@ -630,7 +630,7 @@ async def test_run_agent_streaming_marks_tool_error_status(
 ) -> None:
     """A tool whose handler raises is reported with status=error to the
     callback and persisted as status=error."""
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="boom", ts=1001
     )
@@ -697,7 +697,7 @@ async def test_run_agent_streaming_forwards_and_persists_reasoning(
     """Reasoning deltas (`delta.reasoning_content`) are forwarded to the
     on_reasoning callback as they arrive and persisted on the assistant
     message's meta_json so the card can re-render on reload."""
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -749,7 +749,7 @@ async def test_run_agent_streaming_reasoning_field_fallback(
 ) -> None:
     """Some providers name the field `reasoning` rather than
     `reasoning_content`; both are accepted."""
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -783,7 +783,7 @@ async def test_run_agent_streaming_without_reasoning_leaves_meta_null(
 ) -> None:
     """A provider that emits no reasoning must leave the assistant turn
     exactly as before — no meta_json, no callback fired."""
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -819,7 +819,7 @@ async def test_run_agent_streaming_rejects_non_object_tool_arguments(
 ) -> None:
     """Valid JSON that isn't an object (e.g. a bare number) must produce a
     clean tool error, not flow a non-dict into the handler/persistence."""
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="go", ts=1001
     )

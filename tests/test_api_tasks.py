@@ -35,10 +35,10 @@ async def test_api_tasks_list_returns_nearest_due_first(
     client: httpx.AsyncClient,
 ) -> None:
     later = await agent_tasks.create(
-        app.state.db, title="later", prompt="x", due_at=2_000_000_000
+        app.state.db, user_id=1, title="later", prompt="x", due_at=2_000_000_000
     )
     earlier = await agent_tasks.create(
-        app.state.db, title="earlier", prompt="x", due_at=1_700_000_000
+        app.state.db, user_id=1, title="earlier", prompt="x", due_at=1_700_000_000
     )
 
     response = await client.get("/api/tasks", headers=AUTH)
@@ -152,6 +152,7 @@ async def test_api_tasks_patch_rejects_unknown_timezone(
 ) -> None:
     task = await agent_tasks.create(
         app.state.db,
+        user_id=1,
         title="t",
         prompt="x",
         schedule="0 8 * * *",
@@ -174,7 +175,7 @@ async def test_api_tasks_patch_pauses_and_resumes(
     client: httpx.AsyncClient,
 ) -> None:
     task = await agent_tasks.create(
-        app.state.db, title="t", prompt="x", due_at=2_000_000_000
+        app.state.db, user_id=1, title="t", prompt="x", due_at=2_000_000_000
     )
 
     paused = await client.patch(
@@ -194,7 +195,7 @@ async def test_api_tasks_patch_updates_prompt_and_title(
     client: httpx.AsyncClient,
 ) -> None:
     task = await agent_tasks.create(
-        app.state.db, title="old", prompt="old prompt", due_at=2_000_000_000
+        app.state.db, user_id=1, title="old", prompt="old prompt", due_at=2_000_000_000
     )
     response = await client.patch(
         f"/api/tasks/{task.id}",
@@ -211,7 +212,7 @@ async def test_api_tasks_patch_switches_one_shot_to_recurring(
     client: httpx.AsyncClient,
 ) -> None:
     task = await agent_tasks.create(
-        app.state.db, title="t", prompt="x", due_at=2_000_000_000
+        app.state.db, user_id=1, title="t", prompt="x", due_at=2_000_000_000
     )
     response = await client.patch(
         f"/api/tasks/{task.id}",
@@ -241,11 +242,11 @@ async def test_api_tasks_patch_missing_returns_404(
 
 async def test_api_tasks_delete_removes(client: httpx.AsyncClient) -> None:
     task = await agent_tasks.create(
-        app.state.db, title="t", prompt="x", due_at=2_000_000_000
+        app.state.db, user_id=1, title="t", prompt="x", due_at=2_000_000_000
     )
     response = await client.delete(f"/api/tasks/{task.id}", headers=AUTH)
     assert response.status_code == 204
-    assert await agent_tasks.get(app.state.db, task.id) is None
+    assert await agent_tasks.get(app.state.db, task.id, user_id=1) is None
 
 
 async def test_api_tasks_delete_missing_returns_404(
@@ -264,7 +265,7 @@ async def test_api_tasks_run_now_returns_queued(
     client: httpx.AsyncClient, monkeypatch,
 ) -> None:
     task = await agent_tasks.create(
-        app.state.db, title="t", prompt="x", due_at=2_000_000_000
+        app.state.db, user_id=1, title="t", prompt="x", due_at=2_000_000_000
     )
 
     # Stub scheduler.run_now so we don't actually drive a full agent

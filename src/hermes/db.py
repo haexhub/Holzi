@@ -128,6 +128,91 @@ async def _apply_lightweight_migrations(conn) -> None:
             ),
             {"window": settings.conversation_ttl_days * 86_400},
         )
+    # Plan 35 §C1: scope conversations by owning user. On a pre-C1 DB the
+    # column is missing (create_all won't ALTER an existing table); add it and
+    # backfill every legacy row to the seeded admin (id=1). The per-user index
+    # lives here (not in schema.py) so it's created AFTER the column exists on
+    # both fresh and existing DBs — see schema.py for the rationale.
+    if "user_id" not in existing:
+        await conn.execute(
+            text("ALTER TABLE conversations ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS conv_user_updated "
+            "ON conversations(user_id, updated_at DESC)"
+        )
+    )
+
+    # Plan 35 §C1: scope notes (the agent's memory store) by owning user.
+    # Same shape as conversations above — on a pre-C1 DB the column is
+    # missing (create_all won't ALTER an existing table); add it and backfill
+    # every legacy row to the seeded admin (id=1). The per-user index lives
+    # here (not in schema.py) so it's created AFTER the column exists on both
+    # fresh and existing DBs. We deliberately do NOT touch the old global
+    # `notes.key` unique index on existing DBs — SQLite can't easily drop it
+    # and for single-user C1 a stricter global-unique key is harmless.
+    cols = await conn.execute(text("PRAGMA table_info(notes)"))
+    notes_cols = {row[1] for row in cols.all()}
+    if "user_id" not in notes_cols:
+        await conn.execute(
+            text("ALTER TABLE notes ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS notes_user ON notes(user_id, updated_at DESC)")
+    )
+
+    # Plan 35 §C1: scope agent_tasks by owning user. Same shape as
+    # conversations/notes above — on a pre-C1 DB the column is missing
+    # (create_all won't ALTER an existing table); add it and backfill every
+    # legacy row to the seeded admin (id=1). The per-user index lives here
+    # (not in schema.py) so it's created AFTER the column exists on both fresh
+    # and existing DBs. The existing global `agent_tasks_enabled_due` index is
+    # kept untouched — the scheduler's GLOBAL `list_due` (serving every user)
+    # relies on it.
+    cols = await conn.execute(text("PRAGMA table_info(agent_tasks)"))
+    agent_tasks_cols = {row[1] for row in cols.all()}
+    if "user_id" not in agent_tasks_cols:
+        await conn.execute(
+            text("ALTER TABLE agent_tasks ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS agent_tasks_user_enabled_due "
+            "ON agent_tasks(user_id, enabled, due_at)"
+        )
+    )
+
+    # Plan 35 §C1: scope personas by owning user + make the single-default
+    # invariant PER user. Same column shape as conversations/notes/agent_tasks
+    # above (add + backfill to admin id=1 on a pre-C1 DB). The per-user index
+    # leads with `user_id, is_default` so `get_default(user_id=...)` is a
+    # covering lookup. NOTE: the global `personas.name` unique index from the
+    # old schema survives on existing DBs (harmless for single-user C1).
+    #
+    # The single-default TRIGGERs are the wrinkle: the OLD global versions
+    # already exist on a pre-C1 DB, so schema.sql's `CREATE TRIGGER IF NOT
+    # EXISTS` won't replace them. DROP them here (after the column exists) so
+    # schema.sql — applied AFTER this migration in init_db — recreates the
+    # per-user versions. Idempotent: harmless to DROP+recreate on every boot.
+    cols = await conn.execute(text("PRAGMA table_info(personas)"))
+    personas_cols = {row[1] for row in cols.all()}
+    if "user_id" not in personas_cols:
+        await conn.execute(
+            text("ALTER TABLE personas ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS personas_user_default "
+            "ON personas(user_id, is_default)"
+        )
+    )
+    await conn.execute(
+        text("DROP TRIGGER IF EXISTS personas_single_default_insert")
+    )
+    await conn.execute(
+        text("DROP TRIGGER IF EXISTS personas_single_default_update")
+    )
 
     # Plan 16: agent_tasks replaces reminders + todos. Drop the legacy tables
     # on upgrade so re-running metadata.create_all() doesn't recreate them
@@ -163,6 +248,22 @@ async def _apply_lightweight_migrations(conn) -> None:
         await conn.execute(
             text("ALTER TABLE agent_runs ADD COLUMN agent_task_id INTEGER")
         )
+
+    # Plan 35 §C1: extend the minimal `users` table with identity columns on
+    # existing DBs. The `sessions` table + its index are auto-created by
+    # metadata.create_all, so only these ALTERs need handling here.
+    cols = await conn.execute(text("PRAGMA table_info(users)"))
+    existing = {row[1] for row in cols.all()}
+    if "email" not in existing:
+        await conn.execute(text("ALTER TABLE users ADD COLUMN email TEXT"))
+    if "role" not in existing:
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'")
+        )
+        # The pre-existing single-user seed row (id=1) becomes the admin.
+        await conn.execute(text("UPDATE users SET role = 'admin' WHERE id = 1"))
+    if "parent_user_id" not in existing:
+        await conn.execute(text("ALTER TABLE users ADD COLUMN parent_user_id INTEGER"))
 
 
 def _split_statements(sql: str) -> list[str]:

@@ -25,7 +25,9 @@ def _recall_memory(db: AsyncEngine) -> Tool:
         limit = int(args.get("limit", 10))
 
         msg_hits = await messages.fts_search(db, query=query, limit=limit)
-        note_hits = await notes.find(db, query=query, limit=limit)
+        # TODO(Wave C): thread the agent's user_id into the tool catalog;
+        # scoped to the admin (id=1) until the catalog carries user context.
+        note_hits = await notes.find(db, user_id=1, query=query, limit=limit)
 
         return json.dumps(
             {
@@ -73,6 +75,10 @@ def _list_conversations(db: AsyncEngine) -> Tool:
 
         convos = await conversations.list_all(
             db,
+            # TODO(Wave C): thread the agent's user_id into the tool catalog.
+            # The catalog is currently built without per-user context, so the
+            # memory tools see the admin's (id=1) conversations only.
+            user_id=1,
             channel=channel if channel else None,
             since_unix=int(since_unix) if since_unix is not None else None,
             limit=limit,
@@ -80,7 +86,7 @@ def _list_conversations(db: AsyncEngine) -> Tool:
 
         out: list[dict[str, Any]] = []
         for c in convos:
-            count = await conversations.message_count(db, c.id)
+            count = await conversations.message_count(db, c.id, user_id=1)
             out.append(
                 {
                     "id": c.id,
@@ -123,7 +129,9 @@ def _get_conversation(db: AsyncEngine) -> Tool:
         conv_id = int(args.get("id", 0))
         limit = int(args.get("limit", 50))
 
-        convo = await conversations.get(db, conv_id)
+        # TODO(Wave C): thread the agent's user_id into the tool catalog;
+        # scoped to the admin (id=1) until the catalog carries user context.
+        convo = await conversations.get(db, conv_id, user_id=1)
         if convo is None:
             return json.dumps({"error": f"conversation {conv_id} not found"})
 
@@ -176,7 +184,9 @@ def _save_note(db: AsyncEngine) -> Tool:
         else:
             return json.dumps({"error": "tags must be a string or array of strings"})
 
-        note = await notes.upsert(db, key=key, content=content, tags=tags)
+        # TODO(Wave C): thread the agent's user_id into the tool catalog;
+        # scoped to the admin (id=1) until the catalog carries user context.
+        note = await notes.upsert(db, user_id=1, key=key, content=content, tags=tags)
         return json.dumps(
             {
                 "id": note.id,
@@ -207,7 +217,9 @@ def _save_note(db: AsyncEngine) -> Tool:
 def _get_note(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:
         key = str(args["key"])
-        note = await notes.get(db, key)
+        # TODO(Wave C): thread the agent's user_id into the tool catalog;
+        # scoped to the admin (id=1) until the catalog carries user context.
+        note = await notes.get(db, key, user_id=1)
         if note is None:
             return json.dumps(None)
         return json.dumps(
@@ -251,7 +263,9 @@ def _find_notes(db: AsyncEngine) -> Tool:
         else:
             return json.dumps({"error": "tags must be a string or array of strings"})
 
-        hits = await notes.find(db, query=query, limit=limit)
+        # TODO(Wave C): thread the agent's user_id into the tool catalog;
+        # scoped to the admin (id=1) until the catalog carries user context.
+        hits = await notes.find(db, user_id=1, query=query, limit=limit)
 
         # Whitespace-only tag entries shouldn't act as "filter out untagged
         # notes" — treat that case as no-filter.

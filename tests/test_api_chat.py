@@ -165,7 +165,7 @@ async def test_api_chat_creates_new_conversation_when_none_provided(
     assert text_evt["content"] == "hello back"
 
     conv_id = session_evt["conversation_id"]
-    convo = await conversations.get(app.state.db, conv_id)
+    convo = await conversations.get(app.state.db, conv_id, user_id=1)
     assert convo is not None
     assert convo.channel == "web"
     assert convo.title == "hi"
@@ -275,7 +275,7 @@ async def test_api_chat_passes_composed_persona_channel_system_prompt(
 async def test_api_chat_continues_existing_conversation(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     _install_upstream_responses([_assistant_oneshot("ack")])
 
     async with client.stream(
@@ -414,7 +414,7 @@ async def test_api_chat_rejects_non_web_conversation(
 ) -> None:
     """Channel semantics: /api/chat is web-only and must not write into
     conversations belonging to other channels (e.g. scheduled-task runs)."""
-    task_convo = await conversations.create(app.state.db, channel="task", ts=1000)
+    task_convo = await conversations.create(app.state.db, user_id=1, channel="task", ts=1000)
     _install_upstream_responses([_assistant_oneshot("never reached")])
 
     response = await client.post(
@@ -775,7 +775,7 @@ async def test_retry_replaces_last_assistant_turn(
 ) -> None:
     """Retry drops the trailing assistant reply and regenerates it from the
     same user message, streaming with the same SSE semantics as /api/chat."""
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     await messages.append(
         app.state.db, conversation_id=convo.id, role="user", content="ask", ts=1001
     )
@@ -816,7 +816,7 @@ async def test_retry_replaces_last_assistant_turn(
 async def test_retry_drops_tool_turns_after_last_user_message(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     await messages.append(
         app.state.db, conversation_id=convo.id, role="user", content="ask", ts=1001
     )
@@ -866,7 +866,7 @@ async def test_retry_drops_tool_turns_after_last_user_message(
 async def test_retry_rejects_conversation_without_user_message(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     await messages.append(
         app.state.db,
         conversation_id=convo.id,
@@ -888,7 +888,7 @@ async def test_retry_rejects_conversation_without_user_message(
 async def test_retry_rejects_non_web_conversation(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="task", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="task", ts=1000)
     await messages.append(
         app.state.db, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -940,7 +940,7 @@ async def test_edit_last_user_message_regenerates(
 ) -> None:
     """Editing the last user message replaces its text, drops the assistant
     tail, and regenerates from the edited content with /api/chat SSE semantics."""
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     user = await messages.append(
         app.state.db, conversation_id=convo.id, role="user", content="old ask", ts=1001
     )
@@ -980,7 +980,7 @@ async def test_edit_last_user_message_regenerates(
 async def test_edit_earlier_user_message_drops_everything_after(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     first = await messages.append(
         app.state.db, conversation_id=convo.id, role="user", content="first", ts=1001
     )
@@ -1015,7 +1015,7 @@ async def test_edit_earlier_user_message_drops_everything_after(
 async def test_edit_rejects_assistant_message(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     await messages.append(
         app.state.db, conversation_id=convo.id, role="user", content="ask", ts=1001
     )
@@ -1039,8 +1039,8 @@ async def test_edit_rejects_assistant_message(
 async def test_edit_rejects_message_from_other_conversation(
     client: httpx.AsyncClient,
 ) -> None:
-    convo_a = await conversations.create(app.state.db, channel="web", ts=1000)
-    convo_b = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo_a = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
+    convo_b = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     user_b = await messages.append(
         app.state.db, conversation_id=convo_b.id, role="user", content="b ask", ts=1001
     )
@@ -1058,7 +1058,7 @@ async def test_edit_rejects_message_from_other_conversation(
 async def test_edit_rejects_non_web_conversation(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="task", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="task", ts=1000)
     user = await messages.append(
         app.state.db, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
@@ -1085,7 +1085,7 @@ async def test_edit_unknown_conversation_returns_404(
 async def test_edit_unknown_message_returns_404(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     _install_upstream_responses([_assistant_oneshot("never reached")])
     response = await client.post(
         _edit_url(convo.id, 99999), headers=AUTH, json={"content": "x"}
@@ -1096,7 +1096,7 @@ async def test_edit_unknown_message_returns_404(
 async def test_edit_rejects_empty_content(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     user = await messages.append(
         app.state.db, conversation_id=convo.id, role="user", content="ask", ts=1001
     )
@@ -1495,7 +1495,7 @@ async def test_api_chat_can_continue_cline_conversation(
 ) -> None:
     from hermes.repository import conversations as conv_repo
 
-    cline_conv = await conv_repo.create(app.state.db, channel="cline")
+    cline_conv = await conv_repo.create(app.state.db, user_id=1, channel="cline")
     _install_upstream_responses([_assistant_oneshot("hello from upstream")])
 
     # Should NOT return 400 CONVERSATION_NOT_WEB — cline is an interactive channel
@@ -1520,7 +1520,7 @@ async def test_api_chat_task_channel_still_blocked(
 ) -> None:
     from hermes.repository import conversations as conv_repo
 
-    task_conv = await conv_repo.create(app.state.db, channel="task")
+    task_conv = await conv_repo.create(app.state.db, user_id=1, channel="task")
     response = await client.post(
         "/api/chat",
         headers=AUTH,

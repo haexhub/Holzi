@@ -15,6 +15,11 @@ from hermes.agent import Tool
 from hermes.errors import ErrorCode
 from hermes.repository import personas as personas_repo
 
+# Plan 35 §C1: onboarding writes the admin's (id=1) default persona — the
+# bootstrap flag itself is admin-scoped (`mark_bootstrap_complete` updates
+# `users.id = 1`), so the persona it edits is the admin's too.
+_BOOTSTRAP_USER_ID = 1
+
 
 def build_bootstrap_tools(db: AsyncEngine) -> list[Tool]:
     return [_persona_update(db), _mark_bootstrap_complete(db)]
@@ -33,7 +38,7 @@ def _persona_update(db: AsyncEngine) -> Tool:
                     "params": {},
                 },
             )
-        default = await personas_repo.get_default(db)
+        default = await personas_repo.get_default(db, user_id=_BOOTSTRAP_USER_ID)
         if default is None:
             raise HTTPException(
                 status_code=404,
@@ -45,6 +50,7 @@ def _persona_update(db: AsyncEngine) -> Tool:
         updated = await personas_repo.update(
             db,
             default.id,
+            user_id=_BOOTSTRAP_USER_ID,
             soul=soul,
             identity=identity,
             agents=agents,

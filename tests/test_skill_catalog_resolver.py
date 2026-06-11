@@ -22,6 +22,7 @@ async def _seed_env(engine: AsyncEngine, *, channel_prompt: str = "C") -> None:
     await channels_repo.ensure_seeded(engine)
     await personas_repo.create(
         engine,
+        user_id=1,
         name="Hermes",
         soul="",
         identity="I-body",
@@ -50,7 +51,7 @@ async def test_catalog_index_single_skill_with_when_to_use(
         when_to_use="When you need things done",
         body_markdown="BODY",
     )
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
     expected_line = "- my-skill — Does things (use when: When you need things done)"
     assert "## Available skills" in prompt
     assert expected_line in prompt
@@ -70,7 +71,7 @@ async def test_catalog_index_empty_when_to_use_omits_suffix(
         when_to_use="",
         body_markdown="BODY",
     )
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
     assert "- plain-skill — A plain skill" in prompt
     assert "use when:" not in prompt
 
@@ -90,7 +91,7 @@ async def test_catalog_index_disabled_skill_not_shown(
         body_markdown="BODY",
         enabled=False,
     )
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
     assert "## Available skills" not in prompt
     assert "hidden" not in prompt
 
@@ -101,7 +102,7 @@ async def test_catalog_index_no_skills_omits_section(
 ) -> None:
     """Zero enabled skills → no `## Available skills` section at all."""
     await _seed_env(conn)
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
     assert "## Available skills" not in prompt
 
 
@@ -117,7 +118,7 @@ async def test_catalog_index_alphabetical_order(
     await skills_repo.create(
         conn, slug="aaa", name="AAA", description="a-desc", when_to_use="", body_markdown="A"
     )
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
     aaa_pos = prompt.index("- aaa")
     zzz_pos = prompt.index("- zzz")
     assert aaa_pos < zzz_pos
@@ -143,7 +144,7 @@ async def test_section_order_persona_catalog_capability_channel(
         when_to_use="when",
         body_markdown="BODY",
     )
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
 
     persona_pos = prompt.index("## Identity")
     catalog_pos = prompt.index("## Available skills")
@@ -166,7 +167,7 @@ async def test_bootstrap_hint_when_not_completed(conn: AsyncEngine) -> None:
     await users_mod.ensure_users_seeded(conn)
     await ensure_bootstrap_skill_seeded(conn)
     # Default after seed is bootstrap_completed=0
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
     assert "You haven't been set up yet." in prompt
     assert "skill_load('bootstrap-first-chat')" in prompt
 
@@ -180,7 +181,7 @@ async def test_bootstrap_hint_absent_when_completed(conn: AsyncEngine) -> None:
     await ensure_bootstrap_skill_seeded(conn)
     async with conn.begin() as txn:
         await txn.execute(text("UPDATE users SET bootstrap_completed = 1 WHERE id = 1"))
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
     assert "You haven't been set up yet." not in prompt
 
 
@@ -190,7 +191,7 @@ async def test_bootstrap_hint_after_channel_prompt(conn: AsyncEngine) -> None:
     await _seed_env(conn, channel_prompt="CHANNEL-PROMPT")
     await users_mod.ensure_users_seeded(conn)
     await ensure_bootstrap_skill_seeded(conn)
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
     channel_pos = prompt.index("CHANNEL-PROMPT")
     hint_pos = prompt.index("You haven't been set up yet.")
     assert channel_pos < hint_pos
@@ -206,7 +207,7 @@ async def test_bootstrap_hint_absent_when_skill_missing(
     await _seed_env(conn)
     await users_mod.ensure_users_seeded(conn)
     # Deliberately do NOT seed the bootstrap skill.
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
     assert "You haven't been set up yet." not in prompt
 
 
@@ -224,5 +225,5 @@ async def test_bootstrap_hint_absent_when_skill_disabled(
         await txn.execute(
             text("UPDATE skills SET enabled = 0 WHERE slug = 'bootstrap-first-chat'")
         )
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
     assert "You haven't been set up yet." not in prompt

@@ -102,22 +102,31 @@ BEGIN
 END;
 
 -- ---------------------------------------------------------------------------
--- personas (Plan 29-A): single-default invariant. Inserting or updating a
--- row with is_default=1 demotes every other row. Triggers stay simple —
--- the API layer is responsible for blocking the "demote the only default"
--- case (returns 422). FOR EACH ROW + WHEN guard keeps these no-ops for
--- inserts of is_default=0 rows.
+-- personas (Plan 29-A; Plan 35 §C1 scopes per user): single-default
+-- invariant PER user_id. Inserting or updating a row with is_default=1
+-- demotes every other row belonging to the SAME user (the `AND user_id =
+-- NEW.user_id` clause) — setting user 2's default must not unset user 1's.
+-- Triggers stay simple — the API layer is responsible for blocking the
+-- "demote the only default" case (returns 422). FOR EACH ROW + WHEN guard
+-- keeps these no-ops for inserts of is_default=0 rows.
+--
+-- NOTE: on a pre-C1 DB the OLD global versions of these triggers already
+-- exist, so `IF NOT EXISTS` here would NOT replace them. db.py's lightweight
+-- migration DROPs them after adding the user_id column so schema.sql (applied
+-- afterwards) recreates these per-user versions.
 -- ---------------------------------------------------------------------------
 CREATE TRIGGER IF NOT EXISTS personas_single_default_insert
 AFTER INSERT ON personas
 FOR EACH ROW WHEN NEW.is_default = 1
 BEGIN
-  UPDATE personas SET is_default = 0 WHERE id != NEW.id;
+  UPDATE personas SET is_default = 0
+    WHERE id != NEW.id AND user_id = NEW.user_id;
 END;
 
 CREATE TRIGGER IF NOT EXISTS personas_single_default_update
 AFTER UPDATE OF is_default ON personas
 FOR EACH ROW WHEN NEW.is_default = 1
 BEGIN
-  UPDATE personas SET is_default = 0 WHERE id != NEW.id;
+  UPDATE personas SET is_default = 0
+    WHERE id != NEW.id AND user_id = NEW.user_id;
 END;

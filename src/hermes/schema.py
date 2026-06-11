@@ -13,6 +13,7 @@ from sqlalchemy import (
     MetaData,
     Table,
     Text,
+    UniqueConstraint,
 )
 
 metadata = MetaData()
@@ -34,6 +35,16 @@ conversations = Table(
     # unix epoch seconds; NULL means the conversation is bookmarked
     # (never expires). Refreshed whenever `updated_at` moves.
     Column("expires_at", Integer),
+    # Plan 35 §C1: owning user. server_default="1" backfills existing rows
+    # on a fresh create_all (id=1 is the seeded admin). On a PRE-C1 DB the
+    # column is added by the lightweight migration instead — see db.py.
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default="1",
+    ),
 )
 
 Index(
@@ -41,6 +52,15 @@ Index(
     conversations.c.channel,
     conversations.c.updated_at.desc(),
 )
+
+# NOTE: the per-user index `conv_user_updated` is intentionally NOT declared
+# here. `conversations` is a pre-existing table, so on an existing pre-C1 DB
+# `metadata.create_all` (which runs BEFORE the lightweight migration that adds
+# `user_id`) would try to CREATE INDEX on a column that doesn't exist yet. The
+# index is created in db.py's `_apply_lightweight_migrations` with
+# `CREATE INDEX IF NOT EXISTS` after the ALTER, which is correct for both fresh
+# and existing DBs. (Contrast: the brand-new `sessions` table's index lives
+# here because the whole table is created fresh in one shot.)
 
 
 messages = Table(
@@ -105,11 +125,29 @@ notes = Table(
     "notes",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("key", Text, nullable=False, unique=True),
+    # `key` is unique PER USER (not globally) — see the UniqueConstraint
+    # below. The column-level `unique=True` was dropped for Wave C1.
+    Column("key", Text, nullable=False),
     Column("content", Text, nullable=False),
     # comma-separated tags — YAGNI on a join table
     Column("tags", Text),
     Column("updated_at", Integer, nullable=False),
+    # Plan 35 §C1: owning user. server_default="1" backfills existing rows
+    # on a fresh create_all (id=1 is the seeded admin). On a PRE-C1 DB the
+    # column is added by the lightweight migration instead — see db.py.
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default="1",
+    ),
+    # Plan 35 §C1: note keys are unique per user. This composite constraint
+    # only applies to FRESH DBs (create_all). On a pre-C1 DB the old global
+    # `notes.key` unique index survives — SQLite can't easily drop it, and
+    # for single-user C1 a stricter global-unique key is harmless (there's
+    # only user 1). C2 (real multi-user) will need a proper migration.
+    UniqueConstraint("user_id", "key", name="notes_user_key"),
 )
 
 Index("notes_tags", notes.c.tags)
@@ -156,14 +194,34 @@ agent_tasks = Table(
     Column("last_run_id", Text),
     Column("created_at", Integer, nullable=False),
     Column("updated_at", Integer, nullable=False),
+    # Plan 35 §C1: owning user. server_default="1" backfills existing rows
+    # on a fresh create_all (id=1 is the seeded admin). On a PRE-C1 DB the
+    # column is added by the lightweight migration instead — see db.py.
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default="1",
+    ),
 )
 
 # Hot-path for the scheduler tick: every poll we ask "what's enabled and due?".
+# The single scheduler serves every user, so `list_due` stays GLOBAL and uses
+# this index (no user_id leading column).
 Index(
     "agent_tasks_enabled_due",
     agent_tasks.c.enabled,
     agent_tasks.c.due_at,
 )
+
+# NOTE: the per-user index `agent_tasks_user_enabled_due` is intentionally NOT
+# declared here. `agent_tasks` is a pre-existing table, so on an existing
+# pre-C1 DB `metadata.create_all` (which runs BEFORE the lightweight migration
+# that adds `user_id`) would try to CREATE INDEX on a column that doesn't exist
+# yet. The index is created in db.py's `_apply_lightweight_migrations` with
+# `CREATE INDEX IF NOT EXISTS` after the ALTER, which is correct for both fresh
+# and existing DBs.
 
 
 # AES-GCM-encrypted credentials for outgoing LLM calls. `provider` chooses
@@ -363,14 +421,16 @@ personas = Table(
     "personas",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("name", Text, nullable=False, unique=True),
+    # `name` is unique PER USER (not globally) — see the UniqueConstraint
+    # below. The column-level `unique=True` was dropped for Wave C1.
+    Column("name", Text, nullable=False),
     # Plan 36: prompt-Blob aufgesplittet in drei Fragments. Jede
     # Spalte ist NOT NULL DEFAULT '' — Backfill (siehe Lifespan)
     # kopiert den alten `prompt` in `identity`.
     Column("soul", Text, nullable=False, server_default=""),
     Column("identity", Text, nullable=False, server_default=""),
     Column("agents", Text, nullable=False, server_default=""),
-    # 0 | 1 — single-default trigger keeps at most one row with 1.
+    # 0 | 1 — single-default trigger keeps at most one row with 1 PER user.
     Column("is_default", Integer, nullable=False, server_default="0"),
     Column("created_at", Integer, nullable=False),
     Column("updated_at", Integer, nullable=False),
@@ -380,6 +440,23 @@ personas = Table(
         ForeignKey("llm_credentials.id", ondelete="SET NULL"),
     ),
     Column("model", Text),
+    # Plan 35 §C1: owning user. server_default="1" backfills existing rows
+    # on a fresh create_all (id=1 is the seeded admin). On a PRE-C1 DB the
+    # column is added by the lightweight migration instead — see db.py.
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default="1",
+    ),
+    # Plan 35 §C1: persona names are unique per user. This composite
+    # constraint only applies to FRESH DBs (create_all). On a pre-C1 DB the
+    # old global `personas.name` unique index survives — SQLite can't easily
+    # drop it, and for single-user C1 a stricter global-unique name is
+    # harmless (there's only user 1). C2 (real multi-user) will need a
+    # proper migration.
+    UniqueConstraint("user_id", "name", name="personas_user_name"),
 )
 
 
@@ -503,6 +580,9 @@ users = Table(
     "users",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("email", Text, unique=True),
+    Column("role", Text, nullable=False, server_default="member"),
+    Column("parent_user_id", Integer, ForeignKey("users.id", ondelete="SET NULL")),
     Column(
         "bootstrap_completed",
         Integer,
@@ -511,3 +591,25 @@ users = Table(
     ),
     Column("created_at", Integer, nullable=False),
 )
+
+
+# Plan 35 §C1: per-request bearer is a SESSION token (sha256-hashed at rest).
+# token_hash is UNIQUE; expires_at NULL = never. New table → created (with its
+# index below) by metadata.create_all on both fresh and existing DBs.
+sessions = Table(
+    "sessions",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("token_hash", Text, nullable=False, unique=True),
+    Column("label", Text),
+    Column("created_at", Integer, nullable=False),
+    Column("last_used_at", Integer),
+    Column("expires_at", Integer),  # NULL = never
+)
+Index("sessions_user", sessions.c.user_id)

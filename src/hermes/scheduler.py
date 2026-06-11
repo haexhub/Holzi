@@ -132,7 +132,11 @@ class AgentTaskScheduler:
         skip the next scheduled occurrence (mark_run still records
         last_run_at/status for visibility).
         """
-        task = await agent_tasks_repo.get(self.db, task_id)
+        # Unscoped lookup: the scheduler is a global background context that
+        # fires tasks on behalf of every user. The API endpoint already
+        # authorised the caller against the task's owner before delegating
+        # here.
+        task = await agent_tasks_repo._get_unscoped(self.db, task_id)
         if task is None:
             raise LookupError(f"agent_task {task_id} not found")
         return await self._fire_one(task, now=int(time.time()), advance_due_at=False)
@@ -145,6 +149,9 @@ class AgentTaskScheduler:
         # TTL sweep). Title prefixed with the task title for findability.
         convo = await conversations_repo.create(
             self.db,
+            # The task thread is owned by the task's owner, so each user only
+            # sees their own scheduled-task conversations.
+            user_id=task.user_id,
             channel=TASK_CHANNEL,
             title=f"[task] {task.title}",
             ts=now,
@@ -156,7 +163,12 @@ class AgentTaskScheduler:
             content=task.prompt,
         )
 
-        persona_ctx = await resolve_persona_context(TASK_CHANNEL, self.db)
+        # Background context: resolve the persona under the task's OWNER so
+        # each user's scheduled tasks run with their own default persona +
+        # credential (Plan 35 §C1).
+        persona_ctx = await resolve_persona_context(
+            TASK_CHANNEL, self.db, user_id=task.user_id
+        )
         model = persona_ctx.model
         task_upstream = build_client_for_credential(
             persona_ctx.credential,

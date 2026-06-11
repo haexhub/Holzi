@@ -435,7 +435,7 @@ async def test_chat_skips_approval_when_session_allowed(
     pre-empts the gate. New chats default to the existing conversation
     (none yet) — we create one explicitly and seed the session entry under
     its id."""
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     app.state.session_approvals[convo.id] = {"mcp_install"}
     try:
         _install_upstream_responses(
@@ -475,8 +475,8 @@ async def test_chat_session_grant_does_not_carry_to_new_conversation(
 ) -> None:
     """Session grants are conversation-scoped. Seeding `convo_a` and chatting
     on `convo_b` still requires approval on `convo_b`."""
-    convo_a = await conversations.create(app.state.db, channel="web", ts=1000)
-    convo_b = await conversations.create(app.state.db, channel="web", ts=1001)
+    convo_a = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
+    convo_b = await conversations.create(app.state.db, user_id=1, channel="web", ts=1001)
     app.state.session_approvals[convo_a.id] = {"mcp_install"}
     try:
         _install_upstream_responses(

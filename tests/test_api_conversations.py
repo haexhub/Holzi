@@ -31,8 +31,8 @@ async def test_api_conversations_requires_auth(client: httpx.AsyncClient) -> Non
 async def test_api_conversations_list_returns_recent_with_counts(
     client: httpx.AsyncClient,
 ) -> None:
-    c1 = await conversations.create(app.state.db, channel="task", ts=1000)
-    c2 = await conversations.create(app.state.db, channel="web", ts=2000)
+    c1 = await conversations.create(app.state.db, user_id=1, channel="task", ts=1000)
+    c2 = await conversations.create(app.state.db, user_id=1, channel="web", ts=2000)
     await messages.append(
         app.state.db, conversation_id=c1.id, role="user", content="hi", ts=1001
     )
@@ -57,8 +57,8 @@ async def test_api_conversations_list_returns_recent_with_counts(
 async def test_api_conversations_list_filters_by_channel(
     client: httpx.AsyncClient,
 ) -> None:
-    c1 = await conversations.create(app.state.db, channel="task", ts=1000)
-    await conversations.create(app.state.db, channel="web", ts=2000)
+    c1 = await conversations.create(app.state.db, user_id=1, channel="task", ts=1000)
+    await conversations.create(app.state.db, user_id=1, channel="web", ts=2000)
 
     response = await client.get("/api/conversations?channel=task", headers=AUTH)
     assert response.status_code == 200
@@ -69,7 +69,7 @@ async def test_api_conversations_list_filters_by_channel(
 async def test_api_conversation_detail_returns_messages_in_order(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     await messages.append(
         app.state.db, conversation_id=convo.id, role="user", content="m1", ts=1001
     )
@@ -99,7 +99,7 @@ async def test_api_conversation_patch_renames_conversation(
     client: httpx.AsyncClient,
 ) -> None:
     convo = await conversations.create(
-        app.state.db, channel="web", title="old title", ts=1000
+        app.state.db, user_id=1, channel="web", title="old title", ts=1000
     )
 
     response = await client.patch(
@@ -112,7 +112,7 @@ async def test_api_conversation_patch_renames_conversation(
     body = response.json()
     assert body["id"] == convo.id
     assert body["title"] == "new title"
-    stored = await conversations.get(app.state.db, convo.id)
+    stored = await conversations.get(app.state.db, convo.id, user_id=1)
     assert stored is not None
     assert stored.title == "new title"
     assert stored.updated_at >= convo.updated_at
@@ -121,7 +121,7 @@ async def test_api_conversation_patch_renames_conversation(
 async def test_api_conversation_patch_rejects_blank_title(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
 
     response = await client.patch(
         f"/api/conversations/{convo.id}", headers=AUTH, json={"title": "   "}
@@ -142,7 +142,7 @@ async def test_api_conversation_patch_unknown_id_returns_404(
 async def test_api_conversation_delete_removes_conversation_and_messages(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     await messages.append(
         app.state.db, conversation_id=convo.id, role="user", content="bye", ts=1001
     )
@@ -150,14 +150,14 @@ async def test_api_conversation_delete_removes_conversation_and_messages(
     response = await client.delete(f"/api/conversations/{convo.id}", headers=AUTH)
 
     assert response.status_code == 204
-    assert await conversations.get(app.state.db, convo.id) is None
+    assert await conversations.get(app.state.db, convo.id, user_id=1) is None
     assert await messages.list_by_conversation(app.state.db, convo.id) == []
 
 
 async def test_api_conversation_delete_removes_scratch_dir(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     scratch_root = conversation_scratch_root()
     scratch_root.mkdir(parents=True, exist_ok=True)
     scratch = scratch_root / str(convo.id)
@@ -189,7 +189,7 @@ async def test_api_conversations_rejects_invalid_limit(
 async def test_api_conversation_detail_rejects_invalid_limit(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     response = await client.get(
         f"/api/conversations/{convo.id}?limit=-5", headers=AUTH
     )
@@ -200,10 +200,10 @@ async def test_api_conversations_search_matches_title(
     client: httpx.AsyncClient,
 ) -> None:
     hit = await conversations.create(
-        app.state.db, channel="web", title="Refactor auth flow", ts=1000
+        app.state.db, user_id=1, channel="web", title="Refactor auth flow", ts=1000
     )
     await conversations.create(
-        app.state.db, channel="web", title="Buy groceries", ts=2000
+        app.state.db, user_id=1, channel="web", title="Buy groceries", ts=2000
     )
 
     response = await client.get("/api/conversations?q=refactor", headers=AUTH)
@@ -217,10 +217,10 @@ async def test_api_conversations_search_matches_message_content(
     client: httpx.AsyncClient,
 ) -> None:
     needle = await conversations.create(
-        app.state.db, channel="web", title="thread 1", ts=1000
+        app.state.db, user_id=1, channel="web", title="thread 1", ts=1000
     )
     other = await conversations.create(
-        app.state.db, channel="web", title="thread 2", ts=2000
+        app.state.db, user_id=1, channel="web", title="thread 2", ts=2000
     )
     await messages.append(
         app.state.db,
@@ -248,7 +248,7 @@ async def test_api_conversations_search_dedups_title_and_message_hits(
     client: httpx.AsyncClient,
 ) -> None:
     convo = await conversations.create(
-        app.state.db, channel="web", title="dentist visit", ts=1000
+        app.state.db, user_id=1, channel="web", title="dentist visit", ts=1000
     )
     await messages.append(
         app.state.db,
@@ -270,7 +270,7 @@ async def test_api_conversations_search_returns_empty_for_no_hits(
     client: httpx.AsyncClient,
 ) -> None:
     await conversations.create(
-        app.state.db, channel="web", title="hello world", ts=1000
+        app.state.db, user_id=1, channel="web", title="hello world", ts=1000
     )
 
     response = await client.get("/api/conversations?q=zzznomatchzzz", headers=AUTH)
@@ -283,10 +283,10 @@ async def test_api_conversations_search_combines_with_channel_filter(
     client: httpx.AsyncClient,
 ) -> None:
     web_hit = await conversations.create(
-        app.state.db, channel="web", title="standup notes", ts=1000
+        app.state.db, user_id=1, channel="web", title="standup notes", ts=1000
     )
     await conversations.create(
-        app.state.db, channel="task", title="standup notes", ts=2000
+        app.state.db, user_id=1, channel="task", title="standup notes", ts=2000
     )
 
     response = await client.get(
@@ -302,10 +302,10 @@ async def test_api_conversations_search_orders_results_newest_first(
     client: httpx.AsyncClient,
 ) -> None:
     older = await conversations.create(
-        app.state.db, channel="web", title="payroll review", ts=1000
+        app.state.db, user_id=1, channel="web", title="payroll review", ts=1000
     )
     newer = await conversations.create(
-        app.state.db, channel="web", title="payroll questions", ts=5000
+        app.state.db, user_id=1, channel="web", title="payroll questions", ts=5000
     )
 
     response = await client.get("/api/conversations?q=payroll", headers=AUTH)
@@ -318,8 +318,8 @@ async def test_api_conversations_search_orders_results_newest_first(
 async def test_api_conversations_search_blank_query_returns_full_list(
     client: httpx.AsyncClient,
 ) -> None:
-    a = await conversations.create(app.state.db, channel="web", ts=1000)
-    b = await conversations.create(app.state.db, channel="web", ts=2000)
+    a = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
+    b = await conversations.create(app.state.db, user_id=1, channel="web", ts=2000)
 
     response = await client.get("/api/conversations?q=%20%20", headers=AUTH)
 
@@ -334,7 +334,7 @@ async def test_api_conversations_search_ignores_fts_operators(
     # User input containing characters with FTS5 meaning ("*", quotes, parens)
     # must not raise a SQL error — we tokenise into bare words before MATCH.
     convo = await conversations.create(
-        app.state.db, channel="web", title="payroll review", ts=1000
+        app.state.db, user_id=1, channel="web", title="payroll review", ts=1000
     )
 
     response = await client.get(
@@ -351,7 +351,7 @@ async def test_api_conversations_search_respects_limit(
 ) -> None:
     for i in range(3):
         await conversations.create(
-            app.state.db, channel="web", title=f"meeting {i}", ts=1000 + i
+            app.state.db, user_id=1, channel="web", title=f"meeting {i}", ts=1000 + i
         )
 
     response = await client.get(
@@ -370,7 +370,7 @@ async def test_api_conversations_search_respects_limit(
 async def test_api_conversations_list_includes_bookmark_fields(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
 
     response = await client.get("/api/conversations", headers=AUTH)
 
@@ -384,7 +384,7 @@ async def test_api_conversations_list_includes_bookmark_fields(
 async def test_api_conversation_bookmark_toggle_sets_and_clears(
     client: httpx.AsyncClient,
 ) -> None:
-    convo = await conversations.create(app.state.db, channel="web", ts=1000)
+    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
 
     # First toggle: bookmark on, expires_at cleared.
     first = await client.post(

@@ -101,8 +101,8 @@ async def test_task_create_rejects_invalid_cron(conn: AsyncEngine) -> None:
 
 
 async def test_task_list_returns_all(conn: AsyncEngine) -> None:
-    await agent_tasks.create(conn, title="a", prompt="x", due_at=1)
-    await agent_tasks.create(conn, title="b", prompt="x", due_at=2)
+    await agent_tasks.create(conn, user_id=1, title="a", prompt="x", due_at=1)
+    await agent_tasks.create(conn, user_id=1, title="b", prompt="x", due_at=2)
     tool = _by_name(build_productivity_tools(conn), "task_list")
     out = json.loads(await tool.handler({}))
     assert len(out) == 2
@@ -110,12 +110,12 @@ async def test_task_list_returns_all(conn: AsyncEngine) -> None:
 
 
 async def test_task_delete_removes(conn: AsyncEngine) -> None:
-    t = await agent_tasks.create(conn, title="x", prompt="x", due_at=1)
+    t = await agent_tasks.create(conn, user_id=1, title="x", prompt="x", due_at=1)
     tool = _by_name(build_productivity_tools(conn), "task_delete")
     raw = await tool.handler({"id": t.id})
     out = json.loads(raw)
     assert out["deleted"] is True
-    assert await agent_tasks.get(conn, t.id) is None
+    assert await agent_tasks.get(conn, t.id, user_id=1) is None
 
 
 async def test_task_delete_unknown_returns_error(conn: AsyncEngine) -> None:

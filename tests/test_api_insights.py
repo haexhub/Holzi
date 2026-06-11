@@ -135,7 +135,7 @@ async def test_insights_empty_window_returns_zero_filled_series(
 async def test_insights_aggregates_totals_and_buckets(
     client: httpx.AsyncClient,
 ) -> None:
-    conv = await conversations_repo.create(app.state.db, channel="web")
+    conv = await conversations_repo.create(app.state.db, user_id=1, channel="web")
     now = int(time.time())
     # Three runs today (success/success/error), one yesterday (success).
     await _seed_run(
@@ -212,7 +212,7 @@ async def test_insights_window_excludes_old_rows(
     client: httpx.AsyncClient,
 ) -> None:
     """A row from 10 days ago is invisible to a 7d window."""
-    conv = await conversations_repo.create(app.state.db, channel="web")
+    conv = await conversations_repo.create(app.state.db, user_id=1, channel="web")
     now = int(time.time())
     await _seed_run(
         conversation_id=conv.id,
@@ -266,7 +266,7 @@ async def test_insights_30d_period_returns_30_buckets(
 async def test_insights_running_rows_count_in_totals_not_errors(
     client: httpx.AsyncClient,
 ) -> None:
-    conv = await conversations_repo.create(app.state.db, channel="web")
+    conv = await conversations_repo.create(app.state.db, user_id=1, channel="web")
     now = int(time.time())
     # An in-flight run with no tokens yet.
     await _seed_run(

@@ -45,7 +45,7 @@ async def test_persona_update_writes_three_fragments(conn: AsyncEngine) -> None:
     assert data["agents"] == "focus on coding"
 
     # Verify DB state
-    persona = await personas_repo.get_default(conn)
+    persona = await personas_repo.get_default(conn, user_id=1)
     assert persona is not None
     assert persona.soul == "be direct"
     assert persona.identity == "I am Max"
@@ -65,7 +65,7 @@ async def test_persona_update_writes_history_row_with_bootstrap_author(
         {"soul": "be direct", "identity": "I am Max", "agents": "coding"}
     )
 
-    persona = await personas_repo.get_default(conn)
+    persona = await personas_repo.get_default(conn, user_id=1)
     assert persona is not None
     history = await history_repo.list_for_persona(conn, persona.id)
 

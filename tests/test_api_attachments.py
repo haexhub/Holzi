@@ -24,7 +24,7 @@ async def client():
 
 
 async def _new_web_conversation() -> int:
-    convo = await conversations.create(app.state.db, channel="web")
+    convo = await conversations.create(app.state.db, user_id=1, channel="web")
     return convo.id
 
 

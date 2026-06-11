@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import attachments as attachments_mod
 from hermes.agent import ApprovalDecision, ChatRunCancelled, run_agent
+from hermes.auth import current_user_id
 from hermes.config import conversation_scratch_root, settings
 from hermes.errors import ErrorCode
 from hermes.events import (
@@ -259,11 +260,14 @@ async def api_chat(request: Request) -> Response:
     if payload.conversation_id is None:
         convo = await conversations.create(
             db,
+            user_id=current_user_id(request),
             channel=WEB_CHANNEL,
             title=_derive_conversation_title(payload.message),
         )
     else:
-        existing = await conversations.get(db, payload.conversation_id)
+        existing = await conversations.get(
+            db, payload.conversation_id, user_id=current_user_id(request)
+        )
         if existing is None:
             raise HTTPException(
                 status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -365,6 +369,7 @@ async def _stream_web_agent_run(
     persona_ctx = await resolve_persona_context(
         WEB_CHANNEL,
         db,
+        user_id=current_user_id(request),
         model_override=model_override,
         persona_id_override=persona_id_override,
     )
@@ -546,7 +551,7 @@ async def _stream_web_agent_run(
                 yield to_sse(item)
             # Re-raise any exception the agent task swallowed via its finally.
             await task
-            await conversations.touch(db, convo.id)
+            await conversations.touch(db, convo.id, user_id=current_user_id(request))
             yield to_sse(DoneEvent())
         except ChatRunCancelled:
             # User-initiated cancel. `cancelled` is the single terminal
@@ -632,7 +637,7 @@ async def api_chat_context(request: Request) -> ChatContextResponse:
     """
     db: AsyncEngine = request.app.state.db
     persona_id, persona_name, model = await resolve_chat_context_meta(
-        WEB_CHANNEL, db
+        WEB_CHANNEL, db, user_id=current_user_id(request)
     )
     return ChatContextResponse(
         persona_id=persona_id,
@@ -1133,7 +1138,9 @@ async def api_create_conversation(
         if body.message and body.message.strip()
         else None
     )
-    convo = await conversations.create(db, channel=WEB_CHANNEL, title=title)
+    convo = await conversations.create(
+        db, user_id=current_user_id(request), channel=WEB_CHANNEL, title=title
+    )
     return _conversation_to_dict(convo)
 
 
@@ -1146,13 +1153,18 @@ async def api_list_conversations(
 ) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
+    user_id = current_user_id(request)
     if q is not None and q.strip():
-        convos = await conversations.search(db, query=q, channel=channel, limit=limit)
+        convos = await conversations.search(
+            db, user_id=user_id, query=q, channel=channel, limit=limit
+        )
     else:
-        convos = await conversations.list_all(db, channel=channel, limit=limit)
+        convos = await conversations.list_all(
+            db, user_id=user_id, channel=channel, limit=limit
+        )
     out: list[dict[str, Any]] = []
     for c in convos:
-        count = await conversations.message_count(db, c.id)
+        count = await conversations.message_count(db, c.id, user_id=user_id)
         item = _conversation_to_dict(c)
         item["message_count"] = count
         out.append(item)
@@ -1165,7 +1177,7 @@ async def api_get_conversation(
 ) -> dict[str, Any]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
-    convo = await conversations.get(db, conv_id)
+    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1194,7 +1206,7 @@ async def api_upload_attachment(
     file: UploadFile = File(...),  # noqa: B008 — FastAPI dependency default
 ) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
-    convo = await conversations.get(db, conv_id)
+    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1255,7 +1267,9 @@ async def api_update_conversation(
         )
 
     db: AsyncEngine = request.app.state.db
-    updated = await conversations.update_title(db, conv_id, title=title)
+    updated = await conversations.update_title(
+        db, conv_id, user_id=current_user_id(request), title=title
+    )
     if updated is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1267,7 +1281,10 @@ async def api_update_conversation(
 async def api_delete_conversation(request: Request, conv_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
     deleted = await conversations.delete(
-        db, conv_id, scratch_root=conversation_scratch_root()
+        db,
+        conv_id,
+        user_id=current_user_id(request),
+        scratch_root=conversation_scratch_root(),
     )
     if not deleted:
         raise HTTPException(
@@ -1286,13 +1303,14 @@ async def api_toggle_bookmark_conversation(
     `expires_at = NULL` and survive the daily sweep; unbookmarking
     re-arms the TTL from now."""
     db: AsyncEngine = request.app.state.db
-    existing = await conversations.get(db, conv_id)
+    user_id = current_user_id(request)
+    existing = await conversations.get(db, conv_id, user_id=user_id)
     if existing is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
         )
     updated = await conversations.set_bookmarked(
-        db, conv_id, bookmarked=not existing.bookmarked
+        db, conv_id, user_id=user_id, bookmarked=not existing.bookmarked
     )
     if updated is None:
         # Lost-the-race between get() and set_bookmarked().
@@ -1312,7 +1330,7 @@ async def api_retry_conversation(request: Request, conv_id: int) -> Response:
     """
     db: AsyncEngine = request.app.state.db
 
-    convo = await conversations.get(db, conv_id)
+    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1360,7 +1378,7 @@ async def api_edit_and_regenerate(
     """
     db: AsyncEngine = request.app.state.db
 
-    convo = await conversations.get(db, conv_id)
+    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1455,22 +1473,23 @@ async def api_list_notes(
 ) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
+    user_id = current_user_id(request)
     # Whitespace-only `q` is treated the same as an absent `q` — falling
     # through to list_all keeps `?q=` and `?q=%20%20` symmetric.
     if q and q.strip():
         sanitised = _fts5_query(q)
         if not sanitised:
             return []
-        items = await notes.find(db, query=sanitised, limit=limit)
+        items = await notes.find(db, user_id=user_id, query=sanitised, limit=limit)
     else:
-        items = await notes.list_all(db, limit=limit)
+        items = await notes.list_all(db, user_id=user_id, limit=limit)
     return [_note_to_dict(n) for n in items]
 
 
 @router.get("/notes/{key}", response_model=NoteResponse)
 async def api_get_note(request: Request, key: str) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
-    n = await notes.get(db, key)
+    n = await notes.get(db, key, user_id=current_user_id(request))
     if n is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.NOTE_NOT_FOUND.value
@@ -1482,7 +1501,9 @@ async def api_get_note(request: Request, key: str) -> dict[str, Any]:
 async def api_create_note(request: Request, body: NoteCreate) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
     tags = ",".join(body.tags) if body.tags else None
-    n = await notes.upsert(db, key=body.key, content=body.content, tags=tags)
+    n = await notes.upsert(
+        db, user_id=current_user_id(request), key=body.key, content=body.content, tags=tags
+    )
     return _note_to_dict(n)
 
 
@@ -1492,14 +1513,16 @@ async def api_update_note(
 ) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
     tags = ",".join(body.tags) if body.tags else None
-    n = await notes.upsert(db, key=key, content=body.content, tags=tags)
+    n = await notes.upsert(
+        db, user_id=current_user_id(request), key=key, content=body.content, tags=tags
+    )
     return _note_to_dict(n)
 
 
 @router.delete("/notes/{key}", status_code=status.HTTP_204_NO_CONTENT)
 async def api_delete_note(request: Request, key: str) -> Response:
     db: AsyncEngine = request.app.state.db
-    if not await notes.delete(db, key):
+    if not await notes.delete(db, key, user_id=current_user_id(request)):
         raise HTTPException(
             status_code=404, detail=ErrorCode.NOTE_NOT_FOUND.value
         )
@@ -1629,7 +1652,9 @@ async def api_list_tasks(
 ) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
-    items = await agent_tasks.list_all(db, limit=limit)
+    items = await agent_tasks.list_all(
+        db, user_id=current_user_id(request), limit=limit
+    )
     return [_task_to_dict(t) for t in items]
 
 
@@ -1646,6 +1671,7 @@ async def api_create_task(
     db: AsyncEngine = request.app.state.db
     t = await agent_tasks.create(
         db,
+        user_id=current_user_id(request),
         title=body.title,
         prompt=body.prompt,
         due_at=body.due_at,
@@ -1680,6 +1706,7 @@ async def api_patch_task(
         updated = await agent_tasks.update(
             db,
             task_id,
+            user_id=current_user_id(request),
             title=body.title,
             prompt=body.prompt,
             due_at=body.due_at,
@@ -1707,7 +1734,7 @@ async def api_patch_task(
 @router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def api_delete_task(request: Request, task_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
-    if not await agent_tasks.delete(db, task_id):
+    if not await agent_tasks.delete(db, task_id, user_id=current_user_id(request)):
         raise HTTPException(
             status_code=404, detail=ErrorCode.TASK_NOT_FOUND.value
         )
@@ -1729,7 +1756,7 @@ async def api_run_task_now(
     cron schedule — a manual run shouldn't skip the next due occurrence.
     """
     db: AsyncEngine = request.app.state.db
-    task = await agent_tasks.get(db, task_id)
+    task = await agent_tasks.get(db, task_id, user_id=current_user_id(request))
     if task is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.TASK_NOT_FOUND.value

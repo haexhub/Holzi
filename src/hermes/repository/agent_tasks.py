@@ -34,7 +34,21 @@ def _row_to_task(row) -> AgentTask:
         last_run_id=row.last_run_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        user_id=row.user_id,
     )
+
+
+async def _get_unscoped(engine: AsyncEngine, task_id: int) -> AgentTask | None:
+    """Fetch a task by id WITHOUT a user filter. Internal helper for the
+    scheduler-facing `mark_run`, which legitimately operates across all users
+    (it's a background context, not an API caller). API code must use the
+    user-scoped `get` instead."""
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            select(t_agent_tasks).where(t_agent_tasks.c.id == task_id)
+        )
+        row = result.first()
+    return _row_to_task(row) if row is not None else None
 
 
 def validate_schedule(schedule: str) -> None:
@@ -63,6 +77,7 @@ def next_fire_after(schedule: str, *, after: int, timezone: str = "UTC") -> int:
 async def create(
     engine: AsyncEngine,
     *,
+    user_id: int,
     title: str,
     prompt: str,
     due_at: int | None = None,
@@ -91,6 +106,7 @@ async def create(
         result = await conn.execute(
             t_agent_tasks.insert()
             .values(
+                user_id=user_id,
                 title=title,
                 prompt=prompt,
                 due_at=effective_due_at,
@@ -118,24 +134,31 @@ async def create(
         last_run_id=None,
         created_at=now,
         updated_at=now,
+        user_id=user_id,
     )
 
 
-async def get(engine: AsyncEngine, task_id: int) -> AgentTask | None:
+async def get(engine: AsyncEngine, task_id: int, *, user_id: int) -> AgentTask | None:
+    """Fetch a task the caller owns. Another user's task returns None."""
     async with engine.connect() as conn:
         result = await conn.execute(
-            select(t_agent_tasks).where(t_agent_tasks.c.id == task_id)
+            select(t_agent_tasks).where(
+                t_agent_tasks.c.id == task_id,
+                t_agent_tasks.c.user_id == user_id,
+            )
         )
         row = result.first()
     return _row_to_task(row) if row is not None else None
 
 
 async def list_all(
-    engine: AsyncEngine, *, limit: int = 200
+    engine: AsyncEngine, *, user_id: int, limit: int = 200
 ) -> list[AgentTask]:
-    """Stable listing for the settings UI: nearest due first, then by title."""
+    """Stable listing for the settings UI: nearest due first, then by title.
+    Scoped to the caller — a user only sees their own tasks."""
     stmt = (
         select(t_agent_tasks)
+        .where(t_agent_tasks.c.user_id == user_id)
         .order_by(
             asc(t_agent_tasks.c.due_at),
             asc(t_agent_tasks.c.title),
@@ -149,7 +172,13 @@ async def list_all(
 
 
 async def list_due(engine: AsyncEngine, *, now: int) -> list[AgentTask]:
-    """Scheduler hot path: enabled rows whose next firing has arrived."""
+    """Scheduler hot path: enabled rows whose next firing has arrived.
+
+    Intentionally GLOBAL (not user-scoped): the single in-process scheduler
+    serves every user, so it must see due tasks across ALL users. Each
+    returned task carries its own `user_id` so the scheduler can fire the
+    run under the correct owner.
+    """
     async with engine.connect() as conn:
         result = await conn.execute(
             select(t_agent_tasks)
@@ -166,6 +195,7 @@ async def update(
     engine: AsyncEngine,
     task_id: int,
     *,
+    user_id: int,
     title: str | None = None,
     prompt: str | None = None,
     due_at: int | None = None,
@@ -180,8 +210,9 @@ async def update(
     clear_schedule: bool = False,
 ) -> AgentTask | None:
     """Patch a task. Caller must keep the "exactly one of due_at/schedule"
-    invariant; this enforces it after applying the patch."""
-    existing = await get(engine, task_id)
+    invariant; this enforces it after applying the patch. Scoped to the
+    owner: another user's task returns None (no-op)."""
+    existing = await get(engine, task_id, user_id=user_id)
     if existing is None:
         return None
 
@@ -249,7 +280,10 @@ async def update(
     async with engine.begin() as conn:
         await conn.execute(
             t_agent_tasks.update()
-            .where(t_agent_tasks.c.id == task_id)
+            .where(
+                t_agent_tasks.c.id == task_id,
+                t_agent_tasks.c.user_id == user_id,
+            )
             .values(
                 title=new_title,
                 prompt=new_prompt,
@@ -260,13 +294,18 @@ async def update(
                 updated_at=now,
             )
         )
-    return await get(engine, task_id)
+    return await get(engine, task_id, user_id=user_id)
 
 
-async def delete(engine: AsyncEngine, task_id: int) -> bool:
+async def delete(engine: AsyncEngine, task_id: int, *, user_id: int) -> bool:
+    """Remove a task the caller owns. A task belonging to another user is a
+    no-op (returns False) — the `user_id` filter is part of the DELETE WHERE."""
     async with engine.begin() as conn:
         result = await conn.execute(
-            t_agent_tasks.delete().where(t_agent_tasks.c.id == task_id)
+            t_agent_tasks.delete().where(
+                t_agent_tasks.c.id == task_id,
+                t_agent_tasks.c.user_id == user_id,
+            )
         )
     return (result.rowcount or 0) > 0
 
@@ -289,8 +328,12 @@ async def mark_run(
     last_run_* columns, leaving `due_at`/`enabled` alone so an ad-hoc
     manual run doesn't skip the next scheduled occurrence or disable a
     one-shot before its real firing.
+
+    Keyed by task id only (no user filter): the scheduler is a global
+    background context that fires tasks across every user, so it must be
+    able to record a firing regardless of owner.
     """
-    existing = await get(engine, task_id)
+    existing = await _get_unscoped(engine, task_id)
     if existing is None:
         return None
 
@@ -315,4 +358,4 @@ async def mark_run(
             .where(t_agent_tasks.c.id == task_id)
             .values(**values)
         )
-    return await get(engine, task_id)
+    return await _get_unscoped(engine, task_id)
