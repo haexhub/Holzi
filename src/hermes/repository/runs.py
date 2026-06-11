@@ -12,7 +12,7 @@ Status transitions are intentionally one-way:
 A row whose state is 'running' but whose process has died is recoverable
 only by an out-of-band sweep; this layer never resurrects rows.
 """
-from sqlalchemy import desc, func, select
+from sqlalchemy import Integer, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.db import tx_for_user
@@ -167,7 +167,7 @@ async def aggregate_totals(
         func.coalesce(func.sum(t_agent_runs.c.output_tokens), 0).label("output_tokens"),
         func.coalesce(
             func.sum(
-                (t_agent_runs.c.status == "error").cast(t_agent_runs.c.id.type)
+                (t_agent_runs.c.status == "error").cast(Integer)
             ),
             0,
         ).label("errors"),
@@ -242,7 +242,7 @@ async def aggregate_by_model(
             ),
             func.coalesce(
                 func.sum(
-                    (t_agent_runs.c.status == "error").cast(t_agent_runs.c.id.type)
+                    (t_agent_runs.c.status == "error").cast(Integer)
                 ),
                 0,
             ).label("errors"),
