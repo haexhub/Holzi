@@ -1,13 +1,29 @@
+import os
 from logging.config import fileConfig
+
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
-from alembic import context
 
-from hermes.config import settings
+from alembic import context
 from hermes.schema import metadata
 
+# Resolve the DSN from a migration-safe source: prefer alembic.ini's
+# `sqlalchemy.url`, fall back to the same env var the app reads. Avoid
+# importing `hermes.config.settings` here — that triggers pydantic-settings
+# validation (platform_admin_token / _email required), which is irrelevant
+# to running migrations and would break `alembic upgrade` in CI / images
+# that only have DB credentials.
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+
+_ini_url = config.get_main_option("sqlalchemy.url")
+_env_url = os.getenv("HERMES_DATABASE_URL")
+_db_url = _env_url or _ini_url
+if not _db_url:
+    raise RuntimeError(
+        "alembic: DB URL is required — set sqlalchemy.url in alembic.ini "
+        "or HERMES_DATABASE_URL in the environment"
+    )
+config.set_main_option("sqlalchemy.url", _db_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -46,9 +62,11 @@ async def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-    async with connectable.connect() as conn:
-        await conn.run_sync(_do_run_migrations)
-    await connectable.dispose()
+    try:
+        async with connectable.connect() as conn:
+            await conn.run_sync(_do_run_migrations)
+    finally:
+        await connectable.dispose()
 
 
 if context.is_offline_mode():
