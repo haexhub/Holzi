@@ -190,7 +190,13 @@ async def aggregate_by_day(
     """Group rows into UTC date buckets. Returns raw (non-zero-filled) rows;
     the route layer fills the rest of the window with zero buckets so the
     chart never lies about empty days."""
-    bucket = func.strftime("%Y-%m-%d", t_agent_runs.c.started_at, "unixepoch")
+    # `started_at` is unix-epoch seconds; `to_timestamp(epoch)` returns a
+    # TIMESTAMPTZ in UTC, and `to_char(ts, fmt)` formats it. Both are
+    # stock Postgres — no extensions required. (Replaces the SQLite
+    # `strftime('%Y-%m-%d', started_at, 'unixepoch')` form.)
+    bucket = func.to_char(
+        func.to_timestamp(t_agent_runs.c.started_at), "YYYY-MM-DD"
+    )
     stmt = (
         select(
             bucket.label("bucket"),
