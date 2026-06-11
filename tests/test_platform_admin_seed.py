@@ -1,21 +1,21 @@
-import importlib
-
 import pytest
 from sqlalchemy import text
 
+from hermes.config import settings
 from hermes.identity import hash_token
+from hermes.users import ensure_platform_admin_seeded
 
 
 @pytest.mark.usefixtures("pg_db")
 async def test_platform_admin_seeded_from_env(owner_engine, monkeypatch):
     """First boot creates the admin row + a never-expiring session keyed
     on HERMES_PLATFORM_ADMIN_TOKEN."""
-    monkeypatch.setenv("HERMES_PLATFORM_ADMIN_EMAIL", "admin@example.com")
-    monkeypatch.setenv("HERMES_PLATFORM_ADMIN_TOKEN", "rotated-token")
-    import hermes.config
-    importlib.reload(hermes.config)
+    # Mutate the imported config singleton in place — ensure_platform_admin_seeded
+    # reads `settings.platform_admin_*` off this object. importlib.reload would
+    # rebind a NEW Settings instance that hermes.users never sees.
+    monkeypatch.setattr(settings, "platform_admin_email", "admin@example.com")
+    monkeypatch.setattr(settings, "platform_admin_token", "rotated-token")
 
-    from hermes.users import ensure_platform_admin_seeded
     await ensure_platform_admin_seeded(owner_engine)
 
     async with owner_engine.connect() as conn:
@@ -37,16 +37,12 @@ async def test_platform_admin_seeded_from_env(owner_engine, monkeypatch):
 async def test_admin_token_rotation_drops_stale_session(owner_engine, monkeypatch):
     """Rotating HERMES_PLATFORM_ADMIN_TOKEN drops the previous bootstrap
     session so the old token stops working."""
-    monkeypatch.setenv("HERMES_PLATFORM_ADMIN_EMAIL", "admin@example.com")
-    monkeypatch.setenv("HERMES_PLATFORM_ADMIN_TOKEN", "old-token")
-    import hermes.config
-    importlib.reload(hermes.config)
+    monkeypatch.setattr(settings, "platform_admin_email", "admin@example.com")
+    monkeypatch.setattr(settings, "platform_admin_token", "old-token")
 
-    from hermes.users import ensure_platform_admin_seeded
     await ensure_platform_admin_seeded(owner_engine)
 
-    monkeypatch.setenv("HERMES_PLATFORM_ADMIN_TOKEN", "new-token")
-    importlib.reload(hermes.config)
+    monkeypatch.setattr(settings, "platform_admin_token", "new-token")
     await ensure_platform_admin_seeded(owner_engine)
 
     async with owner_engine.connect() as conn:
