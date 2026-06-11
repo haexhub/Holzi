@@ -78,16 +78,12 @@ async def _seed_two_users(conn: AsyncEngine) -> None:
     from sqlalchemy import text
 
     async with conn.begin() as db:
+        # User 1 is already seeded by the `conn` fixture (platform_admin); only
+        # user 2 needs adding so the notes.user_id FK holds for the second owner.
         await db.execute(
             text(
-                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, "
-                "created_at) VALUES (1,'admin',0,0)"
-            )
-        )
-        await db.execute(
-            text(
-                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, "
-                "created_at) VALUES (2,'member',0,0)"
+                "INSERT INTO users(id, role, bootstrap_completed, "
+                "created_at) VALUES (2,'member',false,0) ON CONFLICT (id) DO NOTHING"
             )
         )
 

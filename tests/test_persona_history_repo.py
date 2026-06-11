@@ -126,7 +126,7 @@ async def test_list_for_persona_newest_first(conn: AsyncEngine) -> None:
     middle = await history_repo.write_snapshot(conn, persona, ts=1700000020)
     newest = await history_repo.write_snapshot(conn, persona, ts=1700000030)
 
-    rows = await history_repo.list_for_persona(conn, persona.id)
+    rows = await history_repo.list_for_persona(conn, persona.id, user_id=1)
     assert len(rows) >= 3
     # Top three rows must be the explicit ones in DESC order.
     assert rows[0].id == newest.id
@@ -137,9 +137,9 @@ async def test_list_for_persona_newest_first(conn: AsyncEngine) -> None:
 @pytest.mark.asyncio
 async def test_list_for_persona_empty(conn: AsyncEngine) -> None:
     # No persona with id=9999 exists ⇒ no history rows.
-    assert await history_repo.list_for_persona(conn, 9999) == []
+    assert await history_repo.list_for_persona(conn, 9999, user_id=1) == []
 
 
 @pytest.mark.asyncio
 async def test_get_returns_none_for_unknown_id(conn: AsyncEngine) -> None:
-    assert await history_repo.get(conn, 9999) is None
+    assert await history_repo.get(conn, 9999, user_id=1) is None
