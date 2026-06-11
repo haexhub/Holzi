@@ -1,8 +1,20 @@
 from sqlalchemy import Boolean
+
 from hermes.schema import (
-    conversations, messages, notes, agent_tasks, personas, llm_credentials,
-    sessions, users, attachments, agent_runs, persona_history, tool_approvals,
+    agent_runs,
+    agent_tasks,
+    attachments,
+    conversations,
+    llm_credentials,
+    messages,
+    notes,
+    persona_history,
+    personas,
+    sessions,
+    tool_approvals,
+    users,
 )
+
 
 def test_boolean_columns_are_real_bool():
     for col in (conversations.c.bookmarked, agent_tasks.c.enabled,

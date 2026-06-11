@@ -37,7 +37,6 @@ from sqlalchemy.exc import DBAPIError
 
 from hermes.db import tx_for_user
 
-
 # --- per-table insert builders ----------------------------------------------
 #
 # Each builder inserts ONE leaf row with `user_id = uid` into its table. For
