@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.auth import current_user_id
 from hermes.errors import ErrorCode
 from hermes.repository import runs as runs_repo
 
@@ -147,12 +148,13 @@ async def api_insights(
             },
         )
     db: AsyncEngine = request.app.state.db
+    uid = current_user_id(request)
     today = _utc_today()
     since_ts = _since_ts(period, today)
-    totals = await runs_repo.aggregate_totals(db, since_ts=since_ts)
-    raw_series = await runs_repo.aggregate_by_day(db, since_ts=since_ts)
-    by_model = await runs_repo.aggregate_by_model(db, since_ts=since_ts)
-    by_status = await runs_repo.aggregate_by_status(db, since_ts=since_ts)
+    totals = await runs_repo.aggregate_totals(db, user_id=uid, since_ts=since_ts)
+    raw_series = await runs_repo.aggregate_by_day(db, user_id=uid, since_ts=since_ts)
+    by_model = await runs_repo.aggregate_by_model(db, user_id=uid, since_ts=since_ts)
+    by_status = await runs_repo.aggregate_by_status(db, user_id=uid, since_ts=since_ts)
     return InsightsResponse(
         period=period,
         totals=TotalsResponse(**totals),

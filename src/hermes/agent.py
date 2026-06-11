@@ -147,7 +147,7 @@ async def run_agent(
     # them by message id so each user turn inlines its own files into the
     # context without persisting that bulk into the stored message content.
     atts_by_message: dict[int, list[Attachment]] = {}
-    for att in await attachments.list_by_conversation(db, conversation_id):
+    for att in await attachments.list_by_conversation(db, conversation_id, user_id=user_id):
         if att.message_id is not None:
             atts_by_message.setdefault(att.message_id, []).append(att)
     request_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]

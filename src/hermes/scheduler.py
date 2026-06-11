@@ -186,6 +186,7 @@ class AgentTaskScheduler:
             async with track_run(
                 self.db,
                 run_id=run_id,
+                user_id=task.user_id,
                 conversation_id=convo.id,
                 channel=TASK_CHANNEL,
                 model=model,
@@ -195,6 +196,7 @@ class AgentTaskScheduler:
                 result = await self._agent_runner(
                     upstream=task_upstream,
                     db=self.db,
+                    user_id=task.user_id,
                     conversation_id=convo.id,
                     system_prompt=persona_ctx.system_prompt,
                     model=model,

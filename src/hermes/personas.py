@@ -326,16 +326,18 @@ async def _resolve_default_persona(
 
 
 async def _resolve_credential(
-    engine: AsyncEngine, persona: Persona | None
+    engine: AsyncEngine, persona: Persona | None, *, user_id: int
 ) -> LlmCredential:
     """Persona credential → active credential. Raises 503 when neither exists."""
     from fastapi import HTTPException
 
     credential: LlmCredential | None = None
     if persona is not None and persona.llm_credential_id is not None:
-        credential = await llm_credentials_repo.get(engine, persona.llm_credential_id)
+        credential = await llm_credentials_repo.get(
+            engine, persona.llm_credential_id, user_id=user_id
+        )
     if credential is None:
-        credential = await llm_credentials_repo.get_active(engine)
+        credential = await llm_credentials_repo.get_active(engine, user_id=user_id)
     if credential is None:
         raise HTTPException(
             status_code=503,
@@ -499,7 +501,7 @@ async def resolve_persona_context(
     system_prompt = await get_effective_system_prompt(
         channel, engine, user_id=user_id, persona_override=persona
     )
-    credential = await _resolve_credential(engine, persona)
+    credential = await _resolve_credential(engine, persona, user_id=user_id)
 
     # Model resolution (override wins)
     model: str = model_override or (
@@ -530,7 +532,7 @@ async def resolve_chat_context_meta(
     from hermes.config import settings
 
     persona = await _resolve_default_persona(channel, engine, user_id=user_id)
-    credential = await _resolve_credential(engine, persona)
+    credential = await _resolve_credential(engine, persona, user_id=user_id)
 
     model: str = (
         (persona.model if persona is not None else None)
