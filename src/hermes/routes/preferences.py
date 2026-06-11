@@ -3,8 +3,8 @@
 Two thin CRUD surfaces over the `personas` / `channel_prompts` tables.
 The per-persona skill-activation layer (Plan 33) was dropped in Plan 37
 in favour of the global catalog-index + `skill_load` tool pattern.
-The single-default invariant on personas is held by triggers in
-`schema.sql`; this layer is responsible for the API-level guardrails
+The single-default invariant on personas is held in the repo layer;
+this layer is responsible for the API-level guardrails
 (duplicate name → 409, blank/oversized prompt → 422, deleting the
 default persona → 422, unknown channel → 404).
 

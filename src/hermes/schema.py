@@ -412,7 +412,7 @@ tool_approvals = Table(
 # time is `persona.prompt + "\n\n" + channel.prompt`; channel rows may pin
 # their own default persona (FK ON DELETE SET NULL) and fall back to the
 # global is_default persona when NULL. The single-default invariant is
-# enforced by application-level logic (was: SQLite triggers in schema.sql).
+# enforced by application-level logic in the personas repository.
 personas = Table(
     "personas",
     metadata,

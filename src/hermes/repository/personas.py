@@ -3,7 +3,7 @@
 Personas are the *who* of the agent — identity + style. Each row carries
 a name (UNIQUE) and three opaque prompt fragments (`soul`, `identity`,
 `agents`) that the resolver composes at runtime. At most one row has
-`is_default = 1`, enforced by triggers in `schema.sql`: inserting or
+`is_default = 1`, enforced by repo-layer logic: inserting or
 updating any row with `is_default = 1` demotes every other row.
 
 Every successful `create`/`update` also appends a row to
@@ -186,7 +186,7 @@ async def update(
     history_author: str = "user",
 ) -> Persona | None:
     """Patch a row. None means "leave this field alone". Demotion of
-    other defaults happens via the schema.sql trigger (scoped per user).
+    other defaults happens here in the repo layer (scoped per user).
 
     Scoped to the owner: another user's persona returns None (no-op).
 

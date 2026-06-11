@@ -1,7 +1,8 @@
 """Built-in skill tools: skill_load + skill_search (Plan 37 Task 4).
 
 `skill_load` retrieves the full body of a skill by slug.
-`skill_search` performs FTS5 full-text search over all enabled skills.
+`skill_search` performs Postgres tsvector full-text search over all
+enabled skills (uses the `search_tsv` generated column + GIN index).
 """
 import json
 from typing import Any
@@ -77,24 +78,41 @@ def _skill_search(db: AsyncEngine) -> Tool:
         query = str(args.get("query", "")).strip()
         if not query:
             return json.dumps({"results": []})
+        # `to_tsquery` rejects raw user input (operator chars like `&`,
+        # `|`, `!`, `:` are syntax). Strip everything that isn't alnum
+        # or `_`, emit each surviving token as a prefix match, OR-join.
+        # Matches the tokenisation in `routes/api.py::_tsquery`.
+        tokens: list[str] = []
+        for raw_token in query.split():
+            cleaned = "".join(c for c in raw_token if c.isalnum() or c == "_")
+            if cleaned:
+                tokens.append(f"{cleaned}:*")
+        if not tokens:
+            return json.dumps({"results": []})
+        tsq = " | ".join(tokens)
         try:
             async with db.connect() as conn:
                 rows = (
                     await conn.execute(
                         text(
                             "SELECT s.slug, s.name, s.description, s.when_to_use, "
-                            "       snippet(skills_fts, 4, '«', '»', '…', 12) AS snippet "
-                            "FROM skills_fts "
-                            "JOIN skills s ON s.id = skills_fts.rowid "
-                            "WHERE skills_fts MATCH :q AND s.enabled = 1 "
-                            "ORDER BY rank LIMIT 5"
+                            "       ts_headline('simple', s.body_markdown, "
+                            "                   to_tsquery('simple', :q), "
+                            "                   'StartSel=«,StopSel=»,MaxWords=12,"
+                            "MinWords=5,ShortWord=2') AS snippet "
+                            "FROM skills s "
+                            "WHERE s.search_tsv @@ to_tsquery('simple', :q) "
+                            "  AND s.enabled = TRUE "
+                            "ORDER BY ts_rank(s.search_tsv, to_tsquery('simple', :q)) "
+                            "         DESC "
+                            "LIMIT 5"
                         ),
-                        {"q": query},
+                        {"q": tsq},
                     )
                 ).all()
         except OperationalError as exc:
             logger.warning(
-                "skill_search FTS5 query error, returning empty",
+                "skill_search tsvector query error, returning empty",
                 query=query,
                 error=str(exc),
             )

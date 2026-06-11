@@ -77,7 +77,7 @@ async def test_activate_clears_other_active_rows(conn) -> None:
     assert active is not None and active.id == a.id
 
     # Activating B atomically deactivates A — otherwise the partial unique
-    # index in schema.sql would reject the second activate with
+    # index on `llm_credentials` would reject the second activate with
     # IntegrityError.
     await repo.activate(conn, b.id)
     active2 = await repo.get_active(conn)
