@@ -30,6 +30,7 @@ def _stub_runner(
         *,
         upstream: httpx.AsyncClient,  # noqa: ARG001 — kept for signature parity
         db: AsyncEngine,
+        user_id: int,
         conversation_id: int,
         system_prompt: str,  # noqa: ARG001
         model: str,  # noqa: ARG001
@@ -39,7 +40,11 @@ def _stub_runner(
         if raises is not None:
             raise raises
         await messages.append(
-            db, conversation_id=conversation_id, role="assistant", content=text
+            db,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=text,
         )
         return text
 
@@ -49,24 +54,23 @@ def _stub_runner(
 async def _scheduler(
     db: AsyncEngine,
     *,
+    owner_db: AsyncEngine,
     runner: Callable[..., Awaitable[str]] | None = None,
 ) -> AgentTaskScheduler:
     """Seed a minimal DB (backfill + active credential) and return a scheduler."""
-    await ensure_backfill(db)
+    await ensure_backfill(db, user_id=1)
     cred = await llm_credentials.create_api_key(
         db,
+        user_id=1,
         provider="anthropic",
         display_name="test-cred",
         base_url=None,
         ciphertext=EncryptedBlob(iv="aa", tag="bb", data="cc"),
     )
-    async with db.begin() as conn:
-        await conn.execute(
-            text("UPDATE llm_credentials SET is_active=1 WHERE id=:id"),
-            {"id": cred.id},
-        )
+    await llm_credentials.activate(db, cred.id, user_id=1)
     return AgentTaskScheduler(
         db,
+        owner_db=owner_db,
         encryptor=_DUMMY_ENCRYPTOR,
         fallback_proxy_url="http://proxy.test",
         tool_factory=lambda: [],
@@ -80,12 +84,12 @@ async def _scheduler(
 # ---------------------------------------------------------------------------
 
 
-async def test_fire_due_runs_one_shot_and_disables(conn: AsyncEngine) -> None:
+async def test_fire_due_runs_one_shot_and_disables(conn: AsyncEngine, owner_engine: AsyncEngine) -> None:
     task = await agent_tasks.create(
         conn, user_id=1, title="ping", prompt="say hi", due_at=1_000, ts=500
     )
 
-    sched = await _scheduler(conn)
+    sched = await _scheduler(conn, owner_db=owner_engine)
     fired = await sched.fire_due(now=2_000)
 
     assert fired == 1
@@ -97,7 +101,7 @@ async def test_fire_due_runs_one_shot_and_disables(conn: AsyncEngine) -> None:
     assert refreshed.last_run_id is not None
 
     # Run row is linked back to the task.
-    run = await runs.get(conn, refreshed.last_run_id)
+    run = await runs.get(conn, refreshed.last_run_id, user_id=1)
     assert run is not None
     assert run.agent_task_id == task.id
     assert run.channel == "task"
@@ -105,7 +109,7 @@ async def test_fire_due_runs_one_shot_and_disables(conn: AsyncEngine) -> None:
 
 
 async def test_fire_due_passes_composed_persona_channel_system_prompt(
-    conn: AsyncEngine,
+    conn: AsyncEngine, owner_engine: AsyncEngine,
 ) -> None:
     """Plan 29-A: the scheduler resolves `get_effective_system_prompt(
     "task", db)` and feeds the composition to `run_agent`. Two states:
@@ -124,15 +128,14 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
     )
     from hermes.repository import channels as channels_repo
 
-    await ensure_backfill(conn)
-    # Seed users with bootstrap_completed=1 so the bootstrap hint is
-    # suppressed — this test pins the exact system-prompt composition
-    # and doesn't care about onboarding.
+    await ensure_backfill(conn, user_id=1)
+    # User 1 already exists (seeded by `conn`); flip bootstrap_completed=true
+    # so the bootstrap hint is suppressed — this test pins the exact
+    # system-prompt composition and doesn't care about onboarding.
     async with conn.begin() as txn:
         await txn.execute(
             text(
-                "INSERT OR IGNORE INTO users(id, bootstrap_completed, created_at) "
-                "VALUES (1, 1, :ts)"
+                "UPDATE users SET bootstrap_completed=true, created_at=:ts WHERE id=1"
             ),
             {"ts": int(time.time())},
         )
@@ -143,6 +146,7 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
         *,
         upstream: httpx.AsyncClient,  # noqa: ARG001
         db: AsyncEngine,  # noqa: ARG001
+        user_id: int,  # noqa: ARG001
         conversation_id: int,  # noqa: ARG001
         system_prompt: str,
         model: str,  # noqa: ARG001
@@ -164,7 +168,7 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
     await agent_tasks.create(
         conn, user_id=1, title="t1", prompt="run me", due_at=1_000, ts=500
     )
-    sched = await _scheduler(conn, runner=capturing_runner)
+    sched = await _scheduler(conn, owner_db=owner_engine, runner=capturing_runner)
     await sched.fire_due(now=2_000)
     assert captured[-1] == (
         f"{default_persona_block}\n\n"
@@ -183,7 +187,7 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
 
 
 async def test_fire_due_creates_conversation_owned_by_task_owner(
-    conn: AsyncEngine,
+    conn: AsyncEngine, owner_engine: AsyncEngine,
 ) -> None:
     # Wave C1: the scheduler is global (one loop serves every user), but each
     # fired task's conversation must be owned by the task's own user_id — not
@@ -192,13 +196,24 @@ async def test_fire_due_creates_conversation_owned_by_task_owner(
     async with conn.begin() as txn:
         await txn.execute(
             text(
-                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, "
-                "created_at) VALUES (2,'member',0,0)"
+                "INSERT INTO users(id, role, bootstrap_completed, "
+                "created_at) VALUES (2,'member',false,0) ON CONFLICT (id) DO NOTHING"
             )
         )
     task = await agent_tasks.create(
         conn, user_id=2, title="theirs", prompt="run me", due_at=1_000, ts=500
     )
+    # The scheduler resolves the persona context under the TASK's owner, so
+    # user 2 needs their own active credential or the fire raises 503.
+    cred2 = await llm_credentials.create_api_key(
+        conn,
+        user_id=2,
+        provider="anthropic",
+        display_name="u2-cred",
+        base_url=None,
+        ciphertext=EncryptedBlob(iv="aa", tag="bb", data="cc"),
+    )
+    await llm_credentials.activate(conn, cred2.id, user_id=2)
 
     captured: list[int] = []
 
@@ -206,6 +221,7 @@ async def test_fire_due_creates_conversation_owned_by_task_owner(
         *,
         upstream: httpx.AsyncClient,  # noqa: ARG001
         db: AsyncEngine,
+        user_id: int,
         conversation_id: int,
         system_prompt: str,  # noqa: ARG001
         model: str,  # noqa: ARG001
@@ -214,11 +230,15 @@ async def test_fire_due_creates_conversation_owned_by_task_owner(
     ) -> str:
         captured.append(conversation_id)
         await messages.append(
-            db, conversation_id=conversation_id, role="assistant", content="ok"
+            db,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="ok",
         )
         return "ok"
 
-    sched = await _scheduler(conn, runner=capturing_runner)
+    sched = await _scheduler(conn, owner_db=owner_engine, runner=capturing_runner)
     fired = await sched.fire_due(now=2_000)
 
     assert fired == 1
@@ -234,12 +254,12 @@ async def test_fire_due_creates_conversation_owned_by_task_owner(
     assert refreshed.user_id == 2
 
 
-async def test_fire_due_skips_disabled(conn: AsyncEngine) -> None:
+async def test_fire_due_skips_disabled(conn: AsyncEngine, owner_engine: AsyncEngine) -> None:
     task = await agent_tasks.create(
         conn, user_id=1, title="paused", prompt="x", due_at=1_000, enabled=False, ts=500
     )
 
-    sched = await _scheduler(conn)
+    sched = await _scheduler(conn, owner_db=owner_engine)
     fired = await sched.fire_due(now=2_000)
 
     assert fired == 0
@@ -248,7 +268,7 @@ async def test_fire_due_skips_disabled(conn: AsyncEngine) -> None:
     assert refreshed.last_status is None
 
 
-async def test_fire_due_advances_recurring(conn: AsyncEngine) -> None:
+async def test_fire_due_advances_recurring(conn: AsyncEngine, owner_engine: AsyncEngine) -> None:
     # Daily at 08:00 UTC. ts=500 (epoch 1970-01-01) → first firing is at
     # 28800 (08:00 UTC same day). After firing once at now=30000, the next
     # due_at should be the *next* day at 08:00 UTC.
@@ -263,7 +283,7 @@ async def test_fire_due_advances_recurring(conn: AsyncEngine) -> None:
     )
     assert task.due_at == 28_800
 
-    sched = await _scheduler(conn)
+    sched = await _scheduler(conn, owner_db=owner_engine)
     fired = await sched.fire_due(now=30_000)
 
     assert fired == 1
@@ -275,13 +295,13 @@ async def test_fire_due_advances_recurring(conn: AsyncEngine) -> None:
 
 
 async def test_fire_due_records_failure_without_advancing_enabled(
-    conn: AsyncEngine,
+    conn: AsyncEngine, owner_engine: AsyncEngine,
 ) -> None:
     task = await agent_tasks.create(
         conn, user_id=1, title="boom", prompt="x", due_at=1_000, ts=500
     )
 
-    sched = await _scheduler(conn, runner=_stub_runner(raises=RuntimeError("nope")))
+    sched = await _scheduler(conn, owner_db=owner_engine, runner=_stub_runner(raises=RuntimeError("nope")))
     fired = await sched.fire_due(now=2_000)
 
     # `fired` counts only successful firings (the `fired += 1` lives after
@@ -296,13 +316,13 @@ async def test_fire_due_records_failure_without_advancing_enabled(
     assert refreshed.last_status == "error"
     # The run row landed with status=error.
     assert refreshed.last_run_id is not None
-    run = await runs.get(conn, refreshed.last_run_id)
+    run = await runs.get(conn, refreshed.last_run_id, user_id=1)
     assert run is not None
     assert run.status == "error"
 
 
 async def test_fire_due_keeps_other_tasks_running_after_one_fails(
-    conn: AsyncEngine,
+    conn: AsyncEngine, owner_engine: AsyncEngine,
 ) -> None:
     # If one task blows up, the others scheduled at the same tick must
     # still get their chance. The scheduler can't trust user-authored
@@ -316,17 +336,23 @@ async def test_fire_due_keeps_other_tasks_running_after_one_fails(
         conn, user_id=1, title="good", prompt="y", due_at=1_000, ts=500
     )
 
-    async def runner(*, db: AsyncEngine, conversation_id: int, **kwargs: Any) -> str:
-        convo = await conversations.get(db, conversation_id, user_id=1)
+    async def runner(
+        *, db: AsyncEngine, user_id: int, conversation_id: int, **kwargs: Any
+    ) -> str:
+        convo = await conversations.get(db, conversation_id, user_id=user_id)
         assert convo is not None
         if convo.title == "[task] bad":
             raise RuntimeError("this one fails")
         await messages.append(
-            db, conversation_id=conversation_id, role="assistant", content="ok"
+            db,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="ok",
         )
         return "ok"
 
-    sched = await _scheduler(conn, runner=runner)
+    sched = await _scheduler(conn, owner_db=owner_engine, runner=runner)
     await sched.fire_due(now=2_000)
 
     bad_after = await agent_tasks.get(conn, bad.id, user_id=1)
@@ -335,7 +361,7 @@ async def test_fire_due_keeps_other_tasks_running_after_one_fails(
     assert good_after is not None and good_after.last_status == "success"
 
 
-async def test_run_now_does_not_advance_due_at(conn: AsyncEngine) -> None:
+async def test_run_now_does_not_advance_due_at(conn: AsyncEngine, owner_engine: AsyncEngine) -> None:
     task = await agent_tasks.create(
         conn,
         user_id=1,
@@ -347,7 +373,7 @@ async def test_run_now_does_not_advance_due_at(conn: AsyncEngine) -> None:
     )
     original_due_at = task.due_at
 
-    sched = await _scheduler(conn)
+    sched = await _scheduler(conn, owner_db=owner_engine)
     await sched.run_now(task.id)
 
     refreshed = await agent_tasks.get(conn, task.id, user_id=1)
@@ -359,14 +385,14 @@ async def test_run_now_does_not_advance_due_at(conn: AsyncEngine) -> None:
     assert refreshed.enabled is True  # not flipped off either
 
 
-async def test_run_now_does_not_disable_one_shot(conn: AsyncEngine) -> None:
+async def test_run_now_does_not_disable_one_shot(conn: AsyncEngine, owner_engine: AsyncEngine) -> None:
     # The other half of advance=False: a manual run of a one-shot must NOT
     # flip enabled=0 — that disable belongs to the real scheduled firing.
     task = await agent_tasks.create(
         conn, user_id=1, title="once", prompt="manual", due_at=2_000_000_000, ts=500
     )
 
-    sched = await _scheduler(conn)
+    sched = await _scheduler(conn, owner_db=owner_engine)
     await sched.run_now(task.id)
 
     refreshed = await agent_tasks.get(conn, task.id, user_id=1)
@@ -376,8 +402,8 @@ async def test_run_now_does_not_disable_one_shot(conn: AsyncEngine) -> None:
     assert refreshed.last_status == "success"
 
 
-async def test_run_now_missing_raises_lookup_error(conn: AsyncEngine) -> None:
-    sched = await _scheduler(conn)
+async def test_run_now_missing_raises_lookup_error(conn: AsyncEngine, owner_engine: AsyncEngine) -> None:
+    sched = await _scheduler(conn, owner_db=owner_engine)
     try:
         await sched.run_now(9999)
     except LookupError as exc:
@@ -393,7 +419,7 @@ async def test_run_now_missing_raises_lookup_error(conn: AsyncEngine) -> None:
 
 
 async def test_conversation_sweep_deletes_expired_and_keeps_bookmarked(
-    conn: AsyncEngine, tmp_path: Path
+    conn: AsyncEngine, owner_engine: AsyncEngine, tmp_path: Path
 ) -> None:
     expired = await conversations.create(conn, user_id=1, channel="web", ts=0)
     pinned = await conversations.create(
@@ -405,7 +431,7 @@ async def test_conversation_sweep_deletes_expired_and_keeps_bookmarked(
     scratch_root.mkdir()
     (scratch_root / str(expired.id)).mkdir()
 
-    sweeper = ConversationSweepScheduler(conn, scratch_root)
+    sweeper = ConversationSweepScheduler(conn, scratch_root, owner_db=owner_engine)
     deleted = await sweeper.sweep(now=expired.expires_at + 1)  # type: ignore[operator]
 
     assert deleted == [expired.id]
@@ -416,8 +442,8 @@ async def test_conversation_sweep_deletes_expired_and_keeps_bookmarked(
 
 
 async def test_conversation_sweep_noop_when_nothing_expired(
-    conn: AsyncEngine, tmp_path: Path
+    conn: AsyncEngine, owner_engine: AsyncEngine, tmp_path: Path
 ) -> None:
     await conversations.create(conn, user_id=1, channel="web", ts=10_000_000)
-    sweeper = ConversationSweepScheduler(conn, tmp_path / "conversations")
+    sweeper = ConversationSweepScheduler(conn, tmp_path / "conversations", owner_db=owner_engine)
     assert await sweeper.sweep(now=10_000_001) == []

@@ -148,9 +148,9 @@ async def test_message_count_counts_only_target_conversation(
 ) -> None:
     a = await conversations.create(conn, user_id=1, channel="task", ts=1)
     b = await conversations.create(conn, user_id=1, channel="web", ts=2)
-    await messages.append(conn, conversation_id=a.id, role="user", content="x", ts=10)
-    await messages.append(conn, conversation_id=a.id, role="assistant", content="y", ts=11)
-    await messages.append(conn, conversation_id=b.id, role="user", content="z", ts=12)
+    await messages.append(conn, user_id=1, conversation_id=a.id, role="user", content="x", ts=10)
+    await messages.append(conn, user_id=1, conversation_id=a.id, role="assistant", content="y", ts=11)
+    await messages.append(conn, user_id=1, conversation_id=b.id, role="user", content="z", ts=12)
 
     assert await conversations.message_count(conn, a.id, user_id=1) == 2
     assert await conversations.message_count(conn, b.id, user_id=1) == 1
@@ -170,6 +170,7 @@ async def test_search_finds_by_message_content(conn: AsyncEngine) -> None:
     convo = await conversations.create(conn, user_id=1, channel="web", title="t", ts=1000)
     await messages.append(
         conn,
+        user_id=1,
         conversation_id=convo.id,
         role="user",
         content="reschedule the dentist",
@@ -186,6 +187,7 @@ async def test_search_dedupes_title_and_message_hits(conn: AsyncEngine) -> None:
     )
     await messages.append(
         conn,
+        user_id=1,
         conversation_id=convo.id,
         role="user",
         content="dentist confirmed",
@@ -257,6 +259,7 @@ async def test_search_multi_token_uses_or_semantics_for_messages(
     only_appt = await conversations.create(conn, user_id=1, channel="web", title="t2", ts=2000)
     await messages.append(
         conn,
+        user_id=1,
         conversation_id=only_dentist.id,
         role="user",
         content="reschedule the dentist",
@@ -264,6 +267,7 @@ async def test_search_multi_token_uses_or_semantics_for_messages(
     )
     await messages.append(
         conn,
+        user_id=1,
         conversation_id=only_appt.id,
         role="user",
         content="set up an appointment",
@@ -283,6 +287,7 @@ async def test_search_message_prefix_match(conn: AsyncEngine) -> None:
     convo = await conversations.create(conn, user_id=1, channel="web", title="t", ts=1000)
     await messages.append(
         conn,
+        user_id=1,
         conversation_id=convo.id,
         role="user",
         content="reschedule the dentist",
@@ -387,7 +392,7 @@ async def test_set_bookmarked_unknown_id_returns_none(conn: AsyncEngine) -> None
 
 
 async def test_list_expired_only_returns_past_non_bookmarked(
-    conn: AsyncEngine,
+    conn: AsyncEngine, owner_engine: AsyncEngine,
 ) -> None:
     # Expired: created long ago, TTL window has passed.
     expired = await conversations.create(conn, user_id=1, channel="web", ts=0)
@@ -400,7 +405,7 @@ async def test_list_expired_only_returns_past_non_bookmarked(
 
     # Sweep "now" is 1 second past expired's expires_at.
     now = expired.expires_at + 1  # type: ignore[operator]
-    rows = await conversations.list_expired(conn, now=now)
+    rows = await conversations.list_expired(owner_engine, now=now)
     ids = {r.id for r in rows}
     assert expired.id in ids
     assert fresh.id not in ids
@@ -408,13 +413,13 @@ async def test_list_expired_only_returns_past_non_bookmarked(
 
 
 async def test_sweep_expired_deletes_expired_and_keeps_bookmarked(
-    conn: AsyncEngine, tmp_path: Path
+    conn: AsyncEngine, owner_engine: AsyncEngine, tmp_path: Path
 ) -> None:
     from hermes.repository import messages
 
     expired = await conversations.create(conn, user_id=1, channel="web", ts=0)
     await messages.append(
-        conn, conversation_id=expired.id, role="user", content="dies", ts=1
+        conn, user_id=1, conversation_id=expired.id, role="user", content="dies", ts=1
     )
     pinned = await conversations.create(
         conn, user_id=1, channel="web", ts=0, bookmarked=True
@@ -431,7 +436,7 @@ async def test_sweep_expired_deletes_expired_and_keeps_bookmarked(
 
     now = expired.expires_at + 1  # type: ignore[operator]
     deleted = await conversations.sweep_expired(
-        conn, now=now, scratch_root=scratch_root
+        conn, owner_engine=owner_engine, now=now, scratch_root=scratch_root
     )
 
     assert deleted == [expired.id]
@@ -483,16 +488,12 @@ async def _seed_two_users(conn: AsyncEngine) -> None:
     from sqlalchemy import text
 
     async with conn.begin() as db:
+        # User 1 is already seeded by the `conn` fixture (platform_admin);
+        # only user 2 needs adding so the conversations.user_id FK holds.
         await db.execute(
             text(
-                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, "
-                "created_at) VALUES (1,'admin',0,0)"
-            )
-        )
-        await db.execute(
-            text(
-                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, "
-                "created_at) VALUES (2,'member',0,0)"
+                "INSERT INTO users(id, role, bootstrap_completed, "
+                "created_at) VALUES (2,'member',false,0) ON CONFLICT (id) DO NOTHING"
             )
         )
 
