@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from hermes.auth import current_user_id
 from hermes.config import settings
 from hermes.crypto import Encryptor
+from hermes.db import tx_for_user
 from hermes.errors import ErrorCode
 from hermes.logging import logger
 from hermes.oauth import (
@@ -127,10 +128,13 @@ async def create_credential(
 )
 async def delete_credential(request: Request, cred_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
+    uid = current_user_id(request)
     # Null out persona.model and delete the credential in one transaction.
     # The FK cascade handles llm_credential_id=NULL; model has no cascade rule
     # so we clear it explicitly before the DELETE while we can still target by id.
-    async with db.begin() as conn:
+    # `tx_for_user` sets app.user_id so these raw writes pass RLS (both tables
+    # are FORCE-RLS personal tables).
+    async with tx_for_user(db, user_id=uid) as conn:
         await conn.execute(
             sql_text(
                 "UPDATE personas SET model = NULL WHERE llm_credential_id = :cid"
