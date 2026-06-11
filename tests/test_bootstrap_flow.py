@@ -19,13 +19,13 @@ from hermes.repository import persona_history as history_repo
 from hermes.repository import personas as personas_repo
 from hermes.tools.bootstrap import build_bootstrap_tools
 from hermes.tools.skills import build_skill_tools
-from hermes.users import ensure_users_seeded, is_bootstrap_completed
+from hermes.users import is_bootstrap_completed
 
 
 async def _boot(engine: AsyncEngine) -> None:
-    """Simulate full lifespan boot sequence."""
-    await ensure_backfill(engine)
-    await ensure_users_seeded(engine)
+    """Simulate the lifespan boot sequence. The `conn` fixture already seeds
+    the user id=1 row that the personal-table FKs depend on."""
+    await ensure_backfill(engine, user_id=1)
     await ensure_bootstrap_skill_seeded(engine)
 
 
@@ -67,8 +67,8 @@ async def test_bootstrap_flow_end_to_end(conn: AsyncEngine) -> None:
     complete_result = await mark_complete.handler({})
     assert json.loads(complete_result) == {"ok": True}
 
-    # 5. Verify final DB state: bootstrap_completed = 1
-    assert await is_bootstrap_completed(conn) is True
+    # 5. Verify final DB state: bootstrap_completed = true
+    assert await is_bootstrap_completed(conn, 1) is True
 
     # 6. Verify default persona has updated fragments
     persona = await personas_repo.get_default(conn, user_id=1)
@@ -78,7 +78,7 @@ async def test_bootstrap_flow_end_to_end(conn: AsyncEngine) -> None:
     assert persona.agents == "coding"
 
     # 7. Verify persona_history has a 'bootstrap' author row
-    history = await history_repo.list_for_persona(conn, persona.id)
+    history = await history_repo.list_for_persona(conn, persona.id, user_id=1)
     bootstrap_rows = [h for h in history if h.author == "bootstrap"]
     assert len(bootstrap_rows) >= 1
 

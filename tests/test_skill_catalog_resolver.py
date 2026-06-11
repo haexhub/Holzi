@@ -7,7 +7,6 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import capabilities
-from hermes import users as users_mod
 from hermes.personas import (
     ensure_bootstrap_skill_seeded,
     get_effective_system_prompt,
@@ -164,7 +163,6 @@ async def test_bootstrap_hint_when_not_completed(conn: AsyncEngine) -> None:
     """Bootstrap hint appears when bootstrap_completed = 0 and the
     bootstrap skill is seeded + enabled."""
     await _seed_env(conn)
-    await users_mod.ensure_users_seeded(conn)
     await ensure_bootstrap_skill_seeded(conn)
     # Default after seed is bootstrap_completed=0
     prompt = await get_effective_system_prompt("web", conn, user_id=1)
@@ -177,10 +175,9 @@ async def test_bootstrap_hint_absent_when_completed(conn: AsyncEngine) -> None:
     """Bootstrap hint is omitted when bootstrap_completed = 1."""
     from sqlalchemy import text
     await _seed_env(conn)
-    await users_mod.ensure_users_seeded(conn)
     await ensure_bootstrap_skill_seeded(conn)
     async with conn.begin() as txn:
-        await txn.execute(text("UPDATE users SET bootstrap_completed = 1 WHERE id = 1"))
+        await txn.execute(text("UPDATE users SET bootstrap_completed = true WHERE id = 1"))
     prompt = await get_effective_system_prompt("web", conn, user_id=1)
     assert "You haven't been set up yet." not in prompt
 
@@ -189,7 +186,6 @@ async def test_bootstrap_hint_absent_when_completed(conn: AsyncEngine) -> None:
 async def test_bootstrap_hint_after_channel_prompt(conn: AsyncEngine) -> None:
     """Bootstrap hint comes AFTER the channel prompt."""
     await _seed_env(conn, channel_prompt="CHANNEL-PROMPT")
-    await users_mod.ensure_users_seeded(conn)
     await ensure_bootstrap_skill_seeded(conn)
     prompt = await get_effective_system_prompt("web", conn, user_id=1)
     channel_pos = prompt.index("CHANNEL-PROMPT")
@@ -205,7 +201,6 @@ async def test_bootstrap_hint_absent_when_skill_missing(
     not exist — otherwise the agent would follow the hint and hit a 404
     on `skill_load`."""
     await _seed_env(conn)
-    await users_mod.ensure_users_seeded(conn)
     # Deliberately do NOT seed the bootstrap skill.
     prompt = await get_effective_system_prompt("web", conn, user_id=1)
     assert "You haven't been set up yet." not in prompt
@@ -219,11 +214,10 @@ async def test_bootstrap_hint_absent_when_skill_disabled(
     but the user has disabled it — `skill_load` would 404 the agent."""
     from sqlalchemy import text
     await _seed_env(conn)
-    await users_mod.ensure_users_seeded(conn)
     await ensure_bootstrap_skill_seeded(conn)
     async with conn.begin() as txn:
         await txn.execute(
-            text("UPDATE skills SET enabled = 0 WHERE slug = 'bootstrap-first-chat'")
+            text("UPDATE skills SET enabled = false WHERE slug = 'bootstrap-first-chat'")
         )
     prompt = await get_effective_system_prompt("web", conn, user_id=1)
     assert "You haven't been set up yet." not in prompt
