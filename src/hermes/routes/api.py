@@ -1453,18 +1453,19 @@ def _note_to_dict(n: Any) -> dict[str, Any]:
     }
 
 
-def _fts5_query(raw: str) -> str:
-    # FTS5 treats `"`, `:`, `*`, `(`, `)`, `-`, etc. as syntax, so a user's
-    # free-form search string would otherwise raise OperationalError at the DB
-    # boundary. Split on whitespace, drop any non-alnum chars per token, and
-    # quote each surviving token as a phrase — that gives multi-term AND
-    # matching without exposing FTS5 operator syntax to the UI.
+def _tsquery(raw: str) -> str:
+    # Postgres `to_tsquery` rejects raw user input — characters like `&`,
+    # `|`, `!`, `(`, `)`, `:`, `<->` are operator syntax. Split on
+    # whitespace, drop everything that isn't alnum or `_`, and emit each
+    # surviving token as a `tok:*` prefix-match. Tokens are OR-joined
+    # with `|` so multi-word queries widen recall (matches how chat
+    # search elsewhere behaves).
     tokens: list[str] = []
     for raw_token in raw.split():
         cleaned = "".join(c for c in raw_token if c.isalnum() or c == "_")
         if cleaned:
-            tokens.append(f'"{cleaned}"')
-    return " ".join(tokens)
+            tokens.append(f"{cleaned}:*")
+    return " | ".join(tokens)
 
 
 @router.get("/notes", response_model=list[NoteResponse])
@@ -1477,7 +1478,7 @@ async def api_list_notes(
     # Whitespace-only `q` is treated the same as an absent `q` — falling
     # through to list_all keeps `?q=` and `?q=%20%20` symmetric.
     if q and q.strip():
-        sanitised = _fts5_query(q)
+        sanitised = _tsquery(q)
         if not sanitised:
             return []
         items = await notes.find(db, user_id=user_id, query=sanitised, limit=limit)

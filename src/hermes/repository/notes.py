@@ -108,15 +108,19 @@ async def find(
     query: str,
     limit: int = 10,
 ) -> list[Note]:
-    # FTS5 join — raw SQL via `text()`, parameters bound. `user_id` is not
-    # indexed in `notes_fts` (only key/content/tags are searchable); we scope
-    # by joining back to `notes` and filtering on `n.user_id` so user A's
-    # search can never surface user B's notes.
+    """Full-text search over notes (key + content + tags), using the
+    generated `search_tsv` GIN index. `query` is a Postgres `tsquery`
+    expression — callers tokenise free-form user input first. The
+    `n.user_id` filter is defense-in-depth on top of RLS: RLS already
+    scopes the row set, but the explicit predicate lets the planner skip
+    rows owned by other users without consulting policy.
+    """
     sql = text(
-        "SELECT n.id, n.key, n.content, n.tags, n.updated_at, n.user_id "
-        "FROM notes n JOIN notes_fts f ON f.rowid = n.id "
-        "WHERE notes_fts MATCH :q AND n.user_id = :user_id "
-        "ORDER BY rank LIMIT :limit"
+        "SELECT id, key, content, tags, updated_at, user_id "
+        "FROM notes "
+        "WHERE search_tsv @@ to_tsquery('simple', :q) AND user_id = :user_id "
+        "ORDER BY ts_rank(search_tsv, to_tsquery('simple', :q)) DESC "
+        "LIMIT :limit"
     )
     async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
