@@ -17,12 +17,14 @@ class Settings(BaseSettings):
     platform_admin_email: str = Field(..., min_length=3)
 
     # asyncpg DSN. Dev/test default points at the docker-compose `db` service.
+    # Dev-only password baked in; production MUST override via HERMES_DATABASE_URL.
     database_url: str = (
         "postgresql+asyncpg://holzi_owner:holzi_owner_dev_pw@db:5432/holzi"
     )
 
     # Runtime DSN: the app connects as holzi_app, NOT as the migration owner.
     # When unset, derived from database_url by substituting the role + password.
+    # Production MUST override `runtime_role_password` via HERMES_RUNTIME_ROLE_PASSWORD.
     runtime_database_url: str | None = None
     runtime_role_password: str = "holzi_app_dev_pw"
 
@@ -97,6 +99,9 @@ class Settings(BaseSettings):
     workspace_git_destructive: bool = False
 
 
+# Constructed at import time so missing env vars fail boot, not first DB call.
+# Tests that need to probe the validation path (missing required fields) use
+# `importlib.reload(hermes.config)` — see tests/test_config_platform_admin.py.
 settings = Settings()  # type: ignore[call-arg]
 
 
