@@ -92,7 +92,6 @@ services:
       UV_CACHE_DIR: /tmp/uv-cache
       HERMES_DB_PATH: /data/hermes.db
       HERMES_LLM_URL: ${HERMES_LLM_URL:-http://haex-claude-proxy:8080}
-      HERMES_SIGNAL_URL: ${HERMES_SIGNAL_URL:-http://signal-cli-rest-api:8080}
       # AES-Master-Key für llm_credentials-Ciphertext. MUSS identisch zu
       # dem sein, was die haex-claude-proxy SQLite-Resolver-Instanz liest
       # — sonst schlägt die Decryption beim Forwarding fehl.
@@ -126,8 +125,6 @@ services:
     depends_on:
       haex-claude-proxy:
         condition: service_started
-      signal-cli-rest-api:
-        condition: service_started
       db:
         condition: service_healthy
 
@@ -153,17 +150,6 @@ services:
       interval: 2s
       timeout: 2s
       retries: 20
-
-  signal-cli-rest-api:
-    image: bbernhard/signal-cli-rest-api:latest
-    container_name: signal-cli-rest-api
-    restart: unless-stopped
-    environment:
-      MODE: json-rpc
-    volumes:
-      - signal-data:/home/.local/share/signal-cli
-    networks:
-      - hermes-local
 
   haex-claude-proxy:
     # Image-Tag konfigurierbar — Default `dev` matched das, was im
@@ -278,5 +264,4 @@ services:
 
 volumes:
   hermes-data:
-  signal-data:
   holzi-pg:
