@@ -166,26 +166,29 @@ async def fts_search(
     conversation_id: int | None = None,
     limit: int = 10,
 ) -> list[Message]:
-    # FTS5 isn't modelled by SQLAlchemy Core — fall back to raw SQL via
-    # `text()`. Parameters are bound, so no SQL injection.
-    if conversation_id is None:
-        sql = text(
-            "SELECT m.id, m.conversation_id, m.role, m.content, m.ts, m.meta_json "
-            "FROM messages m JOIN messages_fts f ON f.rowid = m.id "
-            "WHERE messages_fts MATCH :q "
-            "ORDER BY rank LIMIT :limit"
-        )
-        params = {"q": query, "limit": limit}
-    else:
-        sql = text(
-            "SELECT m.id, m.conversation_id, m.role, m.content, m.ts, m.meta_json "
-            "FROM messages m JOIN messages_fts f ON f.rowid = m.id "
-            "WHERE messages_fts MATCH :q AND m.conversation_id = :cid "
-            "ORDER BY rank LIMIT :limit"
-        )
-        params = {"q": query, "cid": conversation_id, "limit": limit}
+    """Full-text search across messages using the `content_tsv` GIN index.
+
+    `query` is a Postgres `tsquery` expression — the caller is expected to
+    tokenise free-form user input into safe tokens and join them with `|`
+    / `&` before reaching here (operator chars from raw user input would
+    otherwise raise `SyntaxError` from `to_tsquery`). The `user_id =
+    :uid` filter is defense-in-depth — RLS already scopes the row set,
+    but the explicit predicate lets the planner skip rows owned by other
+    users without consulting policy.
+    """
+    sql_base = (
+        "SELECT id, conversation_id, role, content, ts, meta_json "
+        "FROM messages "
+        "WHERE content_tsv @@ to_tsquery('simple', :q) "
+        "AND user_id = :uid"
+    )
+    params: dict[str, object] = {"q": query, "uid": user_id, "limit": limit}
+    if conversation_id is not None:
+        sql_base += " AND conversation_id = :cid"
+        params["cid"] = conversation_id
+    sql_base += " ORDER BY ts DESC LIMIT :limit"
 
     async with tx_for_user(engine, user_id=user_id) as conn:
-        result = await conn.execute(sql, params)
+        result = await conn.execute(text(sql_base), params)
         rows = result.all()
     return [_row_to_message(r) for r in rows]
