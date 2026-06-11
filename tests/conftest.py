@@ -1,18 +1,9 @@
 import os
-import tempfile
 
-# Tests need a file-based SQLite path (not :memory:) so the default
-# AsyncAdaptedQueuePool can hand out one connection per concurrent task.
-# With :memory: + StaticPool, the reminder scheduler's background loop
-# would share a single connection with whatever the test is doing and
-# race on transaction state.
-_TEST_DB_FD, _TEST_DB_PATH = tempfile.mkstemp(suffix=".db", prefix="hermes-test-")
-os.close(_TEST_DB_FD)
-os.unlink(_TEST_DB_PATH)  # init_db will recreate; we just wanted a unique path
-
-os.environ.setdefault("HERMES_AUTH_TOKEN", "test-token-for-pytest")
+os.environ.setdefault("HERMES_PLATFORM_ADMIN_TOKEN", "test-admin-token")
+os.environ.setdefault("HERMES_PLATFORM_ADMIN_EMAIL", "admin@test.local")
 os.environ.setdefault("HERMES_LOG_LEVEL", "WARNING")
-os.environ.setdefault("HERMES_DB_PATH", _TEST_DB_PATH)
+# DATABASE_URL is provided per-test by the testcontainers fixture (Task 18).
 
 from pathlib import Path  # noqa: E402
 
@@ -43,16 +34,6 @@ async def conn(tmp_path: Path):
         yield engine
     finally:
         await engine.dispose()
-
-
-@pytest.fixture(autouse=True)
-def _reset_app_db_path(monkeypatch, tmp_path: Path) -> None:
-    """Force each integration test (anything using LifespanManager) to boot
-    against a fresh file-based DB. Without this the lifespan would re-use
-    the module-level `_TEST_DB_PATH` between tests and leak state.
-    """
-    fresh = str(tmp_path / "hermes.db")
-    monkeypatch.setattr(hermes_config.settings, "db_path", fresh)
 
 
 @pytest.fixture(autouse=True)

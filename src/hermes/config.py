@@ -11,7 +11,21 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    auth_token: str = Field(..., min_length=1)
+    # The bearer that maps to the env-seeded platform admin (§2 design).
+    platform_admin_token: str = Field(..., min_length=1)
+    # The email seeded onto the platform_admin user row.
+    platform_admin_email: str = Field(..., min_length=3)
+
+    # asyncpg DSN. Dev/test default points at the docker-compose `db` service.
+    database_url: str = (
+        "postgresql+asyncpg://holzi_owner:holzi_owner_dev_pw@db:5432/holzi"
+    )
+
+    # Runtime DSN: the app connects as holzi_app, NOT as the migration owner.
+    # When unset, derived from database_url by substituting the role + password.
+    runtime_database_url: str | None = None
+    runtime_role_password: str = "holzi_app_dev_pw"
+
     log_level: str = "INFO"
     # Plan 27: when set, structlog also writes JSON rows to this file
     # (rotated by `RotatingFileHandler`) so the Control Center's Logs page
@@ -23,10 +37,9 @@ class Settings(BaseSettings):
     # unbounded sink. Fail fast on a bad .env value instead.
     log_file_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
     log_file_backup_count: int = Field(default=3, ge=0)
-    db_path: str = "./hermes.db"
     # AES-256-GCM master key for `llm_credentials` ciphertext. Optional —
     # when unset, `crypto.resolve_master_key` falls back to a persisted
-    # keyfile next to the DB (auto-generated on first run, mode 0600).
+    # keyfile next to the data dir (auto-generated on first run, mode 0600).
     # Set explicitly when running multiple Hermes processes against a
     # shared DB (e.g. with the haex-claude-proxy sqlite-resolver).
     secret_key: str | None = None
@@ -41,8 +54,8 @@ class Settings(BaseSettings):
     # Bookmarked conversations override this (expires_at = NULL).
     conversation_ttl_days: int = 30
     # Root for per-conversation scratch directories
-    # (`{data_dir}/conversations/{id}/`). Defaults to the db_path's
-    # parent so backups capture the DB + scratch together.
+    # (`{data_dir}/conversations/{id}/`). Defaults to cwd so backups can
+    # be configured explicitly per-deployment.
     data_dir: str | None = None
     # --- Sandbox runtime (Plan 11b-a) ---------------------------------------
     # Rootless Podman, Docker-API-compatible socket. When the socket is unset
@@ -89,15 +102,13 @@ settings = Settings()  # type: ignore[call-arg]
 
 def get_data_dir() -> Path:
     """Resolve the on-disk data root for non-DB state (master key,
-    scratch directories). Honours `HERMES_DATA_DIR`; falls back to the
-    DB file's parent so a single backup of one directory covers both.
-    Pure :memory: deployments (tests) get cwd as a last resort.
+    scratch directories). Honours `HERMES_DATA_DIR`; falls back to cwd
+    when unset (tests + dev). Production deployments set HERMES_DATA_DIR
+    explicitly so backups capture the right directory.
     """
     if settings.data_dir:
         return Path(settings.data_dir)
-    if settings.db_path == ":memory:":
-        return Path.cwd()
-    return Path(settings.db_path).resolve().parent
+    return Path.cwd()
 
 
 def conversation_scratch_root() -> Path:
