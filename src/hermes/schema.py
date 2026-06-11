@@ -270,6 +270,15 @@ llm_credentials = Table(
 )
 
 Index("llm_credentials_user", llm_credentials.c.user_id)
+# At most one active credential per user. Declared here (not just in Alembic)
+# so `alembic check` / future autogenerate runs see the index in metadata and
+# don't propose dropping it.
+Index(
+    "llm_credentials_user_active_uq",
+    llm_credentials.c.user_id,
+    unique=True,
+    postgresql_where=sa_text("is_active = true"),
+)
 
 
 # Persistent chat-run history. One row per /api/chat call (or per task
