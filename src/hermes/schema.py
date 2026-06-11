@@ -34,6 +34,16 @@ conversations = Table(
     # unix epoch seconds; NULL means the conversation is bookmarked
     # (never expires). Refreshed whenever `updated_at` moves.
     Column("expires_at", Integer),
+    # Plan 35 §C1: owning user. server_default="1" backfills existing rows
+    # on a fresh create_all (id=1 is the seeded admin). On a PRE-C1 DB the
+    # column is added by the lightweight migration instead — see db.py.
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default="1",
+    ),
 )
 
 Index(
@@ -41,6 +51,15 @@ Index(
     conversations.c.channel,
     conversations.c.updated_at.desc(),
 )
+
+# NOTE: the per-user index `conv_user_updated` is intentionally NOT declared
+# here. `conversations` is a pre-existing table, so on an existing pre-C1 DB
+# `metadata.create_all` (which runs BEFORE the lightweight migration that adds
+# `user_id`) would try to CREATE INDEX on a column that doesn't exist yet. The
+# index is created in db.py's `_apply_lightweight_migrations` with
+# `CREATE INDEX IF NOT EXISTS` after the ALTER, which is correct for both fresh
+# and existing DBs. (Contrast: the brand-new `sessions` table's index lives
+# here because the whole table is created fresh in one shot.)
 
 
 messages = Table(

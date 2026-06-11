@@ -29,8 +29,16 @@ async def conn(tmp_path: Path):
     Fixture name stayed `conn` for diff-minimisation across the test
     suite during the SQLAlchemy refactor — repo functions take an engine
     now, so all callsites compile, just with a slightly misleading name.
+
+    Seeds the admin user (id=1) so repo-level tests can create
+    conversations owned by user 1 without tripping the `user_id` foreign
+    key (FK enforcement is ON for every connection). Mirrors what the
+    production lifespan does via `ensure_users_seeded`.
     """
     engine = await init_db(str(tmp_path / "hermes.db"))
+    from hermes.users import ensure_users_seeded
+
+    await ensure_users_seeded(engine)
     try:
         yield engine
     finally:

@@ -423,7 +423,7 @@ async def test_api_runs_returns_full_run_shape(client: httpx.AsyncClient) -> Non
 
 
 async def test_runs_repository_insert_and_finalize(conn) -> None:
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await runs.insert(
         conn,
         run_id="r1",
@@ -454,7 +454,7 @@ async def test_runs_repository_insert_and_finalize(conn) -> None:
 
 
 async def test_runs_repository_finalize_with_error(conn) -> None:
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await runs.insert(
         conn,
         run_id="r1",
@@ -483,7 +483,7 @@ async def test_runs_repository_finalize_with_error(conn) -> None:
 async def test_runs_finalize_does_not_clobber_terminal_row(conn) -> None:
     """A second finalize() must not overwrite an already-terminal row —
     the status='running' guard makes it a no-op."""
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await runs.insert(
         conn,
         run_id="r1",
@@ -510,8 +510,8 @@ async def test_runs_finalize_does_not_clobber_terminal_row(conn) -> None:
 
 
 async def test_runs_repository_list_filters(conn) -> None:
-    c1 = await conversations.create(conn, channel="web", ts=1000)
-    c2 = await conversations.create(conn, channel="task", ts=1000)
+    c1 = await conversations.create(conn, user_id=1, channel="web", ts=1000)
+    c2 = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     for i, (cid, status, channel) in enumerate(
         [
             (c1.id, "success", "web"),

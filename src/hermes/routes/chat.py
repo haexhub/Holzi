@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.auth import current_user_id
 from hermes.errors import ErrorCode
 from hermes.repository import conversations, messages
 from hermes.repository.models import Conversation
@@ -30,18 +31,25 @@ async def chat_completions(request: Request) -> Response:
 
     db: AsyncEngine = request.app.state.db
     upstream: httpx.AsyncClient = request.app.state.upstream
+    user_id = current_user_id(request)
 
-    convo = await _resolve_conversation(request, db)
+    convo = await _resolve_conversation(request, db, user_id)
     await _persist_last_user_message(db, body.get("messages", []), convo.id)
 
     response_headers = {"X-Hermes-Session": str(convo.id)}
 
     if is_stream:
-        return await _stream_forward(upstream, body, response_headers, db, convo.id)
-    return await _oneshot_forward(upstream, body, response_headers, db, convo.id)
+        return await _stream_forward(
+            upstream, body, response_headers, db, convo.id, user_id
+        )
+    return await _oneshot_forward(
+        upstream, body, response_headers, db, convo.id, user_id
+    )
 
 
-async def _resolve_conversation(request: Request, db: AsyncEngine) -> Conversation:
+async def _resolve_conversation(
+    request: Request, db: AsyncEngine, user_id: int
+) -> Conversation:
     header = request.headers.get("x-hermes-session")
     if header is not None:
         try:
@@ -50,7 +58,7 @@ async def _resolve_conversation(request: Request, db: AsyncEngine) -> Conversati
             raise HTTPException(
                 status_code=400, detail=ErrorCode.CHAT_INVALID_SESSION.value
             ) from exc
-        convo = await conversations.get(db, conv_id)
+        convo = await conversations.get(db, conv_id, user_id=user_id)
         if convo is None:
             raise HTTPException(
                 status_code=404, detail=ErrorCode.CHAT_SESSION_NOT_FOUND.value
@@ -59,12 +67,12 @@ async def _resolve_conversation(request: Request, db: AsyncEngine) -> Conversati
 
     workspace = request.headers.get("x-holzi-workspace", _DEFAULT_WORKSPACE)
     existing = await conversations.find_latest_by_external_id(
-        db, channel=CLINE_CHANNEL, external_id=workspace
+        db, user_id=user_id, channel=CLINE_CHANNEL, external_id=workspace
     )
     if existing is not None:
         return existing
     return await conversations.create(
-        db, channel=CLINE_CHANNEL, external_id=workspace
+        db, user_id=user_id, channel=CLINE_CHANNEL, external_id=workspace
     )
 
 
@@ -93,6 +101,7 @@ async def _oneshot_forward(
     headers: dict[str, str],
     db: AsyncEngine,
     conv_id: int,
+    user_id: int,
 ) -> Response:
     try:
         upstream_resp = await upstream.post(CHAT_PATH, json=body)
@@ -124,7 +133,7 @@ async def _oneshot_forward(
         await messages.append(
             db, conversation_id=conv_id, role="assistant", content=assistant_content
         )
-    await conversations.touch(db, conv_id)
+    await conversations.touch(db, conv_id, user_id=user_id)
 
     return Response(
         content=json.dumps(data),
@@ -140,6 +149,7 @@ async def _stream_forward(
     headers: dict[str, str],
     db: AsyncEngine,
     conv_id: int,
+    user_id: int,
 ) -> StreamingResponse:
     request = upstream.build_request("POST", CHAT_PATH, json=body)
     try:
@@ -179,7 +189,7 @@ async def _stream_forward(
                 await messages.append(
                     db, conversation_id=conv_id, role="assistant", content=content
                 )
-            await conversations.touch(db, conv_id)
+            await conversations.touch(db, conv_id, user_id=user_id)
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 

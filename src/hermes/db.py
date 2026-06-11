@@ -128,6 +128,21 @@ async def _apply_lightweight_migrations(conn) -> None:
             ),
             {"window": settings.conversation_ttl_days * 86_400},
         )
+    # Plan 35 §C1: scope conversations by owning user. On a pre-C1 DB the
+    # column is missing (create_all won't ALTER an existing table); add it and
+    # backfill every legacy row to the seeded admin (id=1). The per-user index
+    # lives here (not in schema.py) so it's created AFTER the column exists on
+    # both fresh and existing DBs — see schema.py for the rationale.
+    if "user_id" not in existing:
+        await conn.execute(
+            text("ALTER TABLE conversations ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS conv_user_updated "
+            "ON conversations(user_id, updated_at DESC)"
+        )
+    )
 
     # Plan 16: agent_tasks replaces reminders + todos. Drop the legacy tables
     # on upgrade so re-running metadata.create_all() doesn't recreate them

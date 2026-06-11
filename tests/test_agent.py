@@ -54,7 +54,7 @@ async def _noop_async(_: dict[str, Any]) -> str:
 async def test_run_agent_returns_text_and_persists_assistant_message(
     conn: AsyncEngine,
 ) -> None:
-    convo = await conversations.create(conn, channel="task", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(conn, conversation_id=convo.id, role="user", content="hi", ts=1001)
 
     upstream, _ = _make_upstream([_assistant_response("hello back")])
@@ -76,7 +76,7 @@ async def test_run_agent_returns_text_and_persists_assistant_message(
 async def test_run_agent_injects_system_prompt_and_history(
     conn: AsyncEngine,
 ) -> None:
-    convo = await conversations.create(conn, channel="task", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(conn, conversation_id=convo.id, role="user", content="first", ts=1001)
     await messages.append(
         conn, conversation_id=convo.id, role="assistant", content="reply 1", ts=1002
@@ -108,7 +108,7 @@ async def test_run_agent_injects_system_prompt_and_history(
 async def test_run_agent_includes_tools_definition_in_request(
     conn: AsyncEngine,
 ) -> None:
-    convo = await conversations.create(conn, channel="task", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(conn, conversation_id=convo.id, role="user", content="hi", ts=1001)
 
     upstream, requests_seen = _make_upstream([_assistant_response("hi back")])
@@ -145,7 +145,7 @@ async def test_run_agent_includes_tools_definition_in_request(
 async def test_run_agent_executes_tool_calls_and_loops(
     conn: AsyncEngine,
 ) -> None:
-    convo = await conversations.create(conn, channel="task", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="search standup", ts=1001
     )
@@ -210,7 +210,7 @@ async def test_run_agent_executes_tool_calls_and_loops(
 async def test_run_agent_raises_when_max_iterations_exceeded(
     conn: AsyncEngine,
 ) -> None:
-    convo = await conversations.create(conn, channel="task", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="loop forever", ts=1001
     )
@@ -248,7 +248,7 @@ async def test_run_agent_accepts_object_tool_arguments(
     conn: AsyncEngine,
 ) -> None:
     """Some providers send `function.arguments` as a dict instead of a JSON string."""
-    convo = await conversations.create(conn, channel="task", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="echo please", ts=1001
     )
@@ -306,7 +306,7 @@ async def test_run_agent_gates_risky_tool_and_executes_on_allow(
 ) -> None:
     """A requires_approval tool calls on_approval first; on allow_once it runs
     normally and emits the usual tool_call/tool_result callbacks."""
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="do it", ts=1001
     )
@@ -373,7 +373,7 @@ async def test_run_agent_denies_risky_tool_without_executing(
 ) -> None:
     """On deny the tool never runs; a denied result is fed back to the LLM and
     persisted as an error tool turn. No tool_call callback fires (nothing ran)."""
-    convo = await conversations.create(conn, channel="web", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="do it", ts=1001
     )
@@ -442,7 +442,7 @@ async def test_run_agent_ignores_approval_flag_without_callback(
     """Channels without an approval UI (Signal/MCP pass no on_approval) execute
     a requires_approval tool normally — the gate only engages when a callback
     is supplied."""
-    convo = await conversations.create(conn, channel="task", ts=1000)
+    convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="do it", ts=1001
     )

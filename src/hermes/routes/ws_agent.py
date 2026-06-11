@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hmac
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -88,12 +87,19 @@ async def _handle_inner_msg(session: WsSession, msg: dict[str, Any]) -> None:
 @router.websocket("/ws/agent")
 async def ws_agent(ws: WebSocket, token: str | None = None) -> None:
     # --- Auth ----------------------------------------------------------------
+    # Wave C1: resolve the bearer/query token through the SessionResolver (same
+    # path as the HTTP middleware) instead of comparing against a static HMAC
+    # secret. This closes the Task-4 WS divergence: a revoked/expired session
+    # can no longer authenticate over the WebSocket.
     auth_header = ws.headers.get("authorization", "")
     provided = token
     if auth_header.startswith("Bearer "):
         provided = auth_header[len("Bearer "):]
 
-    if not provided or not hmac.compare_digest(provided, settings.auth_token):
+    identity = None
+    if provided:
+        identity = await ws.app.state.identity_resolver.resolve(provided)
+    if identity is None:
         await ws.accept()
         await ws.close(code=4001)
         return
@@ -114,7 +120,9 @@ async def ws_agent(ws: WebSocket, token: str | None = None) -> None:
         permission_mode: str = init_msg.get("permission_mode") or "ask"
         tool_names: list[str] = init_msg.get("tools") or []
 
-        conv = await conversations.create(db, channel=VSCODE_CHANNEL)
+        conv = await conversations.create(
+            db, user_id=identity.user_id, channel=VSCODE_CHANNEL
+        )
         system_prompt = await get_effective_system_prompt(VSCODE_CHANNEL, db)
         session = WsSession(ws=ws, conversation_id=conv.id, permission_mode=permission_mode)
 

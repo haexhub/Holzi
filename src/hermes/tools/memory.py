@@ -73,6 +73,10 @@ def _list_conversations(db: AsyncEngine) -> Tool:
 
         convos = await conversations.list_all(
             db,
+            # TODO(Wave C): thread the agent's user_id into the tool catalog.
+            # The catalog is currently built without per-user context, so the
+            # memory tools see the admin's (id=1) conversations only.
+            user_id=1,
             channel=channel if channel else None,
             since_unix=int(since_unix) if since_unix is not None else None,
             limit=limit,
@@ -80,7 +84,7 @@ def _list_conversations(db: AsyncEngine) -> Tool:
 
         out: list[dict[str, Any]] = []
         for c in convos:
-            count = await conversations.message_count(db, c.id)
+            count = await conversations.message_count(db, c.id, user_id=1)
             out.append(
                 {
                     "id": c.id,
@@ -123,7 +127,9 @@ def _get_conversation(db: AsyncEngine) -> Tool:
         conv_id = int(args.get("id", 0))
         limit = int(args.get("limit", 50))
 
-        convo = await conversations.get(db, conv_id)
+        # TODO(Wave C): thread the agent's user_id into the tool catalog;
+        # scoped to the admin (id=1) until the catalog carries user context.
+        convo = await conversations.get(db, conv_id, user_id=1)
         if convo is None:
             return json.dumps({"error": f"conversation {conv_id} not found"})
 

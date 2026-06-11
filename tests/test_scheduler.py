@@ -264,7 +264,7 @@ async def test_fire_due_keeps_other_tasks_running_after_one_fails(
     )
 
     async def runner(*, db: AsyncEngine, conversation_id: int, **kwargs: Any) -> str:
-        convo = await conversations.get(db, conversation_id)
+        convo = await conversations.get(db, conversation_id, user_id=1)
         assert convo is not None
         if convo.title == "[task] bad":
             raise RuntimeError("this one fails")
@@ -341,11 +341,11 @@ async def test_run_now_missing_raises_lookup_error(conn: AsyncEngine) -> None:
 async def test_conversation_sweep_deletes_expired_and_keeps_bookmarked(
     conn: AsyncEngine, tmp_path: Path
 ) -> None:
-    expired = await conversations.create(conn, channel="web", ts=0)
+    expired = await conversations.create(conn, user_id=1, channel="web", ts=0)
     pinned = await conversations.create(
-        conn, channel="web", ts=0, bookmarked=True
+        conn, user_id=1, channel="web", ts=0, bookmarked=True
     )
-    fresh = await conversations.create(conn, channel="web", ts=10_000_000)
+    fresh = await conversations.create(conn, user_id=1, channel="web", ts=10_000_000)
 
     scratch_root = tmp_path / "conversations"
     scratch_root.mkdir()
@@ -355,15 +355,15 @@ async def test_conversation_sweep_deletes_expired_and_keeps_bookmarked(
     deleted = await sweeper.sweep(now=expired.expires_at + 1)  # type: ignore[operator]
 
     assert deleted == [expired.id]
-    assert await conversations.get(conn, expired.id) is None
-    assert await conversations.get(conn, pinned.id) is not None
-    assert await conversations.get(conn, fresh.id) is not None
+    assert await conversations.get(conn, expired.id, user_id=1) is None
+    assert await conversations.get(conn, pinned.id, user_id=1) is not None
+    assert await conversations.get(conn, fresh.id, user_id=1) is not None
     assert not (scratch_root / str(expired.id)).exists()
 
 
 async def test_conversation_sweep_noop_when_nothing_expired(
     conn: AsyncEngine, tmp_path: Path
 ) -> None:
-    await conversations.create(conn, channel="web", ts=10_000_000)
+    await conversations.create(conn, user_id=1, channel="web", ts=10_000_000)
     sweeper = ConversationSweepScheduler(conn, tmp_path / "conversations")
     assert await sweeper.sweep(now=10_000_001) == []

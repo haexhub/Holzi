@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes import attachments as attachments_mod
 from hermes.agent import ApprovalDecision, ChatRunCancelled, run_agent
+from hermes.auth import current_user_id
 from hermes.config import conversation_scratch_root, settings
 from hermes.errors import ErrorCode
 from hermes.events import (
@@ -259,11 +260,14 @@ async def api_chat(request: Request) -> Response:
     if payload.conversation_id is None:
         convo = await conversations.create(
             db,
+            user_id=current_user_id(request),
             channel=WEB_CHANNEL,
             title=_derive_conversation_title(payload.message),
         )
     else:
-        existing = await conversations.get(db, payload.conversation_id)
+        existing = await conversations.get(
+            db, payload.conversation_id, user_id=current_user_id(request)
+        )
         if existing is None:
             raise HTTPException(
                 status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -546,7 +550,7 @@ async def _stream_web_agent_run(
                 yield to_sse(item)
             # Re-raise any exception the agent task swallowed via its finally.
             await task
-            await conversations.touch(db, convo.id)
+            await conversations.touch(db, convo.id, user_id=current_user_id(request))
             yield to_sse(DoneEvent())
         except ChatRunCancelled:
             # User-initiated cancel. `cancelled` is the single terminal
@@ -1133,7 +1137,9 @@ async def api_create_conversation(
         if body.message and body.message.strip()
         else None
     )
-    convo = await conversations.create(db, channel=WEB_CHANNEL, title=title)
+    convo = await conversations.create(
+        db, user_id=current_user_id(request), channel=WEB_CHANNEL, title=title
+    )
     return _conversation_to_dict(convo)
 
 
@@ -1146,13 +1152,18 @@ async def api_list_conversations(
 ) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
+    user_id = current_user_id(request)
     if q is not None and q.strip():
-        convos = await conversations.search(db, query=q, channel=channel, limit=limit)
+        convos = await conversations.search(
+            db, user_id=user_id, query=q, channel=channel, limit=limit
+        )
     else:
-        convos = await conversations.list_all(db, channel=channel, limit=limit)
+        convos = await conversations.list_all(
+            db, user_id=user_id, channel=channel, limit=limit
+        )
     out: list[dict[str, Any]] = []
     for c in convos:
-        count = await conversations.message_count(db, c.id)
+        count = await conversations.message_count(db, c.id, user_id=user_id)
         item = _conversation_to_dict(c)
         item["message_count"] = count
         out.append(item)
@@ -1165,7 +1176,7 @@ async def api_get_conversation(
 ) -> dict[str, Any]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
-    convo = await conversations.get(db, conv_id)
+    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1194,7 +1205,7 @@ async def api_upload_attachment(
     file: UploadFile = File(...),  # noqa: B008 — FastAPI dependency default
 ) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
-    convo = await conversations.get(db, conv_id)
+    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1255,7 +1266,9 @@ async def api_update_conversation(
         )
 
     db: AsyncEngine = request.app.state.db
-    updated = await conversations.update_title(db, conv_id, title=title)
+    updated = await conversations.update_title(
+        db, conv_id, user_id=current_user_id(request), title=title
+    )
     if updated is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1267,7 +1280,10 @@ async def api_update_conversation(
 async def api_delete_conversation(request: Request, conv_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
     deleted = await conversations.delete(
-        db, conv_id, scratch_root=conversation_scratch_root()
+        db,
+        conv_id,
+        user_id=current_user_id(request),
+        scratch_root=conversation_scratch_root(),
     )
     if not deleted:
         raise HTTPException(
@@ -1286,13 +1302,14 @@ async def api_toggle_bookmark_conversation(
     `expires_at = NULL` and survive the daily sweep; unbookmarking
     re-arms the TTL from now."""
     db: AsyncEngine = request.app.state.db
-    existing = await conversations.get(db, conv_id)
+    user_id = current_user_id(request)
+    existing = await conversations.get(db, conv_id, user_id=user_id)
     if existing is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
         )
     updated = await conversations.set_bookmarked(
-        db, conv_id, bookmarked=not existing.bookmarked
+        db, conv_id, user_id=user_id, bookmarked=not existing.bookmarked
     )
     if updated is None:
         # Lost-the-race between get() and set_bookmarked().
@@ -1312,7 +1329,7 @@ async def api_retry_conversation(request: Request, conv_id: int) -> Response:
     """
     db: AsyncEngine = request.app.state.db
 
-    convo = await conversations.get(db, conv_id)
+    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1360,7 +1377,7 @@ async def api_edit_and_regenerate(
     """
     db: AsyncEngine = request.app.state.db
 
-    convo = await conversations.get(db, conv_id)
+    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value

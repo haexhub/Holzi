@@ -145,6 +145,9 @@ class AgentTaskScheduler:
         # TTL sweep). Title prefixed with the task title for findability.
         convo = await conversations_repo.create(
             self.db,
+            # TODO(Task 8): use the task's user_id — agent_tasks has no
+            # user_id column yet, so task threads are owned by the admin.
+            user_id=1,
             channel=TASK_CHANNEL,
             title=f"[task] {task.title}",
             ts=now,
