@@ -31,6 +31,7 @@ from hermes.personas import ensure_backfill as ensure_personas_backfill
 from hermes.repository import sandbox_crashes as sandbox_crashes_repo
 from hermes.repository import workspaces as workspaces_repo
 from hermes.routes.api import router as api_router
+from hermes.routes.auth import router as auth_router
 from hermes.routes.chat import router as chat_router
 from hermes.routes.diagnostics import router as diagnostics_router
 from hermes.routes.insights import router as insights_router
@@ -365,6 +366,7 @@ app.add_middleware(BaseHTTPMiddleware, dispatch=bearer_auth_middleware)
 app.include_router(chat_router)
 app.include_router(ws_agent_router)
 app.include_router(api_router)
+app.include_router(auth_router)
 app.include_router(llm_router)
 app.include_router(workspace_router)
 app.include_router(workspaces_router)
