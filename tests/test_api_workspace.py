@@ -27,7 +27,7 @@ IMAGE_PREVIEW_CAP = 2 * 1024 * 1024
 
 
 @pytest.fixture
-async def client():
+async def client(pg_db):
     async with (
         LifespanManager(app),
         httpx.AsyncClient(

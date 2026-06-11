@@ -180,7 +180,7 @@ async def _resolve_first_pending_approval(
 
 
 @pytest.fixture
-async def client():
+async def client(pg_db):
     async with (
         LifespanManager(app),
         httpx.AsyncClient(

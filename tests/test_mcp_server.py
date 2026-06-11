@@ -53,7 +53,7 @@ def test_tool_manifest_serialises_catalog() -> None:
 # Endpoint integration
 # ---------------------------------------------------------------------------
 @pytest.fixture
-async def client():
+async def client(pg_db):
     async with (
         LifespanManager(app),
         httpx.AsyncClient(

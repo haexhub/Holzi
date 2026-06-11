@@ -22,7 +22,7 @@ AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
 @pytest.fixture
-async def client(monkeypatch, tmp_path: Path):
+async def client(pg_db, monkeypatch, tmp_path: Path):
     from hermes import config as hermes_config
 
     # Default each test to a file path inside tmp_path; tests that need

@@ -93,7 +93,7 @@ def _to_sse_stream(payload: dict[str, Any]) -> bytes:
 
 
 @pytest.fixture
-async def client():
+async def client(pg_db):
     async with (
         LifespanManager(app),
         httpx.AsyncClient(
