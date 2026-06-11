@@ -3,6 +3,7 @@ import time
 from sqlalchemy import asc, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.db import tx_for_user
 from hermes.repository.models import Attachment
 from hermes.schema import attachments as t_attachments
 
@@ -23,6 +24,7 @@ def _row_to_attachment(row) -> Attachment:
 async def create(
     engine: AsyncEngine,
     *,
+    user_id: int,
     conversation_id: int,
     filename: str,
     content_type: str,
@@ -30,8 +32,14 @@ async def create(
     storage_path: str,
     ts: int | None = None,
 ) -> Attachment:
+    """Insert a staged attachment.
+
+    `user_id` is denormalised from the parent conversation (Plan §1) so
+    RLS scopes without a join — the route layer looks it up once and
+    threads it through.
+    """
     now = ts if ts is not None else int(time.time())
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             t_attachments.insert()
             .values(
@@ -42,6 +50,7 @@ async def create(
                 size=size,
                 storage_path=storage_path,
                 created_at=now,
+                user_id=user_id,
             )
             .returning(*t_attachments.c)
         )
@@ -51,8 +60,10 @@ async def create(
     return _row_to_attachment(row)
 
 
-async def get(engine: AsyncEngine, attachment_id: int) -> Attachment | None:
-    async with engine.connect() as conn:
+async def get(
+    engine: AsyncEngine, attachment_id: int, *, user_id: int
+) -> Attachment | None:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_attachments).where(t_attachments.c.id == attachment_id)
         )
@@ -61,9 +72,9 @@ async def get(engine: AsyncEngine, attachment_id: int) -> Attachment | None:
 
 
 async def list_by_conversation(
-    engine: AsyncEngine, conversation_id: int
+    engine: AsyncEngine, conversation_id: int, *, user_id: int
 ) -> list[Attachment]:
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_attachments)
             .where(t_attachments.c.conversation_id == conversation_id)
@@ -74,9 +85,9 @@ async def list_by_conversation(
 
 
 async def list_by_message(
-    engine: AsyncEngine, message_id: int
+    engine: AsyncEngine, message_id: int, *, user_id: int
 ) -> list[Attachment]:
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_attachments)
             .where(t_attachments.c.message_id == message_id)
@@ -89,6 +100,7 @@ async def list_by_message(
 async def list_after_message(
     engine: AsyncEngine,
     *,
+    user_id: int,
     conversation_id: int,
     after_message_id: int,
 ) -> list[Attachment]:
@@ -96,7 +108,7 @@ async def list_after_message(
     the conversation. Used to delete their on-disk files before an
     edit-and-regenerate trims those messages (the rows go via FK CASCADE,
     but the files need an explicit unlink)."""
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_attachments).where(
                 t_attachments.c.conversation_id == conversation_id,
@@ -110,6 +122,7 @@ async def list_after_message(
 async def link_to_message(
     engine: AsyncEngine,
     *,
+    user_id: int,
     attachment_ids: list[int],
     message_id: int,
     conversation_id: int,
@@ -124,7 +137,7 @@ async def link_to_message(
     """
     if not attachment_ids:
         return 0
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             t_attachments.update()
             .where(
