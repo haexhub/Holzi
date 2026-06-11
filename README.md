@@ -109,8 +109,8 @@ configuration.
 ## Diagnostics
 
 `GET /api/diagnostics` (bearer-gated) returns a redacted snapshot of
-six subsystem checks (database, LLM credential, messenger, scheduler,
-workspace roots, sandbox runtime). The Web UI surfaces the same data
+five subsystem checks (database, LLM credential, scheduler, workspace
+roots, sandbox runtime). The Web UI surfaces the same data
 at `/settings/diagnostics`, with a "Letzte Fehlläufe" panel backed by
 `GET /api/runs?status=error`. When anything reports `warning` or
 `error`, [`docs/troubleshooting.md`](docs/troubleshooting.md) has the
