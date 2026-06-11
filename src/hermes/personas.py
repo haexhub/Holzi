@@ -20,7 +20,6 @@ chosen persona's prompt with the chosen channel's prompt at runtime —
 the four call-sites that used to inline `*_SYSTEM_PROMPT` constants now
 go through this single function.
 """
-import json
 import time
 from dataclasses import dataclass
 from typing import Final
@@ -207,81 +206,6 @@ beabsichtigt — kein silent fallback.
 """
 
 
-async def _migrate_prompt_to_fragments(engine: AsyncEngine) -> None:
-    """One-shot lifespan migration: bring `personas` up to the Plan-36
-    shape (soul/identity/agents) from the pre-Plan-36 single-`prompt`
-    shape.
-
-    Plan-36 changes the `personas` table from a single `prompt` text
-    column to three typed fragments (`soul`, `identity`, `agents`).
-    SQLAlchemy's `metadata.create_all` issues `CREATE TABLE IF NOT
-    EXISTS` and does NOT alter existing tables, so on a legacy DB the
-    three new columns are missing — this helper adds them, copies the
-    old `prompt` into `identity`, writes a baseline `persona_history`
-    row per migrated persona (so the audit trail is complete from
-    day-one), and finally drops the `prompt` column.
-
-    Idempotent: a single `PRAGMA table_info(personas)` check on the
-    `prompt` column drives the whole branch — present means "legacy
-    DB, run migration"; absent means "already on Plan-36 shape, no-op".
-    Safe to delete once every deployed box has booted on Plan-36 code
-    (tracked as a follow-up; see Plan 36 Risk Register).
-
-    The `WHERE identity = ''` guard on the UPDATE prevents clobbering
-    any `identity` content a user may have written between two boot
-    cycles in the theoretical "partial migration → crash → restart"
-    scenario.
-    """
-    async with engine.connect() as conn:
-        cols = (await conn.execute(text("PRAGMA table_info(personas)"))).all()
-        has_prompt = any(row.name == "prompt" for row in cols)
-    if not has_prompt:
-        return
-
-    async with engine.begin() as conn:
-        # ALTER TABLE ADD COLUMN is idempotent only through the PRAGMA
-        # guard above; SQLite has no "ADD COLUMN IF NOT EXISTS".
-        for col in ("soul", "identity", "agents"):
-            await conn.execute(
-                text(
-                    f"ALTER TABLE personas ADD COLUMN {col} "
-                    "TEXT NOT NULL DEFAULT ''"
-                )
-            )
-        await conn.execute(
-            text("UPDATE personas SET identity = prompt WHERE identity = ''")
-        )
-        # Baseline history row per migrated persona so the Verlauf-Tab
-        # shows the migrated-from state. author='migration' distinguishes
-        # this from user-edit ('user') and seed ('system') rows. The
-        # snapshot reflects the POST-migration values (i.e. soul='',
-        # identity=<legacy prompt>, agents='').
-        now = int(time.time())
-        rows = (
-            await conn.execute(
-                text("SELECT id, name, soul, identity, agents FROM personas")
-            )
-        ).all()
-        for row in rows:
-            snapshot = json.dumps(
-                {
-                    "name": row.name,
-                    "soul": row.soul,
-                    "identity": row.identity,
-                    "agents": row.agents,
-                }
-            )
-            await conn.execute(
-                text(
-                    "INSERT INTO persona_history "
-                    "(persona_id, author, snapshot_json, created_at) "
-                    "VALUES (:pid, 'migration', :snap, :ts)"
-                ),
-                {"pid": row.id, "snap": snapshot, "ts": now},
-            )
-        await conn.execute(text("ALTER TABLE personas DROP COLUMN prompt"))
-
-
 async def _drop_persona_skills_table(engine: AsyncEngine) -> None:
     """One-shot: drop the Plan-33 `persona_skills` table if it still
     exists. Idempotent.
@@ -299,45 +223,6 @@ async def _drop_persona_skills_table(engine: AsyncEngine) -> None:
         return
     async with engine.begin() as conn:
         await conn.execute(text("DROP TABLE persona_skills"))
-
-
-async def _migrate_skills_add_enabled(engine: AsyncEngine) -> None:
-    """One-shot: add `skills.enabled` if missing. Idempotent —
-    PRAGMA-gated. Existing rows default to 1 (enabled).
-    """
-    async with engine.connect() as conn:
-        cols = (
-            await conn.execute(text("PRAGMA table_info(skills)"))
-        ).all()
-        has_enabled = any(row.name == "enabled" for row in cols)
-    if has_enabled:
-        return
-    async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "ALTER TABLE skills ADD COLUMN enabled INTEGER "
-                "NOT NULL DEFAULT 1"
-            )
-        )
-
-
-async def _migrate_personas_add_credential_columns(engine: AsyncEngine) -> None:
-    """One-shot: add llm_credential_id + model to personas if missing. Idempotent."""
-    async with engine.connect() as conn:
-        cols = (await conn.execute(text("PRAGMA table_info(personas)"))).all()
-        has_cred = any(row.name == "llm_credential_id" for row in cols)
-    if has_cred:
-        return
-    async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "ALTER TABLE personas ADD COLUMN llm_credential_id INTEGER "
-                "REFERENCES llm_credentials(id) ON DELETE SET NULL"
-            )
-        )
-        await conn.execute(
-            text("ALTER TABLE personas ADD COLUMN model TEXT")
-        )
 
 
 async def ensure_backfill(engine: AsyncEngine, *, user_id: int) -> None:
