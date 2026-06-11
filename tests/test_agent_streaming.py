@@ -79,7 +79,7 @@ async def test_run_agent_with_on_chunk_streams_each_text_delta(
 ) -> None:
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
 
     upstream = _mock_upstream(_streaming_text_handler(["Hello", " ", "world"]))
@@ -92,6 +92,7 @@ async def test_run_agent_with_on_chunk_streams_each_text_delta(
     text = await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=SYSTEM,
         model=MODEL,
@@ -101,7 +102,7 @@ async def test_run_agent_with_on_chunk_streams_each_text_delta(
     assert text == "Hello world"
     assert chunks_seen == ["Hello", " ", "world"]
     # Persisted final text once, not per chunk.
-    msgs = await messages.list_by_conversation(conn, convo.id)
+    msgs = await messages.list_by_conversation(conn, convo.id, user_id=1)
     assert [m.role for m in msgs] == ["user", "assistant"]
     assert msgs[-1].content == "Hello world"
 
@@ -111,7 +112,7 @@ async def test_run_agent_with_on_chunk_sets_stream_true_on_upstream(
 ) -> None:
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
 
     captured: list[dict[str, Any]] = []
@@ -132,6 +133,7 @@ async def test_run_agent_with_on_chunk_sets_stream_true_on_upstream(
     await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=SYSTEM,
         model=MODEL,
@@ -150,7 +152,7 @@ async def test_run_agent_streaming_requests_usage_when_metrics_provided(
     OpenAI-compatible providers omit the terminal usage chunk."""
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
 
     captured: list[dict[str, Any]] = []
@@ -172,6 +174,7 @@ async def test_run_agent_streaming_requests_usage_when_metrics_provided(
     await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=SYSTEM,
         model=MODEL,
@@ -186,7 +189,7 @@ async def test_run_agent_streaming_handles_tool_call_round(
 ) -> None:
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="echo me", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="echo me", ts=1001
     )
 
     # Tool-call streamed across multiple deltas — id+name on the first delta,
@@ -240,6 +243,7 @@ async def test_run_agent_streaming_handles_tool_call_round(
     text = await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=SYSTEM,
         model=MODEL,
@@ -261,7 +265,7 @@ async def test_run_agent_streaming_raises_on_truncated_stream(
     not be silently persisted as a completed assistant turn."""
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
 
     # Two text deltas, then EOF without `[DONE]` and no finish_reason.
@@ -288,6 +292,7 @@ async def test_run_agent_streaming_raises_on_truncated_stream(
         await run_agent(
             upstream=upstream,
             db=conn,
+            user_id=1,
             conversation_id=convo.id,
             system_prompt=SYSTEM,
             model=MODEL,
@@ -295,7 +300,7 @@ async def test_run_agent_streaming_raises_on_truncated_stream(
         )
 
     # Nothing should have been persisted as a completed assistant turn.
-    msgs = await messages.list_by_conversation(conn, convo.id)
+    msgs = await messages.list_by_conversation(conn, convo.id, user_id=1)
     assert [m.role for m in msgs] == ["user"]
 
 
@@ -306,7 +311,7 @@ async def test_run_agent_streaming_accepts_finish_reason_as_terminal(
     last chunk — that should also count as a clean completion."""
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
 
     body = (
@@ -329,6 +334,7 @@ async def test_run_agent_streaming_accepts_finish_reason_as_terminal(
     text = await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=SYSTEM,
         model=MODEL,
@@ -349,7 +355,7 @@ async def test_run_agent_raises_cancelled_if_event_set_before_upstream(
 
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
 
     upstream_calls: list[httpx.Request] = []
@@ -376,6 +382,7 @@ async def test_run_agent_raises_cancelled_if_event_set_before_upstream(
         await run_agent(
             upstream=upstream,
             db=conn,
+            user_id=1,
             conversation_id=convo.id,
             system_prompt=SYSTEM,
             model=MODEL,
@@ -384,7 +391,7 @@ async def test_run_agent_raises_cancelled_if_event_set_before_upstream(
         )
 
     assert upstream_calls == []
-    msgs = await messages.list_by_conversation(conn, convo.id)
+    msgs = await messages.list_by_conversation(conn, convo.id, user_id=1)
     assert [m.role for m in msgs] == ["user"]
 
 
@@ -400,7 +407,7 @@ async def test_run_agent_raises_cancelled_after_stream_chunk(
 
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
 
     upstream = _mock_upstream(_streaming_text_handler(["one", "two", "three"]))
@@ -420,6 +427,7 @@ async def test_run_agent_raises_cancelled_after_stream_chunk(
         await run_agent(
             upstream=upstream,
             db=conn,
+            user_id=1,
             conversation_id=convo.id,
             system_prompt=SYSTEM,
             model=MODEL,
@@ -428,7 +436,7 @@ async def test_run_agent_raises_cancelled_after_stream_chunk(
         )
 
     # No fake "completed" assistant row.
-    msgs = await messages.list_by_conversation(conn, convo.id)
+    msgs = await messages.list_by_conversation(conn, convo.id, user_id=1)
     assert [m.role for m in msgs] == ["user"]
 
 
@@ -444,7 +452,7 @@ async def test_run_agent_raises_cancelled_before_tool_execution(
 
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
 
     tool_call_deltas: list[dict[str, Any]] = [
@@ -500,6 +508,7 @@ async def test_run_agent_raises_cancelled_before_tool_execution(
         await run_agent(
             upstream=upstream,
             db=conn,
+            user_id=1,
             conversation_id=convo.id,
             system_prompt=SYSTEM,
             model=MODEL,
@@ -518,7 +527,7 @@ async def test_run_agent_without_on_chunk_stays_non_streaming(
     keep getting the JSON-response path."""
     convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
 
     captured: list[dict[str, Any]] = []
@@ -544,6 +553,7 @@ async def test_run_agent_without_on_chunk_stays_non_streaming(
     text = await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=SYSTEM,
         model=MODEL,
@@ -560,7 +570,7 @@ async def test_run_agent_streaming_emits_tool_callbacks_and_persists_metadata(
     so the conversation can be reconstructed on reload."""
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="echo me", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="echo me", ts=1001
     )
 
     tool_call_deltas: list[dict[str, Any]] = [
@@ -603,6 +613,7 @@ async def test_run_agent_streaming_emits_tool_callbacks_and_persists_metadata(
     await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=SYSTEM,
         model=MODEL,
@@ -615,7 +626,7 @@ async def test_run_agent_streaming_emits_tool_callbacks_and_persists_metadata(
     assert tool_calls_seen == [("call_abc", "echo", {"text": "hi"})]
     assert tool_results_seen == [("call_abc", "success", "echoed: hi")]
 
-    msgs = await messages.list_by_conversation(conn, convo.id)
+    msgs = await messages.list_by_conversation(conn, convo.id, user_id=1)
     tool_msg = next(m for m in msgs if m.role == "tool")
     meta = json.loads(tool_msg.meta_json)
     assert meta["tool_call_id"] == "call_abc"
@@ -632,7 +643,7 @@ async def test_run_agent_streaming_marks_tool_error_status(
     callback and persisted as status=error."""
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="boom", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="boom", ts=1001
     )
 
     tool_call_deltas: list[dict[str, Any]] = [
@@ -671,6 +682,7 @@ async def test_run_agent_streaming_marks_tool_error_status(
     await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=SYSTEM,
         model=MODEL,
@@ -685,7 +697,7 @@ async def test_run_agent_streaming_marks_tool_error_status(
     assert status == "error"
     assert "kaboom" in content
 
-    msgs = await messages.list_by_conversation(conn, convo.id)
+    msgs = await messages.list_by_conversation(conn, convo.id, user_id=1)
     tool_msg = next(m for m in msgs if m.role == "tool")
     meta = json.loads(tool_msg.meta_json)
     assert meta["status"] == "error"
@@ -699,7 +711,7 @@ async def test_run_agent_streaming_forwards_and_persists_reasoning(
     message's meta_json so the card can re-render on reload."""
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
 
     upstream = _mock_upstream(
@@ -725,6 +737,7 @@ async def test_run_agent_streaming_forwards_and_persists_reasoning(
     text = await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=SYSTEM,
         model=MODEL,
@@ -737,7 +750,7 @@ async def test_run_agent_streaming_forwards_and_persists_reasoning(
     # Reasoning is not mixed into the visible answer.
     assert text_seen == ["Hello", " world"]
 
-    msgs = await messages.list_by_conversation(conn, convo.id)
+    msgs = await messages.list_by_conversation(conn, convo.id, user_id=1)
     assistant = next(m for m in msgs if m.role == "assistant")
     assert assistant.content == "Hello world"
     meta = json.loads(assistant.meta_json)
@@ -751,7 +764,7 @@ async def test_run_agent_streaming_reasoning_field_fallback(
     `reasoning_content`; both are accepted."""
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
 
     upstream = _mock_upstream(
@@ -769,6 +782,7 @@ async def test_run_agent_streaming_reasoning_field_fallback(
     await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=SYSTEM,
         model=MODEL,
@@ -785,7 +799,7 @@ async def test_run_agent_streaming_without_reasoning_leaves_meta_null(
     exactly as before — no meta_json, no callback fired."""
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="hi", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
     )
 
     upstream = _mock_upstream(_streaming_text_handler(["plain", " answer"]))
@@ -801,6 +815,7 @@ async def test_run_agent_streaming_without_reasoning_leaves_meta_null(
     await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=SYSTEM,
         model=MODEL,
@@ -809,7 +824,7 @@ async def test_run_agent_streaming_without_reasoning_leaves_meta_null(
     )
 
     assert reasoning_seen == []
-    msgs = await messages.list_by_conversation(conn, convo.id)
+    msgs = await messages.list_by_conversation(conn, convo.id, user_id=1)
     assistant = next(m for m in msgs if m.role == "assistant")
     assert assistant.meta_json is None
 
@@ -821,7 +836,7 @@ async def test_run_agent_streaming_rejects_non_object_tool_arguments(
     clean tool error, not flow a non-dict into the handler/persistence."""
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="go", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="go", ts=1001
     )
 
     tool_call_deltas: list[dict[str, Any]] = [
@@ -864,6 +879,7 @@ async def test_run_agent_streaming_rejects_non_object_tool_arguments(
     await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=SYSTEM,
         model=MODEL,
@@ -878,7 +894,7 @@ async def test_run_agent_streaming_rejects_non_object_tool_arguments(
     assert results[0][1] == "error"
     assert "shape" in results[0][2]
 
-    msgs = await messages.list_by_conversation(conn, convo.id)
+    msgs = await messages.list_by_conversation(conn, convo.id, user_id=1)
     tool_msg = next(m for m in msgs if m.role == "tool")
     meta = json.loads(tool_msg.meta_json)
     assert meta["status"] == "error"

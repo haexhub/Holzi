@@ -55,20 +55,21 @@ async def test_run_agent_returns_text_and_persists_assistant_message(
     conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
-    await messages.append(conn, conversation_id=convo.id, role="user", content="hi", ts=1001)
+    await messages.append(conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001)
 
     upstream, _ = _make_upstream([_assistant_response("hello back")])
 
     text = await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=DEFAULT_SYSTEM,
         model=MODEL,
     )
 
     assert text == "hello back"
-    msgs = await messages.list_by_conversation(conn, convo.id)
+    msgs = await messages.list_by_conversation(conn, convo.id, user_id=1)
     assert [m.role for m in msgs] == ["user", "assistant"]
     assert msgs[-1].content == "hello back"
 
@@ -77,12 +78,12 @@ async def test_run_agent_injects_system_prompt_and_history(
     conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
-    await messages.append(conn, conversation_id=convo.id, role="user", content="first", ts=1001)
+    await messages.append(conn, user_id=1, conversation_id=convo.id, role="user", content="first", ts=1001)
     await messages.append(
-        conn, conversation_id=convo.id, role="assistant", content="reply 1", ts=1002
+        conn, user_id=1, conversation_id=convo.id, role="assistant", content="reply 1", ts=1002
     )
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="follow-up", ts=1003
+        conn, user_id=1, conversation_id=convo.id, role="user", content="follow-up", ts=1003
     )
 
     upstream, requests_seen = _make_upstream([_assistant_response("ok")])
@@ -90,6 +91,7 @@ async def test_run_agent_injects_system_prompt_and_history(
     await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=DEFAULT_SYSTEM,
         model=MODEL,
@@ -109,7 +111,7 @@ async def test_run_agent_includes_tools_definition_in_request(
     conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
-    await messages.append(conn, conversation_id=convo.id, role="user", content="hi", ts=1001)
+    await messages.append(conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001)
 
     upstream, requests_seen = _make_upstream([_assistant_response("hi back")])
 
@@ -123,6 +125,7 @@ async def test_run_agent_includes_tools_definition_in_request(
     await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=DEFAULT_SYSTEM,
         model=MODEL,
@@ -147,7 +150,7 @@ async def test_run_agent_executes_tool_calls_and_loops(
 ) -> None:
     convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="search standup", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="search standup", ts=1001
     )
 
     tool_call = {
@@ -185,6 +188,7 @@ async def test_run_agent_executes_tool_calls_and_loops(
     text = await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=DEFAULT_SYSTEM,
         model=MODEL,
@@ -202,7 +206,7 @@ async def test_run_agent_executes_tool_calls_and_loops(
     assert tool_msgs[0]["content"] == "echoed: standup notes"
 
     # All turns persisted: user + assistant(tool_calls) + tool + assistant(final).
-    msgs = await messages.list_by_conversation(conn, convo.id)
+    msgs = await messages.list_by_conversation(conn, convo.id, user_id=1)
     assert [m.role for m in msgs] == ["user", "assistant", "tool", "assistant"]
     assert msgs[-1].content == "Found: standup notes"
 
@@ -212,7 +216,7 @@ async def test_run_agent_raises_when_max_iterations_exceeded(
 ) -> None:
     convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="loop forever", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="loop forever", ts=1001
     )
 
     tool_call = {
@@ -236,6 +240,7 @@ async def test_run_agent_raises_when_max_iterations_exceeded(
         await run_agent(
             upstream=upstream,
             db=conn,
+            user_id=1,
             conversation_id=convo.id,
             system_prompt=DEFAULT_SYSTEM,
             model=MODEL,
@@ -250,7 +255,7 @@ async def test_run_agent_accepts_object_tool_arguments(
     """Some providers send `function.arguments` as a dict instead of a JSON string."""
     convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="echo please", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="echo please", ts=1001
     )
 
     tool_call = {
@@ -281,6 +286,7 @@ async def test_run_agent_accepts_object_tool_arguments(
     text = await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=DEFAULT_SYSTEM,
         model=MODEL,
@@ -308,7 +314,7 @@ async def test_run_agent_gates_risky_tool_and_executes_on_allow(
     normally and emits the usual tool_call/tool_result callbacks."""
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="do it", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="do it", ts=1001
     )
 
     tool_call = {
@@ -349,6 +355,7 @@ async def test_run_agent_gates_risky_tool_and_executes_on_allow(
     text = await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=DEFAULT_SYSTEM,
         model=MODEL,
@@ -375,7 +382,7 @@ async def test_run_agent_denies_risky_tool_without_executing(
     persisted as an error tool turn. No tool_call callback fires (nothing ran)."""
     convo = await conversations.create(conn, user_id=1, channel="web", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="do it", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="do it", ts=1001
     )
 
     tool_call = {
@@ -408,6 +415,7 @@ async def test_run_agent_denies_risky_tool_without_executing(
     text = await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=DEFAULT_SYSTEM,
         model=MODEL,
@@ -429,7 +437,7 @@ async def test_run_agent_denies_risky_tool_without_executing(
     assert "not now" in tool_msgs[0]["content"]
 
     # Persisted as an error tool turn.
-    msgs = await messages.list_by_conversation(conn, convo.id)
+    msgs = await messages.list_by_conversation(conn, convo.id, user_id=1)
     tool_rows = [m for m in msgs if m.role == "tool"]
     assert len(tool_rows) == 1
     meta = json.loads(tool_rows[0].meta_json)
@@ -444,7 +452,7 @@ async def test_run_agent_ignores_approval_flag_without_callback(
     is supplied."""
     convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
     await messages.append(
-        conn, conversation_id=convo.id, role="user", content="do it", ts=1001
+        conn, user_id=1, conversation_id=convo.id, role="user", content="do it", ts=1001
     )
 
     tool_call = {
@@ -469,6 +477,7 @@ async def test_run_agent_ignores_approval_flag_without_callback(
     text = await run_agent(
         upstream=upstream,
         db=conn,
+        user_id=1,
         conversation_id=convo.id,
         system_prompt=DEFAULT_SYSTEM,
         model=MODEL,
