@@ -144,6 +144,24 @@ async def _apply_lightweight_migrations(conn) -> None:
         )
     )
 
+    # Plan 35 §C1: scope notes (the agent's memory store) by owning user.
+    # Same shape as conversations above — on a pre-C1 DB the column is
+    # missing (create_all won't ALTER an existing table); add it and backfill
+    # every legacy row to the seeded admin (id=1). The per-user index lives
+    # here (not in schema.py) so it's created AFTER the column exists on both
+    # fresh and existing DBs. We deliberately do NOT touch the old global
+    # `notes.key` unique index on existing DBs — SQLite can't easily drop it
+    # and for single-user C1 a stricter global-unique key is harmless.
+    cols = await conn.execute(text("PRAGMA table_info(notes)"))
+    notes_cols = {row[1] for row in cols.all()}
+    if "user_id" not in notes_cols:
+        await conn.execute(
+            text("ALTER TABLE notes ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS notes_user ON notes(user_id, updated_at DESC)")
+    )
+
     # Plan 16: agent_tasks replaces reminders + todos. Drop the legacy tables
     # on upgrade so re-running metadata.create_all() doesn't recreate them
     # via leftover SQLAlchemy references in old code paths. The data was

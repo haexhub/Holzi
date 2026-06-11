@@ -44,8 +44,10 @@ async def test_recall_memory_finds_messages_and_notes(
     await messages.append(
         conn, conversation_id=convo.id, role="user", content="buy milk", ts=20
     )
-    await notes.upsert(conn, key="standup.tips", content="rotate facilitator weekly", ts=5)
-    await notes.upsert(conn, key="other", content="unrelated", ts=6)
+    await notes.upsert(
+        conn, user_id=1, key="standup.tips", content="rotate facilitator weekly", ts=5
+    )
+    await notes.upsert(conn, user_id=1, key="other", content="unrelated", ts=6)
 
     tool = _by_name(build_memory_tools(conn), "recall_memory")
     payload = await tool.handler({"query": "standup"})
@@ -166,7 +168,7 @@ async def test_get_note_returns_null_for_missing(
 async def test_get_note_returns_stored_note(
     conn: AsyncEngine,
 ) -> None:
-    await notes.upsert(conn, key="k", content="hello", tags="x,y", ts=1)
+    await notes.upsert(conn, user_id=1, key="k", content="hello", tags="x,y", ts=1)
     tool = _by_name(build_memory_tools(conn), "get_note")
     data = json.loads(await tool.handler({"key": "k"}))
     assert data["content"] == "hello"
@@ -174,8 +176,8 @@ async def test_get_note_returns_stored_note(
 
 
 async def test_find_notes_returns_matches(conn: AsyncEngine) -> None:
-    await notes.upsert(conn, key="a", content="standup notes", ts=1)
-    await notes.upsert(conn, key="b", content="grocery", ts=2)
+    await notes.upsert(conn, user_id=1, key="a", content="standup notes", ts=1)
+    await notes.upsert(conn, user_id=1, key="b", content="grocery", ts=2)
 
     tool = _by_name(build_memory_tools(conn), "find_notes")
     data = json.loads(await tool.handler({"query": "standup"}))
@@ -183,9 +185,9 @@ async def test_find_notes_returns_matches(conn: AsyncEngine) -> None:
 
 
 async def test_find_notes_filters_by_tags(conn: AsyncEngine) -> None:
-    await notes.upsert(conn, key="a", content="something", tags="urgent,work", ts=1)
-    await notes.upsert(conn, key="b", content="something else", tags="urgent", ts=2)
-    await notes.upsert(conn, key="c", content="another", tags="later", ts=3)
+    await notes.upsert(conn, user_id=1, key="a", content="something", tags="urgent,work", ts=1)
+    await notes.upsert(conn, user_id=1, key="b", content="something else", tags="urgent", ts=2)
+    await notes.upsert(conn, user_id=1, key="c", content="another", tags="later", ts=3)
 
     tool = _by_name(build_memory_tools(conn), "find_notes")
     data = json.loads(await tool.handler({"query": "something", "tags": ["work"]}))

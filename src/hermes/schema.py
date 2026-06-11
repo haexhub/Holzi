@@ -13,6 +13,7 @@ from sqlalchemy import (
     MetaData,
     Table,
     Text,
+    UniqueConstraint,
 )
 
 metadata = MetaData()
@@ -124,11 +125,29 @@ notes = Table(
     "notes",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("key", Text, nullable=False, unique=True),
+    # `key` is unique PER USER (not globally) — see the UniqueConstraint
+    # below. The column-level `unique=True` was dropped for Wave C1.
+    Column("key", Text, nullable=False),
     Column("content", Text, nullable=False),
     # comma-separated tags — YAGNI on a join table
     Column("tags", Text),
     Column("updated_at", Integer, nullable=False),
+    # Plan 35 §C1: owning user. server_default="1" backfills existing rows
+    # on a fresh create_all (id=1 is the seeded admin). On a PRE-C1 DB the
+    # column is added by the lightweight migration instead — see db.py.
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default="1",
+    ),
+    # Plan 35 §C1: note keys are unique per user. This composite constraint
+    # only applies to FRESH DBs (create_all). On a pre-C1 DB the old global
+    # `notes.key` unique index survives — SQLite can't easily drop it, and
+    # for single-user C1 a stricter global-unique key is harmless (there's
+    # only user 1). C2 (real multi-user) will need a proper migration.
+    UniqueConstraint("user_id", "key", name="notes_user_key"),
 )
 
 Index("notes_tags", notes.c.tags)

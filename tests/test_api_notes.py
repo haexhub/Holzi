@@ -27,8 +27,8 @@ async def test_api_notes_requires_auth(client: httpx.AsyncClient) -> None:
 
 
 async def test_api_notes_list_returns_all(client: httpx.AsyncClient) -> None:
-    await notes.upsert(app.state.db, key="a", content="alpha", tags="x")
-    await notes.upsert(app.state.db, key="b", content="beta", tags="y")
+    await notes.upsert(app.state.db, user_id=1, key="a", content="alpha", tags="x")
+    await notes.upsert(app.state.db, user_id=1, key="b", content="beta", tags="y")
 
     response = await client.get("/api/notes", headers=AUTH)
     assert response.status_code == 200
@@ -37,7 +37,7 @@ async def test_api_notes_list_returns_all(client: httpx.AsyncClient) -> None:
 
 
 async def test_api_notes_get_returns_single(client: httpx.AsyncClient) -> None:
-    await notes.upsert(app.state.db, key="foo.bar", content="baz")
+    await notes.upsert(app.state.db, user_id=1, key="foo.bar", content="baz")
 
     response = await client.get("/api/notes/foo.bar", headers=AUTH)
     assert response.status_code == 200
@@ -63,7 +63,7 @@ async def test_api_notes_post_creates(client: httpx.AsyncClient) -> None:
     assert data["content"] == "v"
     assert data["tags"] == "t1,t2"
 
-    stored = await notes.get(app.state.db, "k")
+    stored = await notes.get(app.state.db, "k", user_id=1)
     assert stored is not None
     assert stored.content == "v"
 
@@ -76,23 +76,23 @@ async def test_api_notes_post_missing_field_returns_422(
 
 
 async def test_api_notes_put_updates(client: httpx.AsyncClient) -> None:
-    await notes.upsert(app.state.db, key="k", content="old")
+    await notes.upsert(app.state.db, user_id=1, key="k", content="old")
     response = await client.put(
         "/api/notes/k", headers=AUTH, json={"content": "new"}
     )
     assert response.status_code == 200
     assert response.json()["content"] == "new"
 
-    stored = await notes.get(app.state.db, "k")
+    stored = await notes.get(app.state.db, "k", user_id=1)
     assert stored is not None
     assert stored.content == "new"
 
 
 async def test_api_notes_delete_removes(client: httpx.AsyncClient) -> None:
-    await notes.upsert(app.state.db, key="kill", content="me")
+    await notes.upsert(app.state.db, user_id=1, key="kill", content="me")
     response = await client.delete("/api/notes/kill", headers=AUTH)
     assert response.status_code == 204
-    assert await notes.get(app.state.db, "kill") is None
+    assert await notes.get(app.state.db, "kill", user_id=1) is None
 
 
 async def test_api_notes_delete_missing_returns_404(
@@ -108,9 +108,9 @@ async def test_api_notes_rejects_invalid_limit(client: httpx.AsyncClient) -> Non
 
 
 async def test_api_notes_search_filters_by_query(client: httpx.AsyncClient) -> None:
-    await notes.upsert(app.state.db, key="a", content="reschedule the standup")
-    await notes.upsert(app.state.db, key="b", content="buy milk")
-    await notes.upsert(app.state.db, key="c", content="cancel the standup")
+    await notes.upsert(app.state.db, user_id=1, key="a", content="reschedule the standup")
+    await notes.upsert(app.state.db, user_id=1, key="b", content="buy milk")
+    await notes.upsert(app.state.db, user_id=1, key="c", content="cancel the standup")
 
     response = await client.get("/api/notes?q=standup", headers=AUTH)
     assert response.status_code == 200
@@ -121,8 +121,8 @@ async def test_api_notes_search_filters_by_query(client: httpx.AsyncClient) -> N
 async def test_api_notes_search_matches_against_tags(
     client: httpx.AsyncClient,
 ) -> None:
-    await notes.upsert(app.state.db, key="x", content="something", tags="urgent")
-    await notes.upsert(app.state.db, key="y", content="something else", tags="later")
+    await notes.upsert(app.state.db, user_id=1, key="x", content="something", tags="urgent")
+    await notes.upsert(app.state.db, user_id=1, key="y", content="something else", tags="later")
 
     response = await client.get("/api/notes?q=urgent", headers=AUTH)
     assert response.status_code == 200
@@ -132,8 +132,8 @@ async def test_api_notes_search_matches_against_tags(
 async def test_api_notes_search_empty_query_returns_full_list(
     client: httpx.AsyncClient,
 ) -> None:
-    await notes.upsert(app.state.db, key="a", content="alpha")
-    await notes.upsert(app.state.db, key="b", content="beta")
+    await notes.upsert(app.state.db, user_id=1, key="a", content="alpha")
+    await notes.upsert(app.state.db, user_id=1, key="b", content="beta")
 
     response = await client.get("/api/notes?q=", headers=AUTH)
     assert response.status_code == 200
@@ -148,7 +148,7 @@ async def test_api_notes_search_tolerates_fts_special_chars(
     # bare operators like AND/OR/NOT as syntax. The route has to sanitise
     # the query before MATCH, otherwise the user gets a 500 the moment they
     # type something like `it's:` or `AND` into the search box.
-    await notes.upsert(app.state.db, key="k", content="alpha bravo")
+    await notes.upsert(app.state.db, user_id=1, key="k", content="alpha bravo")
 
     # Quotes around a known term still hit.
     response = await client.get('/api/notes?q="alpha"', headers=AUTH)
@@ -172,8 +172,8 @@ async def test_api_notes_search_whitespace_only_returns_full_list(
 ) -> None:
     # `?q=` (empty) and `?q=%20%20%20` (whitespace) should be symmetric —
     # both fall through to list_all rather than the empty-result branch.
-    await notes.upsert(app.state.db, key="a", content="alpha")
-    await notes.upsert(app.state.db, key="b", content="beta")
+    await notes.upsert(app.state.db, user_id=1, key="a", content="alpha")
+    await notes.upsert(app.state.db, user_id=1, key="b", content="beta")
 
     response = await client.get("/api/notes?q=%20%20%20", headers=AUTH)
     assert response.status_code == 200

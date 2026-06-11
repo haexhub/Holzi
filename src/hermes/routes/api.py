@@ -1472,22 +1472,23 @@ async def api_list_notes(
 ) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
+    user_id = current_user_id(request)
     # Whitespace-only `q` is treated the same as an absent `q` — falling
     # through to list_all keeps `?q=` and `?q=%20%20` symmetric.
     if q and q.strip():
         sanitised = _fts5_query(q)
         if not sanitised:
             return []
-        items = await notes.find(db, query=sanitised, limit=limit)
+        items = await notes.find(db, user_id=user_id, query=sanitised, limit=limit)
     else:
-        items = await notes.list_all(db, limit=limit)
+        items = await notes.list_all(db, user_id=user_id, limit=limit)
     return [_note_to_dict(n) for n in items]
 
 
 @router.get("/notes/{key}", response_model=NoteResponse)
 async def api_get_note(request: Request, key: str) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
-    n = await notes.get(db, key)
+    n = await notes.get(db, key, user_id=current_user_id(request))
     if n is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.NOTE_NOT_FOUND.value
@@ -1499,7 +1500,9 @@ async def api_get_note(request: Request, key: str) -> dict[str, Any]:
 async def api_create_note(request: Request, body: NoteCreate) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
     tags = ",".join(body.tags) if body.tags else None
-    n = await notes.upsert(db, key=body.key, content=body.content, tags=tags)
+    n = await notes.upsert(
+        db, user_id=current_user_id(request), key=body.key, content=body.content, tags=tags
+    )
     return _note_to_dict(n)
 
 
@@ -1509,14 +1512,16 @@ async def api_update_note(
 ) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
     tags = ",".join(body.tags) if body.tags else None
-    n = await notes.upsert(db, key=key, content=body.content, tags=tags)
+    n = await notes.upsert(
+        db, user_id=current_user_id(request), key=key, content=body.content, tags=tags
+    )
     return _note_to_dict(n)
 
 
 @router.delete("/notes/{key}", status_code=status.HTTP_204_NO_CONTENT)
 async def api_delete_note(request: Request, key: str) -> Response:
     db: AsyncEngine = request.app.state.db
-    if not await notes.delete(db, key):
+    if not await notes.delete(db, key, user_id=current_user_id(request)):
         raise HTTPException(
             status_code=404, detail=ErrorCode.NOTE_NOT_FOUND.value
         )
