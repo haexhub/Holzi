@@ -13,10 +13,11 @@ from hermes.schema import attachments as t_attachments
 from hermes.schema import conversations as t_conversations
 from hermes.schema import messages as t_messages
 
-# Search input is tokenised into bare words before it reaches FTS5. The
-# regex only emits `\w+` runs, so operator characters from the user
-# ("*", "AND", quotes, parens) are dropped at the tokenisation step and
-# can't break the MATCH parser or sneak into LIKE patterns.
+# Search input is tokenised into bare words before it reaches Postgres
+# `to_tsquery`. The regex only emits `\w+` runs, so operator characters
+# from the user ("*", "&", "|", "!", quotes, parens, ":") are dropped at
+# the tokenisation step and can't break the tsquery parser or sneak into
+# LIKE patterns.
 _FTS_TOKEN_RE = re.compile(r"\w+", flags=re.UNICODE)
 
 _SECONDS_PER_DAY = 86_400
@@ -187,12 +188,13 @@ async def search(
     """Find conversations whose title or any message content matches ``query``.
 
     Tokenises the input into ``\\w+`` runs and treats each token as a
-    prefix: title hits use case-insensitive ``LIKE %tok%`` (substring) and
-    message hits use FTS5 ``tok*`` (prefix) against ``messages_fts``. The
-    two hit-sets are unioned at the conversation level so a thread
-    appearing in both shows up exactly once. Tokens are OR-joined on both
-    sides, so multi-word queries widen the result set instead of
-    narrowing it — same recall users get from chat search elsewhere.
+    prefix: title hits use case-insensitive ``LIKE %tok%`` (substring)
+    and message hits use Postgres ``tok:*`` (prefix) against
+    ``messages.content_tsv``. The two hit-sets are unioned at the
+    conversation level so a thread appearing in both shows up exactly
+    once. Tokens are OR-joined on both sides, so multi-word queries
+    widen the result set instead of narrowing it — same recall users
+    get from chat search elsewhere.
 
     Results are sorted newest-first and capped at ``limit``. A blank/
     empty query falls back to :func:`list_all` so the search box can be
@@ -220,10 +222,10 @@ async def search(
         title_clauses.append(f"LOWER(c.title) LIKE :{key}")
         params[key] = f"%{tok.lower()}%"
 
-    # `tok*` is FTS5 prefix matching, so typing "dent" finds a message
-    # mentioning "dentist". Tokens are `\w+`, so no operator characters
-    # can leak through to confuse the MATCH parser.
-    fts_match = " OR ".join(f"{t}*" for t in tokens)
+    # `tok:*` is Postgres tsquery prefix matching, so typing "dent"
+    # finds a message mentioning "dentist". Tokens are `\w+`, so no
+    # operator characters can leak through to confuse the tsquery parser.
+    fts_match = " | ".join(f"{t}:*" for t in tokens)
     params["fts_q"] = fts_match
 
     # Build the WHERE on the conversations table so SELECT produces full
@@ -233,8 +235,7 @@ async def search(
         (
             "c.id IN ("
             "SELECT m.conversation_id FROM messages m "
-            "JOIN messages_fts f ON f.rowid = m.id "
-            "WHERE messages_fts MATCH :fts_q"
+            "WHERE m.content_tsv @@ to_tsquery('simple', :fts_q)"
             ")"
         ),
     ]
