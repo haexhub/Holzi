@@ -117,7 +117,7 @@ async def create(
                 due_at=effective_due_at,
                 schedule=schedule,
                 timezone=timezone,
-                enabled=1 if enabled else 0,
+                enabled=enabled,
                 created_at=now,
                 updated_at=now,
             )
@@ -298,7 +298,7 @@ async def update(
                 due_at=new_due_at,
                 schedule=new_schedule,
                 timezone=new_timezone,
-                enabled=1 if new_enabled else 0,
+                enabled=new_enabled,
                 updated_at=now,
             )
         )

@@ -2,7 +2,7 @@
 
 Provides `STARTER_SKILLS` — 8 seed skill definitions — and
 `ensure_starter_skills_seeded()` which inserts them idempotently
-via INSERT OR IGNORE keyed on the UNIQUE `slug` column.
+via `INSERT ... ON CONFLICT (slug) DO NOTHING`.
 
 User-edited bodies are never overwritten on re-boot: if the slug row
 already exists, the INSERT is silently skipped.

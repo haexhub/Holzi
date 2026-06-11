@@ -2,8 +2,9 @@
 
 Personal AI assistant. The `hermes-server` FastAPI backend powers the
 [holzi-frontend](https://github.com/haexhub/holzi-frontend) Web UI.
-Memory lives in SQLite + FTS5 (being ported to Postgres + RLS — see
-[`docs/plans/2026-06-11-saas-coding-agent-design.md`](docs/plans/2026-06-11-saas-coding-agent-design.md)),
+Memory lives in Postgres with per-user Row-Level Security — see
+[`docs/plans/2026-06-11-saas-coding-agent-design.md`](docs/plans/2026-06-11-saas-coding-agent-design.md)
+for the multi-tenant design; full-text search uses `tsvector` GIN indexes.
 LLM access is OpenAI-compatible (Anthropic OAuth via the bundled
 `haex-claude-proxy`, OpenAI, OpenRouter, Google, or any custom
 endpoint).

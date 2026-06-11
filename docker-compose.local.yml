@@ -129,9 +129,10 @@ services:
         condition: service_healthy
 
   db:
-    # Section 1 / Task 1: Postgres dev service for the upcoming SQLite→Postgres
-    # + RLS port. No code wires to it yet — Tasks 2/3 add deps and DSN config.
-    # Bound to 127.0.0.1:5433 to avoid colliding with a host Postgres on 5432.
+    # Postgres dev service for the §1 Postgres + RLS schema. src/hermes/db.py
+    # connects here via settings.database_url; Alembic runs migrations as the
+    # owner role on startup. Bound to 127.0.0.1:5433 to avoid colliding with
+    # a host Postgres on 5432.
     image: postgres:16-alpine
     container_name: hermes-db
     restart: unless-stopped

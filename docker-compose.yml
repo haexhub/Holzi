@@ -27,7 +27,6 @@ services:
     env_file:
       - .env
     environment:
-      HERMES_DB_PATH: /data/hermes.db
       HERMES_LLM_URL: ${HERMES_LLM_URL:-http://haex-claude-proxy:8080}
     volumes:
       - hermes-data:/data
@@ -48,9 +47,10 @@ services:
         condition: service_healthy
 
   db:
-    # Section 1 / Task 1: Postgres service for the SQLite→Postgres + RLS port.
-    # No code wires to it yet — Tasks 2/3 add deps and DSN config.
-    # Bound to 127.0.0.1:5433 to avoid colliding with a host Postgres on 5432.
+    # Postgres service for the §1 Postgres + RLS schema. hermes-server connects
+    # via settings.database_url; Alembic runs migrations as the owner role on
+    # startup. Bound to 127.0.0.1:5433 to avoid colliding with a host Postgres
+    # on 5432.
     image: postgres:16-alpine
     container_name: hermes-db
     restart: unless-stopped
