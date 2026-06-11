@@ -149,16 +149,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Plan 29-D: add llm_credential_id + model to personas if missing.
         await _migrate_personas_add_credential_columns(app.state.db)
 
+        # Plan 37: seed the single-user row. Must run BEFORE
+        # ensure_personas_backfill — Plan 35 §C1 gives personas a
+        # `user_id` FK to users, so the admin (id=1) row must exist before
+        # the backfill inserts the admin's default persona. Idempotent —
+        # INSERT OR IGNORE.
+        await ensure_users_seeded(app.state.db)
+
         # Plan 29-A: seed the default persona + per-channel prompt rows
         # before anything that resolves system prompts can run (workers,
         # scheduler, /api/chat). Idempotent — re-runs on existing DBs
-        # only insert what's missing.
+        # only insert what's missing. Plan 35 §C1: seeds the admin's
+        # (user_id=1) default persona, hence the users-seed ordering above.
         await ensure_personas_backfill(app.state.db)
 
-        # Plan 37: seed the single-user row. Must run after
-        # ensure_personas_backfill so the persona exists when bootstrap
-        # tools reference it. Idempotent — INSERT OR IGNORE.
-        await ensure_users_seeded(app.state.db)
         await ensure_bootstrap_skill_seeded(app.state.db)
 
         # Plan 38: seed the 8 curated starter skills. Idempotent —

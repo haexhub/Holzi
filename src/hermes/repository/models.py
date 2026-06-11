@@ -171,6 +171,7 @@ class Persona:
     is_default: bool
     created_at: int
     updated_at: int
+    user_id: int
     llm_credential_id: int | None = None
     model: str | None = None
 

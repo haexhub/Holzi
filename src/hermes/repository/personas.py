@@ -38,14 +38,20 @@ def _row_to_persona(row) -> Persona:
         updated_at=row.updated_at,
         llm_credential_id=row.llm_credential_id,
         model=row.model,
+        user_id=row.user_id,
     )
 
 
-async def list_all(engine: AsyncEngine) -> list[Persona]:
-    """Default-first, then alphabetical — drives the UI list order."""
-    stmt = select(t_personas).order_by(
-        desc(t_personas.c.is_default),
-        asc(t_personas.c.name),
+async def list_all(engine: AsyncEngine, *, user_id: int) -> list[Persona]:
+    """Default-first, then alphabetical — drives the UI list order.
+    Scoped to the caller — a user only sees their own personas."""
+    stmt = (
+        select(t_personas)
+        .where(t_personas.c.user_id == user_id)
+        .order_by(
+            desc(t_personas.c.is_default),
+            asc(t_personas.c.name),
+        )
     )
     async with engine.connect() as conn:
         result = await conn.execute(stmt)
@@ -53,28 +59,45 @@ async def list_all(engine: AsyncEngine) -> list[Persona]:
     return [_row_to_persona(r) for r in rows]
 
 
-async def get(engine: AsyncEngine, persona_id: int) -> Persona | None:
+async def get(
+    engine: AsyncEngine, persona_id: int, *, user_id: int
+) -> Persona | None:
+    """Fetch a persona the caller owns. Another user's persona returns None."""
     async with engine.connect() as conn:
         result = await conn.execute(
-            select(t_personas).where(t_personas.c.id == persona_id)
+            select(t_personas).where(
+                t_personas.c.id == persona_id,
+                t_personas.c.user_id == user_id,
+            )
         )
         row = result.first()
     return _row_to_persona(row) if row is not None else None
 
 
-async def get_by_name(engine: AsyncEngine, name: str) -> Persona | None:
+async def get_by_name(
+    engine: AsyncEngine, name: str, *, user_id: int
+) -> Persona | None:
+    """Fetch the caller's persona by name. Scoped — a name owned by another
+    user returns None (names are unique per user)."""
     async with engine.connect() as conn:
         result = await conn.execute(
-            select(t_personas).where(t_personas.c.name == name)
+            select(t_personas).where(
+                t_personas.c.name == name,
+                t_personas.c.user_id == user_id,
+            )
         )
         row = result.first()
     return _row_to_persona(row) if row is not None else None
 
 
-async def get_default(engine: AsyncEngine) -> Persona | None:
+async def get_default(engine: AsyncEngine, *, user_id: int) -> Persona | None:
+    """Return THIS user's default persona (per-user single-default invariant)."""
     async with engine.connect() as conn:
         result = await conn.execute(
-            select(t_personas).where(t_personas.c.is_default == 1)
+            select(t_personas).where(
+                t_personas.c.is_default == 1,
+                t_personas.c.user_id == user_id,
+            )
         )
         row = result.first()
     return _row_to_persona(row) if row is not None else None
@@ -83,6 +106,7 @@ async def get_default(engine: AsyncEngine) -> Persona | None:
 async def create(
     engine: AsyncEngine,
     *,
+    user_id: int,
     name: str,
     soul: str,
     identity: str,
@@ -108,6 +132,7 @@ async def create(
         result = await conn.execute(
             t_personas.insert()
             .values(
+                user_id=user_id,
                 name=name,
                 soul=soul,
                 identity=identity,
@@ -129,6 +154,7 @@ async def create(
                 t_personas.c.updated_at,
                 t_personas.c.llm_credential_id,
                 t_personas.c.model,
+                t_personas.c.user_id,
             )
         )
         row = result.first()
@@ -147,6 +173,7 @@ async def update(
     engine: AsyncEngine,
     persona_id: int,
     *,
+    user_id: int,
     name: str | None = None,
     soul: str | None = None,
     identity: str | None = None,
@@ -158,14 +185,16 @@ async def update(
     history_author: str = "user",
 ) -> Persona | None:
     """Patch a row. None means "leave this field alone". Demotion of
-    other defaults happens via the schema.sql trigger.
+    other defaults happens via the schema.sql trigger (scoped per user).
+
+    Scoped to the owner: another user's persona returns None (no-op).
 
     On a successful update a `persona_history` row capturing the
     post-update state is appended inside the same transaction.
     `history_author` labels who issued this write (``"user"`` for
     UI edits, ``"bootstrap"`` for the bootstrap skill, etc.).
     """
-    existing = await get(engine, persona_id)
+    existing = await get(engine, persona_id, user_id=user_id)
     if existing is None:
         return None
 
@@ -193,14 +222,20 @@ async def update(
     async with engine.begin() as conn:
         await conn.execute(
             t_personas.update()
-            .where(t_personas.c.id == persona_id)
+            .where(
+                t_personas.c.id == persona_id,
+                t_personas.c.user_id == user_id,
+            )
             .values(updates)
         )
         # Read the post-update row on the same connection so the
         # snapshot reflects exactly what the UPDATE produced (including
         # any trigger-driven demotion of `is_default` on this row).
         result = await conn.execute(
-            select(t_personas).where(t_personas.c.id == persona_id)
+            select(t_personas).where(
+                t_personas.c.id == persona_id,
+                t_personas.c.user_id == user_id,
+            )
         )
         row = result.first()
         if row is None:
@@ -212,9 +247,11 @@ async def update(
     return persona
 
 
-async def delete(engine: AsyncEngine, persona_id: int) -> bool:
-    """Delete a row. Refuses to delete the default persona (returns False)
-    so the resolver always has a fallback. FK ON DELETE SET NULL on
+async def delete(engine: AsyncEngine, persona_id: int, *, user_id: int) -> bool:
+    """Delete a row the caller owns. Refuses to delete the default persona
+    (returns False) so the resolver always has a fallback. A persona
+    belonging to another user is a no-op (returns False) — the `user_id`
+    filter is part of the DELETE WHERE. FK ON DELETE SET NULL on
     `channel_prompts.default_persona_id` cleans up channel assignments,
     and ON DELETE CASCADE on `persona_history.persona_id` wipes the
     audit rows for the gone persona.
@@ -230,6 +267,7 @@ async def delete(engine: AsyncEngine, persona_id: int) -> bool:
             t_personas.delete().where(
                 (t_personas.c.id == persona_id)
                 & (t_personas.c.is_default == 0)
+                & (t_personas.c.user_id == user_id)
             )
         )
     return (result.rowcount or 0) > 0

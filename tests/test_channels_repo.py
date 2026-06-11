@@ -49,7 +49,7 @@ async def test_update_prompt_only(conn: AsyncEngine) -> None:
 async def test_update_default_persona_only(conn: AsyncEngine) -> None:
     await repo.ensure_seeded(conn)
     persona = await personas_repo.create(
-        conn, name="A", soul="", identity="a", agents="", is_default=True
+        conn, user_id=1, name="A", soul="", identity="a", agents="", is_default=True
     )
 
     updated = await repo.update(conn, "web", default_persona_id=persona.id)
@@ -69,7 +69,7 @@ async def test_update_unknown_channel_returns_none(conn: AsyncEngine) -> None:
 async def test_reset_prompt(conn: AsyncEngine) -> None:
     await repo.ensure_seeded(conn)
     persona = await personas_repo.create(
-        conn, name="A", soul="", identity="a", agents="", is_default=True
+        conn, user_id=1, name="A", soul="", identity="a", agents="", is_default=True
     )
     await repo.update(
         conn, "web", prompt="custom", default_persona_id=persona.id
@@ -96,6 +96,7 @@ async def test_delete_persona_nulls_channel_default(
     await repo.ensure_seeded(conn)
     default_persona = await personas_repo.create(
         conn,
+        user_id=1,
         name="Default",
         soul="",
         identity="d",
@@ -104,6 +105,7 @@ async def test_delete_persona_nulls_channel_default(
     )
     other = await personas_repo.create(
         conn,
+        user_id=1,
         name="Other",
         soul="",
         identity="o",
@@ -112,11 +114,11 @@ async def test_delete_persona_nulls_channel_default(
     )
     await repo.update(conn, "web", default_persona_id=other.id)
 
-    deleted = await personas_repo.delete(conn, other.id)
+    deleted = await personas_repo.delete(conn, other.id, user_id=1)
     assert deleted is True
 
     row = await repo.get(conn, "web")
     assert row is not None
     assert row.default_persona_id is None
     # Default persona untouched.
-    assert await personas_repo.get(conn, default_persona.id) is not None
+    assert await personas_repo.get(conn, default_persona.id, user_id=1) is not None

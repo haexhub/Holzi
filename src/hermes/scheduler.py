@@ -163,7 +163,12 @@ class AgentTaskScheduler:
             content=task.prompt,
         )
 
-        persona_ctx = await resolve_persona_context(TASK_CHANNEL, self.db)
+        # Background context: resolve the persona under the task's OWNER so
+        # each user's scheduled tasks run with their own default persona +
+        # credential (Plan 35 §C1).
+        persona_ctx = await resolve_persona_context(
+            TASK_CHANNEL, self.db, user_id=task.user_id
+        )
         model = persona_ctx.model
         task_upstream = build_client_for_credential(
             persona_ctx.credential,

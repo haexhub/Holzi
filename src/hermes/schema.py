@@ -421,14 +421,16 @@ personas = Table(
     "personas",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("name", Text, nullable=False, unique=True),
+    # `name` is unique PER USER (not globally) — see the UniqueConstraint
+    # below. The column-level `unique=True` was dropped for Wave C1.
+    Column("name", Text, nullable=False),
     # Plan 36: prompt-Blob aufgesplittet in drei Fragments. Jede
     # Spalte ist NOT NULL DEFAULT '' — Backfill (siehe Lifespan)
     # kopiert den alten `prompt` in `identity`.
     Column("soul", Text, nullable=False, server_default=""),
     Column("identity", Text, nullable=False, server_default=""),
     Column("agents", Text, nullable=False, server_default=""),
-    # 0 | 1 — single-default trigger keeps at most one row with 1.
+    # 0 | 1 — single-default trigger keeps at most one row with 1 PER user.
     Column("is_default", Integer, nullable=False, server_default="0"),
     Column("created_at", Integer, nullable=False),
     Column("updated_at", Integer, nullable=False),
@@ -438,6 +440,23 @@ personas = Table(
         ForeignKey("llm_credentials.id", ondelete="SET NULL"),
     ),
     Column("model", Text),
+    # Plan 35 §C1: owning user. server_default="1" backfills existing rows
+    # on a fresh create_all (id=1 is the seeded admin). On a PRE-C1 DB the
+    # column is added by the lightweight migration instead — see db.py.
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default="1",
+    ),
+    # Plan 35 §C1: persona names are unique per user. This composite
+    # constraint only applies to FRESH DBs (create_all). On a pre-C1 DB the
+    # old global `personas.name` unique index survives — SQLite can't easily
+    # drop it, and for single-user C1 a stricter global-unique name is
+    # harmless (there's only user 1). C2 (real multi-user) will need a
+    # proper migration.
+    UniqueConstraint("user_id", "name", name="personas_user_name"),
 )
 
 

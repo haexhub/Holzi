@@ -369,6 +369,7 @@ async def _stream_web_agent_run(
     persona_ctx = await resolve_persona_context(
         WEB_CHANNEL,
         db,
+        user_id=current_user_id(request),
         model_override=model_override,
         persona_id_override=persona_id_override,
     )
@@ -636,7 +637,7 @@ async def api_chat_context(request: Request) -> ChatContextResponse:
     """
     db: AsyncEngine = request.app.state.db
     persona_id, persona_name, model = await resolve_chat_context_meta(
-        WEB_CHANNEL, db
+        WEB_CHANNEL, db, user_id=current_user_id(request)
     )
     return ChatContextResponse(
         persona_id=persona_id,

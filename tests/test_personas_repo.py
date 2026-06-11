@@ -17,14 +17,15 @@ from hermes.repository import personas as repo
 
 @pytest.mark.asyncio
 async def test_list_empty_on_fresh_db(conn: AsyncEngine) -> None:
-    assert await repo.list_all(conn) == []
-    assert await repo.get_default(conn) is None
+    assert await repo.list_all(conn, user_id=1) == []
+    assert await repo.get_default(conn, user_id=1) is None
 
 
 @pytest.mark.asyncio
 async def test_create_basic_persona(conn: AsyncEngine) -> None:
     p = await repo.create(
         conn,
+        user_id=1,
         name="Hermes",
         soul="be calm",
         identity="be direct",
@@ -66,6 +67,7 @@ async def test_create_with_history_author_overrides_default(
     """
     p = await repo.create(
         conn,
+        user_id=1,
         name="Seeded",
         soul="",
         identity="seed",
@@ -82,6 +84,7 @@ async def test_create_with_history_author_overrides_default(
 async def test_create_duplicate_name_raises(conn: AsyncEngine) -> None:
     await repo.create(
         conn,
+        user_id=1,
         name="Hermes",
         soul="",
         identity="x",
@@ -91,6 +94,7 @@ async def test_create_duplicate_name_raises(conn: AsyncEngine) -> None:
     with pytest.raises(IntegrityError):
         await repo.create(
             conn,
+            user_id=1,
             name="Hermes",
             soul="",
             identity="y",
@@ -103,56 +107,57 @@ async def test_create_duplicate_name_raises(conn: AsyncEngine) -> None:
 async def test_get_and_get_by_name(conn: AsyncEngine) -> None:
     created = await repo.create(
         conn,
+        user_id=1,
         name="Sokrates",
         soul="",
         identity="Ask questions.",
         agents="",
         is_default=False,
     )
-    fetched = await repo.get(conn, created.id)
+    fetched = await repo.get(conn, created.id, user_id=1)
     assert fetched is not None
     assert fetched.name == "Sokrates"
     assert fetched.identity == "Ask questions."
 
-    by_name = await repo.get_by_name(conn, "Sokrates")
+    by_name = await repo.get_by_name(conn, "Sokrates", user_id=1)
     assert by_name is not None and by_name.id == created.id
 
-    assert await repo.get_by_name(conn, "missing") is None
-    assert await repo.get(conn, 99999) is None
+    assert await repo.get_by_name(conn, "missing", user_id=1) is None
+    assert await repo.get(conn, 99999, user_id=1) is None
 
 
 @pytest.mark.asyncio
 async def test_single_default_trigger_on_insert(conn: AsyncEngine) -> None:
     """Inserting a new is_default=1 row demotes any existing default."""
     first = await repo.create(
-        conn, name="A", soul="", identity="a", agents="", is_default=True
+        conn, user_id=1, name="A", soul="", identity="a", agents="", is_default=True
     )
     second = await repo.create(
-        conn, name="B", soul="", identity="b", agents="", is_default=True
+        conn, user_id=1, name="B", soul="", identity="b", agents="", is_default=True
     )
 
-    refreshed_first = await repo.get(conn, first.id)
-    refreshed_second = await repo.get(conn, second.id)
+    refreshed_first = await repo.get(conn, first.id, user_id=1)
+    refreshed_second = await repo.get(conn, second.id, user_id=1)
     assert refreshed_first is not None and refreshed_first.is_default is False
     assert refreshed_second is not None and refreshed_second.is_default is True
 
-    default = await repo.get_default(conn)
+    default = await repo.get_default(conn, user_id=1)
     assert default is not None and default.id == second.id
 
 
 @pytest.mark.asyncio
 async def test_single_default_trigger_on_update(conn: AsyncEngine) -> None:
     first = await repo.create(
-        conn, name="A", soul="", identity="a", agents="", is_default=True
+        conn, user_id=1, name="A", soul="", identity="a", agents="", is_default=True
     )
     second = await repo.create(
-        conn, name="B", soul="", identity="b", agents="", is_default=False
+        conn, user_id=1, name="B", soul="", identity="b", agents="", is_default=False
     )
 
-    updated = await repo.update(conn, second.id, is_default=True)
+    updated = await repo.update(conn, second.id, user_id=1, is_default=True)
     assert updated is not None and updated.is_default is True
 
-    refreshed_first = await repo.get(conn, first.id)
+    refreshed_first = await repo.get(conn, first.id, user_id=1)
     assert refreshed_first is not None and refreshed_first.is_default is False
 
 
@@ -160,13 +165,14 @@ async def test_single_default_trigger_on_update(conn: AsyncEngine) -> None:
 async def test_update_partial_fields(conn: AsyncEngine) -> None:
     p = await repo.create(
         conn,
+        user_id=1,
         name="A",
         soul="old-soul",
         identity="old-id",
         agents="old-ag",
         is_default=True,
     )
-    updated = await repo.update(conn, p.id, identity="new-id")
+    updated = await repo.update(conn, p.id, user_id=1, identity="new-id")
     assert updated is not None
     assert updated.identity == "new-id"
     # Unchanged fragments stay put.
@@ -191,34 +197,34 @@ async def test_update_partial_fields(conn: AsyncEngine) -> None:
 
 @pytest.mark.asyncio
 async def test_update_missing_returns_none(conn: AsyncEngine) -> None:
-    assert await repo.update(conn, 99999, identity="x") is None
+    assert await repo.update(conn, 99999, user_id=1, identity="x") is None
 
 
 @pytest.mark.asyncio
 async def test_delete_default_returns_false(conn: AsyncEngine) -> None:
     p = await repo.create(
-        conn, name="A", soul="", identity="a", agents="", is_default=True
+        conn, user_id=1, name="A", soul="", identity="a", agents="", is_default=True
     )
-    deleted = await repo.delete(conn, p.id)
+    deleted = await repo.delete(conn, p.id, user_id=1)
     assert deleted is False
     # Row must still exist.
-    assert await repo.get(conn, p.id) is not None
+    assert await repo.get(conn, p.id, user_id=1) is not None
 
 
 @pytest.mark.asyncio
 async def test_delete_non_default_returns_true(conn: AsyncEngine) -> None:
     default = await repo.create(
-        conn, name="A", soul="", identity="a", agents="", is_default=True
+        conn, user_id=1, name="A", soul="", identity="a", agents="", is_default=True
     )
     other = await repo.create(
-        conn, name="B", soul="", identity="b", agents="", is_default=False
+        conn, user_id=1, name="B", soul="", identity="b", agents="", is_default=False
     )
 
-    deleted = await repo.delete(conn, other.id)
+    deleted = await repo.delete(conn, other.id, user_id=1)
     assert deleted is True
-    assert await repo.get(conn, other.id) is None
+    assert await repo.get(conn, other.id, user_id=1) is None
     # The default persona survives.
-    assert await repo.get(conn, default.id) is not None
+    assert await repo.get(conn, default.id, user_id=1) is not None
 
     # FK CASCADE wipes history rows for the deleted persona.
     assert await history_repo.list_for_persona(conn, other.id) == []
@@ -226,7 +232,7 @@ async def test_delete_non_default_returns_true(conn: AsyncEngine) -> None:
 
 @pytest.mark.asyncio
 async def test_delete_missing_returns_false(conn: AsyncEngine) -> None:
-    assert await repo.delete(conn, 99999) is False
+    assert await repo.delete(conn, 99999, user_id=1) is False
 
 
 @pytest.mark.asyncio
@@ -234,14 +240,137 @@ async def test_list_all_orders_default_first_then_by_name(
     conn: AsyncEngine,
 ) -> None:
     await repo.create(
-        conn, name="Zeta", soul="", identity="z", agents="", is_default=False
+        conn, user_id=1, name="Zeta", soul="", identity="z", agents="", is_default=False
     )
     await repo.create(
-        conn, name="Alpha", soul="", identity="a", agents="", is_default=False
+        conn, user_id=1, name="Alpha", soul="", identity="a", agents="", is_default=False
     )
     await repo.create(
-        conn, name="Beta", soul="", identity="b", agents="", is_default=True
+        conn, user_id=1, name="Beta", soul="", identity="b", agents="", is_default=True
     )
 
-    rows = await repo.list_all(conn)
+    rows = await repo.list_all(conn, user_id=1)
     assert [r.name for r in rows] == ["Beta", "Alpha", "Zeta"]
+
+
+# --- Wave C1: cross-user isolation -----------------------------------------
+# The `conn` fixture seeds user 1; these tests add user 2 so the
+# `personas.user_id` FK holds, then assert one user can never see, update, or
+# delete another's personas, and that each user keeps an INDEPENDENT default
+# (proving the per-user single-default trigger).
+async def _seed_two_users(conn: AsyncEngine) -> None:
+    from sqlalchemy import text
+
+    async with conn.begin() as db:
+        await db.execute(
+            text(
+                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, "
+                "created_at) VALUES (1,'admin',0,0)"
+            )
+        )
+        await db.execute(
+            text(
+                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, "
+                "created_at) VALUES (2,'member',0,0)"
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_is_scoped_to_owner(conn: AsyncEngine) -> None:
+    await _seed_two_users(conn)
+    theirs = await repo.create(
+        conn, user_id=2, name="Theirs", soul="", identity="t", agents="", is_default=True
+    )
+    # Another user's persona is invisible by id and by name.
+    assert await repo.get(conn, theirs.id, user_id=1) is None
+    assert await repo.get_by_name(conn, "Theirs", user_id=1) is None
+    assert await repo.get(conn, theirs.id, user_id=2) is not None
+
+
+@pytest.mark.asyncio
+async def test_list_all_filters_by_user(conn: AsyncEngine) -> None:
+    await _seed_two_users(conn)
+    mine = await repo.create(
+        conn, user_id=1, name="Mine", soul="", identity="m", agents="", is_default=True
+    )
+    await repo.create(
+        conn, user_id=2, name="Theirs", soul="", identity="t", agents="", is_default=True
+    )
+    rows = await repo.list_all(conn, user_id=1)
+    assert [r.id for r in rows] == [mine.id]
+
+
+@pytest.mark.asyncio
+async def test_update_is_scoped_to_owner(conn: AsyncEngine) -> None:
+    await _seed_two_users(conn)
+    theirs = await repo.create(
+        conn, user_id=2, name="Theirs", soul="", identity="t", agents="", is_default=True
+    )
+    # user 1 can't update user 2's persona (no-op → None).
+    assert (
+        await repo.update(conn, theirs.id, user_id=1, identity="hijacked") is None
+    )
+    # Row untouched and still owned by user 2.
+    still = await repo.get(conn, theirs.id, user_id=2)
+    assert still is not None and still.identity == "t"
+
+
+@pytest.mark.asyncio
+async def test_delete_is_scoped_to_owner(conn: AsyncEngine) -> None:
+    await _seed_two_users(conn)
+    # A non-default persona of user 2 — user 1 still can't delete it.
+    await repo.create(
+        conn, user_id=2, name="TheirDefault", soul="", identity="d", agents="",
+        is_default=True,
+    )
+    theirs = await repo.create(
+        conn, user_id=2, name="Theirs", soul="", identity="t", agents="",
+        is_default=False,
+    )
+    assert await repo.delete(conn, theirs.id, user_id=1) is False
+    assert await repo.get(conn, theirs.id, user_id=2) is not None
+
+
+@pytest.mark.asyncio
+async def test_each_user_has_independent_default(conn: AsyncEngine) -> None:
+    """Per-user single-default trigger: setting user 2's default must NOT
+    unset user 1's. This is the core Wave C1 persona invariant."""
+    await _seed_two_users(conn)
+    mine = await repo.create(
+        conn, user_id=1, name="Mine", soul="", identity="m", agents="", is_default=True
+    )
+    theirs = await repo.create(
+        conn, user_id=2, name="Theirs", soul="", identity="t", agents="", is_default=True
+    )
+
+    # Both users keep their own default — neither demoted the other.
+    my_default = await repo.get_default(conn, user_id=1)
+    their_default = await repo.get_default(conn, user_id=2)
+    assert my_default is not None and my_default.id == mine.id
+    assert their_default is not None and their_default.id == theirs.id
+
+    # Promoting a NEW default for user 2 demotes only user 2's old default.
+    theirs2 = await repo.create(
+        conn, user_id=2, name="Theirs2", soul="", identity="t2", agents="",
+        is_default=True,
+    )
+    assert (await repo.get_default(conn, user_id=2)).id == theirs2.id
+    # user 1's default is still intact.
+    assert (await repo.get_default(conn, user_id=1)).id == mine.id
+
+
+@pytest.mark.asyncio
+async def test_same_name_allowed_across_users(conn: AsyncEngine) -> None:
+    """Names are unique PER user — two users may both own a persona named
+    'Hermes' (composite UniqueConstraint on fresh DBs)."""
+    await _seed_two_users(conn)
+    await repo.create(
+        conn, user_id=1, name="Hermes", soul="", identity="a", agents="", is_default=True
+    )
+    # Same name under user 2 must NOT raise.
+    p2 = await repo.create(
+        conn, user_id=2, name="Hermes", soul="", identity="b", agents="", is_default=True
+    )
+    assert p2.id > 0
+    assert (await repo.get_by_name(conn, "Hermes", user_id=2)).id == p2.id

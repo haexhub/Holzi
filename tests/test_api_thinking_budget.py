@@ -109,7 +109,9 @@ def _patch_persona_to(monkeypatch, *, provider: str):
         updated_at=0,
     )
 
-    async def _resolve(channel, engine, *, model_override=None, persona_id_override=None):
+    async def _resolve(
+        channel, engine, *, user_id, model_override=None, persona_id_override=None
+    ):
         return PersonaContext(
             system_prompt="sys",
             credential=cred,

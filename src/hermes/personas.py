@@ -340,12 +340,18 @@ async def _migrate_personas_add_credential_columns(engine: AsyncEngine) -> None:
         )
 
 
+# Plan 35 §C1: the seeded persona belongs to the admin user (id=1). Backfill
+# only ever runs for the admin — real multi-user persona seeding is a C2
+# concern.
+ADMIN_USER_ID: Final[int] = 1
+
+
 async def ensure_backfill(engine: AsyncEngine) -> None:
-    """Seed the default persona + every channel row that's missing.
+    """Seed the admin's (user_id=1) default persona + every channel row.
 
     Idempotent — safe to call on every boot. Two guards:
-    - Personas: only inserts the default if the table is empty. Once the
-      user has any persona, don't reintroduce "Hermes" (they may have
+    - Personas: only inserts the default if the admin has no persona. Once
+      the user has any persona, don't reintroduce "Hermes" (they may have
       renamed/deleted it intentionally).
     - Channels: per-key check via `channels_repo.ensure_seeded`.
 
@@ -355,10 +361,11 @@ async def ensure_backfill(engine: AsyncEngine) -> None:
     edits and `'migration'` rows produced by
     `_migrate_prompt_to_fragments`).
     """
-    existing_personas = await personas_repo.list_all(engine)
+    existing_personas = await personas_repo.list_all(engine, user_id=ADMIN_USER_ID)
     if not existing_personas:
         await personas_repo.create(
             engine,
+            user_id=ADMIN_USER_ID,
             name=DEFAULT_PERSONA_NAME,
             soul=DEFAULT_PERSONA_SOUL,
             identity=DEFAULT_PERSONA_IDENTITY,
@@ -415,24 +422,29 @@ _BOOTSTRAP_HINT = (
 
 
 async def _resolve_persona(
-    persona_id: int | None, engine: AsyncEngine
+    persona_id: int | None, engine: AsyncEngine, *, user_id: int
 ) -> Persona | None:
-    """Persona by id with global-default fallback (Plan 36 resolution order)."""
+    """Persona by id with per-user default fallback (Plan 36 resolution order).
+
+    The pinned `persona_id` (from a channel row) and the default fallback are
+    both scoped to `user_id` — a channel that pins another user's persona, or
+    a missing pin, falls through to THIS user's default persona.
+    """
     persona = None
     if persona_id is not None:
-        persona = await personas_repo.get(engine, persona_id)
+        persona = await personas_repo.get(engine, persona_id, user_id=user_id)
     if persona is None:
-        persona = await personas_repo.get_default(engine)
+        persona = await personas_repo.get_default(engine, user_id=user_id)
     return persona
 
 
 async def _resolve_default_persona(
-    channel: str, engine: AsyncEngine
+    channel: str, engine: AsyncEngine, *, user_id: int
 ) -> Persona | None:
     """Resolve the channel's default persona (row → default_persona_id → fallback)."""
     row = await channels_repo.get(engine, channel)
     persona_id = None if row is None else row.default_persona_id
-    return await _resolve_persona(persona_id, engine)
+    return await _resolve_persona(persona_id, engine, user_id=user_id)
 
 
 async def _resolve_credential(
@@ -458,6 +470,7 @@ async def get_effective_system_prompt(
     channel: str,
     engine: AsyncEngine,
     *,
+    user_id: int,
     persona_override: Persona | None = None,
 ) -> str:
     """Compose the system prompt the agent should run with for `channel`.
@@ -530,11 +543,12 @@ async def get_effective_system_prompt(
         persona_id = row.default_persona_id
 
     # `persona_override` supplies a one-turn persona (chat overrides); when
-    # absent the channel default is resolved as documented above.
+    # absent the channel default is resolved as documented above (scoped to
+    # the calling user).
     persona = (
         persona_override
         if persona_override is not None
-        else await _resolve_persona(persona_id, engine)
+        else await _resolve_persona(persona_id, engine, user_id=user_id)
     )
 
     enabled_skills = await skills_repo.list_enabled(engine)
@@ -572,14 +586,19 @@ async def resolve_persona_context(
     channel: str,
     engine: AsyncEngine,
     *,
+    user_id: int,
     model_override: str | None = None,
     persona_id_override: int | None = None,
 ) -> PersonaContext:
     """Extend get_effective_system_prompt with credential + model resolution.
 
+    All persona lookups are scoped to `user_id` — the resolved persona is the
+    calling user's, and a `persona_id_override` must belong to that user.
+
     Override resolution order (one-turn; not persisted):
     - persona_id_override: skips channel default persona lookup, uses this ID.
-      Raises HTTPException(404, PERSONA_NOT_FOUND) if the ID doesn't exist.
+      Raises HTTPException(404, PERSONA_NOT_FOUND) if the ID doesn't exist OR
+      belongs to another user.
     - model_override: supersedes persona.model / credential.model / settings.model.
     """
     from fastapi import HTTPException
@@ -589,16 +608,18 @@ async def resolve_persona_context(
     # Resolve persona once (one-turn override or channel default), then reuse
     # it for the system prompt, credential and model resolution below.
     if persona_id_override is not None:
-        persona = await personas_repo.get(engine, persona_id_override)
+        persona = await personas_repo.get(
+            engine, persona_id_override, user_id=user_id
+        )
         if persona is None:
             raise HTTPException(
                 status_code=404, detail=ErrorCode.PERSONA_NOT_FOUND.value
             )
     else:
-        persona = await _resolve_default_persona(channel, engine)
+        persona = await _resolve_default_persona(channel, engine, user_id=user_id)
 
     system_prompt = await get_effective_system_prompt(
-        channel, engine, persona_override=persona
+        channel, engine, user_id=user_id, persona_override=persona
     )
     credential = await _resolve_credential(engine, persona)
 
@@ -619,16 +640,18 @@ async def resolve_persona_context(
 async def resolve_chat_context_meta(
     channel: str,
     engine: AsyncEngine,
+    *,
+    user_id: int,
 ) -> tuple[int | None, str | None, str]:
     """Resolve persona_id + persona_name + model without building system_prompt.
 
     Used by GET /api/chat/context. Three to four DB reads — significantly
     cheaper than `resolve_persona_context` which also runs skill-catalog +
-    capability-index assembly.
+    capability-index assembly. Scoped to the calling user.
     """
     from hermes.config import settings
 
-    persona = await _resolve_default_persona(channel, engine)
+    persona = await _resolve_default_persona(channel, engine, user_id=user_id)
     credential = await _resolve_credential(engine, persona)
 
     model: str = (

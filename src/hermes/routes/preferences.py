@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.auth import current_user_id
 from hermes.errors import ErrorCode
 from hermes.personas import CHANNEL_REGISTRY
 from hermes.provider_models import ProviderModelsError, list_provider_models
@@ -198,7 +199,9 @@ class PersonaUpdate(BaseModel):
 
 @router.get("/personas", response_model=PersonaListResponse)
 async def list_personas(request: Request) -> dict[str, Any]:
-    rows = await personas_repo.list_all(_db(request))
+    rows = await personas_repo.list_all(
+        _db(request), user_id=current_user_id(request)
+    )
     return {"personas": [_persona_to_dict(p) for p in rows]}
 
 
@@ -227,6 +230,7 @@ async def create_persona(
     try:
         persona = await personas_repo.create(
             _db(request),
+            user_id=current_user_id(request),
             name=body.name,
             soul=body.soul,
             identity=body.identity,
@@ -249,7 +253,8 @@ async def update_persona(
     persona_id: int, body: PersonaUpdate, request: Request
 ) -> dict[str, Any]:
     db = _db(request)
-    existing = await personas_repo.get(db, persona_id)
+    uid = current_user_id(request)
+    existing = await personas_repo.get(db, persona_id, user_id=uid)
     if existing is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -365,6 +370,7 @@ async def update_persona(
         updated = await personas_repo.update(
             db,
             persona_id,
+            user_id=uid,
             name=body.name,
             soul=body.soul,
             identity=body.identity,
@@ -398,7 +404,8 @@ async def update_persona(
 )
 async def delete_persona(persona_id: int, request: Request) -> Response:
     db = _db(request)
-    existing = await personas_repo.get(db, persona_id)
+    uid = current_user_id(request)
+    existing = await personas_repo.get(db, persona_id, user_id=uid)
     if existing is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -412,7 +419,7 @@ async def delete_persona(persona_id: int, request: Request) -> Response:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=ErrorCode.PERSONA_DEFAULT_DELETE.value,
         )
-    deleted = await personas_repo.delete(db, persona_id)
+    deleted = await personas_repo.delete(db, persona_id, user_id=uid)
     if not deleted:
         # Race or unexpected — surface as 404.
         raise HTTPException(
@@ -433,7 +440,7 @@ async def list_persona_models(persona_id: int, request: Request) -> dict[str, An
     which credential a persona uses.
     """
     db = _db(request)
-    persona = await personas_repo.get(db, persona_id)
+    persona = await personas_repo.get(db, persona_id, user_id=current_user_id(request))
     if persona is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -479,7 +486,7 @@ async def list_persona_history(
     persona_id: int, request: Request
 ) -> dict[str, Any]:
     db = _db(request)
-    persona = await personas_repo.get(db, persona_id)
+    persona = await personas_repo.get(db, persona_id, user_id=current_user_id(request))
     if persona is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -500,7 +507,8 @@ async def restore_persona_history(
     persona_id: int, snapshot_id: int, request: Request
 ) -> dict[str, Any]:
     db = _db(request)
-    persona = await personas_repo.get(db, persona_id)
+    uid = current_user_id(request)
+    persona = await personas_repo.get(db, persona_id, user_id=uid)
     if persona is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -541,6 +549,7 @@ async def restore_persona_history(
         updated = await personas_repo.update(
             db,
             persona_id,
+            user_id=uid,
             name=snap["name"],
             soul=snap["soul"],
             identity=snap["identity"],
@@ -603,7 +612,9 @@ async def update_channel(
     db = _db(request)
 
     if body.default_persona_id is not None:
-        target = await personas_repo.get(db, body.default_persona_id)
+        target = await personas_repo.get(
+            db, body.default_persona_id, user_id=current_user_id(request)
+        )
         if target is None:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

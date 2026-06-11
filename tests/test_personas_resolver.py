@@ -45,6 +45,7 @@ async def _seed_default_persona(
     await channels_repo.ensure_seeded(engine)
     persona = await personas_repo.create(
         engine,
+        user_id=1,
         name=name,
         soul=soul,
         identity=identity,
@@ -66,7 +67,7 @@ async def _seed_default_persona(
 async def test_unknown_channel_raises_key_error(conn: AsyncEngine) -> None:
     await _seed_default_persona(conn, identity="anything")
     with pytest.raises(KeyError):
-        await get_effective_system_prompt("discord", conn)
+        await get_effective_system_prompt("discord", conn, user_id=1)
 
 
 @pytest.mark.asyncio
@@ -83,7 +84,7 @@ async def test_composition_full_persona(conn: AsyncEngine) -> None:
     )
     await channels_repo.update(conn, "web", prompt="web channel prompt")
 
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
 
     expected = (
         "## Soul\nbe direct\n\n"
@@ -101,7 +102,7 @@ async def test_composition_skips_empty_section(conn: AsyncEngine) -> None:
     await _seed_default_persona(conn, soul="", identity="x", agents="")
     await channels_repo.update(conn, "web", prompt="C")
 
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
 
     assert prompt == "## Identity\nx\n\nC"
 
@@ -117,7 +118,7 @@ async def test_composition_skips_whitespace_only_section(
     )
     await channels_repo.update(conn, "web", prompt="C")
 
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
 
     assert prompt == "## Identity\nbody\n\nC"
 
@@ -137,7 +138,7 @@ async def test_composition_section_order_stable(conn: AsyncEngine) -> None:
     )
     await channels_repo.update(conn, "web", prompt="C")
 
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
 
     expected = (
         "## Soul\nS-body\n\n"
@@ -178,7 +179,7 @@ async def test_composition_catalog_between_persona_and_channel(
         body_markdown="BETA-BODY",
     )
 
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
 
     expected = (
         "## Identity\nI-body\n\n"
@@ -199,7 +200,7 @@ async def test_composition_only_channel_when_persona_empty(
     await _seed_default_persona(conn, soul="", identity="", agents="")
     await channels_repo.update(conn, "web", prompt="just-the-channel")
 
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
 
     assert prompt == "just-the-channel"
 
@@ -224,6 +225,7 @@ async def test_composition_falls_back_to_default_persona_when_channel_persona_un
     # Non-default persona that should NOT win.
     await personas_repo.create(
         conn,
+        user_id=1,
         name="Other",
         soul="",
         identity="not-me",
@@ -233,6 +235,7 @@ async def test_composition_falls_back_to_default_persona_when_channel_persona_un
     # Globally-default persona that should win.
     await personas_repo.create(
         conn,
+        user_id=1,
         name="Default",
         soul="",
         identity="default-identity",
@@ -241,7 +244,7 @@ async def test_composition_falls_back_to_default_persona_when_channel_persona_un
     )
     await channels_repo.update(conn, "web", prompt="C")
 
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
 
     assert prompt == "## Identity\ndefault-identity\n\nC"
 
@@ -264,6 +267,7 @@ async def test_channel_specific_persona_wins_over_global_default(
         )
     await personas_repo.create(
         conn,
+        user_id=1,
         name="Global",
         soul="",
         identity="global-identity",
@@ -272,6 +276,7 @@ async def test_channel_specific_persona_wins_over_global_default(
     )
     custom = await personas_repo.create(
         conn,
+        user_id=1,
         name="Strict Reviewer",
         soul="",
         identity="Be merciless about types.",
@@ -280,7 +285,7 @@ async def test_channel_specific_persona_wins_over_global_default(
     )
     await channels_repo.update(conn, "task", default_persona_id=custom.id)
 
-    prompt = await get_effective_system_prompt("task", conn)
+    prompt = await get_effective_system_prompt("task", conn, user_id=1)
 
     expected = (
         "## Identity\nBe merciless about types.\n\n"
@@ -301,7 +306,7 @@ async def test_capability_index_is_injected_between_skills_and_channel(
     await _seed_default_persona(conn, identity="I-body")
     await channels_repo.update(conn, "web", prompt="C")
 
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
 
     expected = (
         "## Identity\nI-body\n\n"
@@ -321,7 +326,7 @@ async def test_empty_capability_index_is_omitted_from_composition(
     await _seed_default_persona(conn, identity="I-body")
     await channels_repo.update(conn, "web", prompt="C")
 
-    prompt = await get_effective_system_prompt("web", conn)
+    prompt = await get_effective_system_prompt("web", conn, user_id=1)
 
     assert prompt == "## Identity\nI-body\n\nC"
     assert "\n\n\n" not in prompt
@@ -359,7 +364,7 @@ async def _seed_credential(
 async def test_resolve_context_uses_active_cred_when_persona_has_none(conn):
     cred_id = await _seed_credential(conn, model="gpt-4o", is_active=True)
     await _seed_default_persona(conn, identity="x")
-    ctx = await resolve_persona_context("web", conn)
+    ctx = await resolve_persona_context("web", conn, user_id=1)
     assert isinstance(ctx, PersonaContext)
     assert ctx.credential.id == cred_id
     assert ctx.model == "gpt-4o"
@@ -370,8 +375,8 @@ async def test_resolve_context_persona_credential_overrides_active(conn):
     await _seed_credential(conn, model="gpt-4o", is_active=True)
     pinned_id = await _seed_credential(conn, model="gpt-3.5-turbo", is_active=False)
     persona = await _seed_default_persona(conn, identity="x")
-    await personas_repo.update(conn, persona.id, llm_credential_id=pinned_id)
-    ctx = await resolve_persona_context("web", conn)
+    await personas_repo.update(conn, persona.id, user_id=1, llm_credential_id=pinned_id)
+    ctx = await resolve_persona_context("web", conn, user_id=1)
     assert ctx.credential.id == pinned_id
     assert ctx.model == "gpt-3.5-turbo"
 
@@ -380,8 +385,10 @@ async def test_resolve_context_persona_credential_overrides_active(conn):
 async def test_resolve_context_persona_model_overrides_cred_model(conn):
     cred_id = await _seed_credential(conn, model="gpt-4o", is_active=True)
     persona = await _seed_default_persona(conn, identity="x")
-    await personas_repo.update(conn, persona.id, llm_credential_id=cred_id, model="gpt-4-turbo")
-    ctx = await resolve_persona_context("web", conn)
+    await personas_repo.update(
+        conn, persona.id, user_id=1, llm_credential_id=cred_id, model="gpt-4-turbo"
+    )
+    ctx = await resolve_persona_context("web", conn, user_id=1)
     assert ctx.model == "gpt-4-turbo"
 
 
@@ -390,7 +397,7 @@ async def test_resolve_context_no_credential_raises_503(conn):
     from fastapi import HTTPException
     await _seed_default_persona(conn, identity="x")
     with pytest.raises(HTTPException) as exc_info:
-        await resolve_persona_context("web", conn)
+        await resolve_persona_context("web", conn, user_id=1)
     assert exc_info.value.status_code == 503
 
 
@@ -399,8 +406,8 @@ async def test_resolve_context_model_falls_back_to_cred_default_when_persona_mod
     cred_id = await _seed_credential(conn, model="gpt-4o", is_active=True)
     persona = await _seed_default_persona(conn, identity="x")
     # persona.model is None by default — should fall back to credential.model
-    await personas_repo.update(conn, persona.id, llm_credential_id=cred_id)
-    ctx = await resolve_persona_context("web", conn)
+    await personas_repo.update(conn, persona.id, user_id=1, llm_credential_id=cred_id)
+    ctx = await resolve_persona_context("web", conn, user_id=1)
     assert ctx.model == "gpt-4o"
 
 
@@ -413,8 +420,10 @@ async def test_resolve_context_model_falls_back_to_cred_default_when_persona_mod
 async def test_resolve_context_model_override_wins(conn):
     cred_id = await _seed_credential(conn, model="gpt-4o", is_active=True)
     persona = await _seed_default_persona(conn, identity="x")
-    await personas_repo.update(conn, persona.id, llm_credential_id=cred_id, model="gpt-4-turbo")
-    ctx = await resolve_persona_context("web", conn, model_override="claude-opus-4-7")
+    await personas_repo.update(
+        conn, persona.id, user_id=1, llm_credential_id=cred_id, model="gpt-4-turbo"
+    )
+    ctx = await resolve_persona_context("web", conn, user_id=1, model_override="claude-opus-4-7")
     assert ctx.model == "claude-opus-4-7"
 
 
@@ -423,9 +432,10 @@ async def test_resolve_context_persona_id_override_uses_that_persona(conn):
     await _seed_credential(conn, model="gpt-4o", is_active=True)
     await _seed_default_persona(conn, identity="default-identity")
     other = await personas_repo.create(
-        conn, name="Override", soul="", identity="override-identity", agents="", is_default=False
+        conn, user_id=1, name="Override", soul="", identity="override-identity",
+        agents="", is_default=False
     )
-    ctx = await resolve_persona_context("web", conn, persona_id_override=other.id)
+    ctx = await resolve_persona_context("web", conn, user_id=1, persona_id_override=other.id)
     assert "override-identity" in ctx.system_prompt
     assert "default-identity" not in ctx.system_prompt
 
@@ -436,7 +446,7 @@ async def test_resolve_context_unknown_persona_id_override_raises_404(conn):
     await _seed_credential(conn, model="gpt-4o", is_active=True)
     await _seed_default_persona(conn, identity="x")
     with pytest.raises(HTTPException) as exc_info:
-        await resolve_persona_context("web", conn, persona_id_override=999999)
+        await resolve_persona_context("web", conn, user_id=1, persona_id_override=999999)
     assert exc_info.value.status_code == 404
 
 
@@ -444,8 +454,10 @@ async def test_resolve_context_unknown_persona_id_override_raises_404(conn):
 async def test_resolve_chat_context_meta_returns_persona_and_model(conn):
     cred_id = await _seed_credential(conn, model="gpt-4o", is_active=True)
     persona = await _seed_default_persona(conn, identity="x", name="Hermes")
-    await personas_repo.update(conn, persona.id, llm_credential_id=cred_id, model="gpt-4-turbo")
-    persona_id, persona_name, model = await resolve_chat_context_meta("web", conn)
+    await personas_repo.update(
+        conn, persona.id, user_id=1, llm_credential_id=cred_id, model="gpt-4-turbo"
+    )
+    persona_id, persona_name, model = await resolve_chat_context_meta("web", conn, user_id=1)
     assert persona_id == persona.id
     assert persona_name == "Hermes"
     assert model == "gpt-4-turbo"
@@ -456,5 +468,5 @@ async def test_resolve_chat_context_meta_no_credential_raises_503(conn):
     from fastapi import HTTPException
     await _seed_default_persona(conn, identity="x")
     with pytest.raises(HTTPException) as exc_info:
-        await resolve_chat_context_meta("web", conn)
+        await resolve_chat_context_meta("web", conn, user_id=1)
     assert exc_info.value.status_code == 503

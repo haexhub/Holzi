@@ -123,7 +123,9 @@ async def ws_agent(ws: WebSocket, token: str | None = None) -> None:
         conv = await conversations.create(
             db, user_id=identity.user_id, channel=VSCODE_CHANNEL
         )
-        system_prompt = await get_effective_system_prompt(VSCODE_CHANNEL, db)
+        system_prompt = await get_effective_system_prompt(
+            VSCODE_CHANNEL, db, user_id=identity.user_id
+        )
         session = WsSession(ws=ws, conversation_id=conv.id, permission_mode=permission_mode)
 
         logger.info(

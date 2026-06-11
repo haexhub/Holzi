@@ -36,7 +36,7 @@ async def test_bootstrap_flow_end_to_end(conn: AsyncEngine) -> None:
     await _boot(conn)
 
     # 1. Fresh DB: resolver output contains bootstrap hint
-    prompt_before = await get_effective_system_prompt("web", conn)
+    prompt_before = await get_effective_system_prompt("web", conn, user_id=1)
     assert _BOOTSTRAP_HINT in prompt_before, "Bootstrap hint should be in fresh prompt"
 
     # 2. Simulate agent: skill_load('bootstrap-first-chat')
@@ -71,7 +71,7 @@ async def test_bootstrap_flow_end_to_end(conn: AsyncEngine) -> None:
     assert await is_bootstrap_completed(conn) is True
 
     # 6. Verify default persona has updated fragments
-    persona = await personas_repo.get_default(conn)
+    persona = await personas_repo.get_default(conn, user_id=1)
     assert persona is not None
     assert persona.soul == "direkt"
     assert persona.identity == "Max Muster"
@@ -83,5 +83,5 @@ async def test_bootstrap_flow_end_to_end(conn: AsyncEngine) -> None:
     assert len(bootstrap_rows) >= 1
 
     # 8. Verify resolver output NO LONGER contains bootstrap hint
-    prompt_after = await get_effective_system_prompt("web", conn)
+    prompt_after = await get_effective_system_prompt("web", conn, user_id=1)
     assert _BOOTSTRAP_HINT not in prompt_after, "Bootstrap hint should be gone after completion"

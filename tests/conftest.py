@@ -141,6 +141,7 @@ def _patch_persona_context_for_app_tests(request, monkeypatch) -> None:
         channel: str,
         engine,
         *,
+        user_id: int,
         model_override: str | None = None,
         persona_id_override: int | None = None,
     ) -> PersonaContext:
@@ -151,13 +152,15 @@ def _patch_persona_context_for_app_tests(request, monkeypatch) -> None:
         from hermes.repository import personas as personas_repo
 
         if persona_id_override is not None:
-            p = await personas_repo.get(engine, persona_id_override)
+            p = await personas_repo.get(engine, persona_id_override, user_id=user_id)
             if p is None:
                 raise HTTPException(
                     status_code=404, detail=ErrorCode.PERSONA_NOT_FOUND.value
                 )
 
-        system_prompt = await get_effective_system_prompt(channel, engine)
+        system_prompt = await get_effective_system_prompt(
+            channel, engine, user_id=user_id
+        )
         model = model_override or settings.model
         return PersonaContext(
             system_prompt=system_prompt,
@@ -167,11 +170,11 @@ def _patch_persona_context_for_app_tests(request, monkeypatch) -> None:
 
     monkeypatch.setattr(api_mod, "resolve_persona_context", _fake_resolve_persona_context)
 
-    async def _fake_resolve_chat_context_meta(channel: str, engine):
+    async def _fake_resolve_chat_context_meta(channel: str, engine, *, user_id: int):
         from hermes.config import settings
         from hermes.repository import personas as personas_repo
 
-        row = await personas_repo.get_default(engine)
+        row = await personas_repo.get_default(engine, user_id=user_id)
         model = settings.model
         return (
             row.id if row else None,

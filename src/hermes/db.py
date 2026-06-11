@@ -183,6 +183,37 @@ async def _apply_lightweight_migrations(conn) -> None:
         )
     )
 
+    # Plan 35 §C1: scope personas by owning user + make the single-default
+    # invariant PER user. Same column shape as conversations/notes/agent_tasks
+    # above (add + backfill to admin id=1 on a pre-C1 DB). The per-user index
+    # leads with `user_id, is_default` so `get_default(user_id=...)` is a
+    # covering lookup. NOTE: the global `personas.name` unique index from the
+    # old schema survives on existing DBs (harmless for single-user C1).
+    #
+    # The single-default TRIGGERs are the wrinkle: the OLD global versions
+    # already exist on a pre-C1 DB, so schema.sql's `CREATE TRIGGER IF NOT
+    # EXISTS` won't replace them. DROP them here (after the column exists) so
+    # schema.sql — applied AFTER this migration in init_db — recreates the
+    # per-user versions. Idempotent: harmless to DROP+recreate on every boot.
+    cols = await conn.execute(text("PRAGMA table_info(personas)"))
+    personas_cols = {row[1] for row in cols.all()}
+    if "user_id" not in personas_cols:
+        await conn.execute(
+            text("ALTER TABLE personas ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS personas_user_default "
+            "ON personas(user_id, is_default)"
+        )
+    )
+    await conn.execute(
+        text("DROP TRIGGER IF EXISTS personas_single_default_insert")
+    )
+    await conn.execute(
+        text("DROP TRIGGER IF EXISTS personas_single_default_update")
+    )
+
     # Plan 16: agent_tasks replaces reminders + todos. Drop the legacy tables
     # on upgrade so re-running metadata.create_all() doesn't recreate them
     # via leftover SQLAlchemy references in old code paths. The data was
