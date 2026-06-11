@@ -101,7 +101,7 @@ def _mark_bootstrap_complete(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:  # noqa: ARG001
         async with db.begin() as conn:
             await conn.execute(
-                text("UPDATE users SET bootstrap_completed = 1 WHERE id = 1")
+                text("UPDATE users SET bootstrap_completed = true WHERE id = 1")
             )
         return json.dumps({"ok": True})
 
