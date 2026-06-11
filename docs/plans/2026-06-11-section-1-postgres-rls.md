@@ -1,6 +1,8 @@
 # §1 — Postgres Foundation + RLS — Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+>
+> **Status (2026-06-11):** Tasks 1–17 shipped on branch `feat/section-1-postgres-rls` (PR #87). Tasks 18–22 remain — testcontainers conftest, RLS smoke test, port existing tests, lifespan E2E, README/cleanup. The lifespan boots cleanly against Postgres; the test suite is still SQLite-shaped and largely red until Task 18 wires the new fixtures.
 
 **Goal:** Replace the SQLite/aiosqlite single-box backend with a greenfield Postgres + Alembic data layer enforcing per-user isolation via DB-level Row-Level Security. After this plan, `hermes-server` boots against Postgres, every personal-data table denies cross-user reads/writes at the DB layer, and the platform_admin is seeded from env.
 
@@ -1676,3 +1678,40 @@ Plan complete and saved to `docs/plans/2026-06-11-section-1-postgres-rls.md`. Tw
 2. **Parallel Session (separate)** — open new session with `superpowers:executing-plans`, batch execution with checkpoints.
 
 Which approach?
+
+---
+
+## Implementation log — Tasks 1–17 shipped (PR #87)
+
+Branch: `feat/section-1-postgres-rls`. 34 commits on top of `cc1c268` (the plan doc commit).
+
+### What shipped vs. the spec — known divergences
+
+The implementation broadly matches the plan, but several pragmatic deviations were made during execution. Future tasks (18–22) need to be aware of them:
+
+1. **Alembic `env.py` uses the canonical `_do_run_migrations(connection)` callback** instead of the plan's split-`run_sync` form (which had a double-transaction risk for Task 6's autogenerate). Plan §256 was updated in commit `c8a08ef`.
+2. **`compare_type=True` + `compare_server_default=True`** added to `_do_run_migrations` to catch column-type swaps (`Integer→Boolean`). Plan updated.
+3. **`set_current_user_token(user_id) -> Token` + `reset_current_user(token)`** API shipped in Task 10 (one task earlier than the plan called for). The plan's plain `set_current_user(...)` was unsafe across asyncio tasks (no Token returned). Task 12 just wired the existing helpers into the middleware.
+4. **`tx_for_user` uses `SELECT set_config('app.user_id', :u, true)`** instead of `SET LOCAL app.user_id = :u` — asyncpg/Postgres rejects parameterised `SET LOCAL` ("syntax error at or near $1"). Same semantics (transaction-scoped via the `true` third arg). Discovered during the Task 17 lifespan smoke.
+5. **`llm_credentials_user_active_uq`** (the per-user partial unique on `is_active=true`) is declared **both** in `schema.py` (`Index(..., postgresql_where=...)`) and in the `0001_initial.py` migration. Without the metadata declaration, every future `alembic check` would propose dropping it.
+6. **Schema-port also flipped `personas.{soul,identity,agents}` + `persona_history.author` from `server_default=""` (Python str) to `server_default=sa_text("''")` / `sa_text("'user'")`** — purely DDL-stability (autogenerate-friendly), no runtime change.
+7. **Task 11 changed `agent_tasks._get_unscoped` + `mark_run`** to use `tx_as_owner(owner_engine)` (the plan only listed `list_due`). Both legitimately query/mutate across users from the scheduler's perspective.
+8. **Several "boolean compared to integer" bugs in repos fixed during Task 17's lifespan smoke** — `is_active == 1`, `enabled == 1`, `is_default == 1` in 5 repository modules. Now `.is_(True)` / `.is_(False)`. Task 11 ported the schema columns to Boolean but missed these SQLAlchemy comparison operators.
+9. **`runs.aggregate_by_day::strftime` ported** to `func.to_char(func.to_timestamp(...), "YYYY-MM-DD")` as a bonus fix in the Task 13–15 batch (Postgres has no `strftime`).
+10. **`docker compose -f docker-compose.yml down -v -p hermes-local`** is the documented volume-reset path in `docs/postgres-dev.md` (the original `docker volume rm holzi_holzi-pg` form had the wrong project name).
+11. **Signal-cli orphan sweep** (commit `8a899d3`): dead `signal-cli-rest-api` service, `HERMES_SIGNAL_URL` env, `signal-data` volume, README "Linking Signal" section all removed during Task 1. Plan 34 had retired the messenger surface but the infra files still referenced it.
+
+### Dead code awaiting cleanup (Task 20 or 22)
+
+- `src/hermes/personas.py` still has `_migrate_prompt_to_fragments`, `_drop_persona_skills_table`, `_migrate_skills_add_enabled`, `_migrate_personas_add_credential_columns` — SQLite-PRAGMA helpers that the lifespan no longer calls. Function bodies left in place to keep Task 17's commit focused; delete in Task 20 or 22.
+- `tests/conftest.py` still has the SQLite `conn` fixture and the SQLite-shaped `_TEST_DB_PATH` lifecycle. Task 18 replaces it wholesale.
+- `tests/test_db.py` deleted in Task 16 (it asserted on `sqlite_master`, FTS5 virtual tables, and the deleted `init_db(path)` signature — 100% dead).
+- ~10 test files reference the renamed `ensure_users_seeded` (now `ensure_platform_admin_seeded`) and old fixture names. Task 20 ports them.
+
+### Remaining tasks
+
+- **Task 18** — `conftest.py`: testcontainers-postgres, per-test DB, `engine`/`owner_engine`/`pg_db`/`seed_user`/`app_with_pg` fixtures.
+- **Task 19** — `tests/test_rls_cross_user.py`: parametrized SELECT/UPDATE/DELETE denial for every personal table + `WITH CHECK` write-denial.
+- **Task 20** — port the existing test suite (drop `conn` fixture, fix env, fix signature mismatches from Tasks 10/11/17). Delete dead `_migrate_*` helpers in personas.py while doing this.
+- **Task 21** — `tests/test_lifespan_postgres.py`: bearer → ContextVar → tx_for_user → RLS-filtered query end-to-end.
+- **Task 22** — README/Dockerfile cleanup, mark Wave-C docs superseded, final verification checklist.
