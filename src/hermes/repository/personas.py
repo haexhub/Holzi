@@ -130,6 +130,17 @@ async def create(
     """
     now = ts if ts is not None else int(time.time())
     async with tx_for_user(engine, user_id=user_id) as conn:
+        if is_default:
+            # Single-default invariant (per user): demote any current default
+            # before inserting the new one.
+            await conn.execute(
+                t_personas.update()
+                .where(
+                    t_personas.c.user_id == user_id,
+                    t_personas.c.is_default.is_(True),
+                )
+                .values({t_personas.c.is_default: False})
+            )
         result = await conn.execute(
             t_personas.insert()
             .values(
@@ -221,6 +232,18 @@ async def update(
     if model is not _UNSET:
         updates[t_personas.c.model] = model
     async with tx_for_user(engine, user_id=user_id) as conn:
+        if new_is_default:
+            # Single-default invariant (per user): demote every OTHER default
+            # before promoting this row.
+            await conn.execute(
+                t_personas.update()
+                .where(
+                    t_personas.c.user_id == user_id,
+                    t_personas.c.id != persona_id,
+                    t_personas.c.is_default.is_(True),
+                )
+                .values({t_personas.c.is_default: False})
+            )
         await conn.execute(
             t_personas.update()
             .where(
