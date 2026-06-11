@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.auth import BEARER_PREFIX, current_role, current_user_id
+from hermes.config import settings
 from hermes.identity import hash_token
 from hermes.schema import sessions, users
 
@@ -49,6 +50,11 @@ async def logout(request: Request) -> dict[str, Any]:
     """Delete the session backing the presented bearer. Idempotent."""
     header = request.headers.get("authorization", "")
     token = header[len(BEARER_PREFIX) :] if header.startswith(BEARER_PREFIX) else ""
+    # The env bootstrap token is infra (re-seeded at startup), not API-revocable;
+    # deleting its session would brick the deployment until restart. Real C2
+    # (magic-link) sessions are revocable normally.
+    if token and hash_token(token) == hash_token(settings.auth_token):
+        return {"ok": True}
     async with _db(request).begin() as conn:
         await conn.execute(
             sessions.delete().where(sessions.c.token_hash == hash_token(token))

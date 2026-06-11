@@ -30,6 +30,16 @@ async def ensure_users_seeded(engine: AsyncEngine) -> None:
             ),
             {"now": now},
         )
+        # The bootstrap session is singular: if HERMES_AUTH_TOKEN was rotated,
+        # drop any stale 'bootstrap admin' row whose token_hash no longer
+        # matches — otherwise the old token would keep resolving forever.
+        await conn.execute(
+            text(
+                "DELETE FROM sessions WHERE label = 'bootstrap admin' "
+                "AND token_hash != :h"
+            ),
+            {"h": token_hash},
+        )
         await conn.execute(
             text(
                 "INSERT OR IGNORE INTO sessions"
