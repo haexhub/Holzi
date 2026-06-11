@@ -503,6 +503,9 @@ users = Table(
     "users",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("email", Text, unique=True),
+    Column("role", Text, nullable=False, server_default="member"),
+    Column("parent_user_id", Integer, ForeignKey("users.id", ondelete="SET NULL")),
     Column(
         "bootstrap_completed",
         Integer,
@@ -510,4 +513,26 @@ users = Table(
         server_default="0",
     ),
     Column("created_at", Integer, nullable=False),
+)
+
+
+# Plan 35 §C1: per-request bearer is a SESSION token (sha256-hashed at rest).
+# token_hash is UNIQUE; expires_at NULL = never. New table → created by
+# metadata.create_all on fresh DBs; only its non-UNIQUE index needs an
+# explicit CREATE INDEX IF NOT EXISTS in _apply_lightweight_migrations.
+sessions = Table(
+    "sessions",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("token_hash", Text, nullable=False, unique=True),
+    Column("label", Text),
+    Column("created_at", Integer, nullable=False),
+    Column("last_used_at", Integer),
+    Column("expires_at", Integer),  # NULL = never
 )
