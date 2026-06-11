@@ -76,6 +76,9 @@ class AgentTask:
     last_run_id: str | None
     created_at: int
     updated_at: int
+    # Plan 35 §C1: owning user. Defaults to the seeded admin (id=1) so
+    # background callers and legacy rows have a sensible owner.
+    user_id: int = 1
 
 
 @dataclass(frozen=True, slots=True)

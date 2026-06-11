@@ -162,6 +162,27 @@ async def _apply_lightweight_migrations(conn) -> None:
         text("CREATE INDEX IF NOT EXISTS notes_user ON notes(user_id, updated_at DESC)")
     )
 
+    # Plan 35 §C1: scope agent_tasks by owning user. Same shape as
+    # conversations/notes above — on a pre-C1 DB the column is missing
+    # (create_all won't ALTER an existing table); add it and backfill every
+    # legacy row to the seeded admin (id=1). The per-user index lives here
+    # (not in schema.py) so it's created AFTER the column exists on both fresh
+    # and existing DBs. The existing global `agent_tasks_enabled_due` index is
+    # kept untouched — the scheduler's GLOBAL `list_due` (serving every user)
+    # relies on it.
+    cols = await conn.execute(text("PRAGMA table_info(agent_tasks)"))
+    agent_tasks_cols = {row[1] for row in cols.all()}
+    if "user_id" not in agent_tasks_cols:
+        await conn.execute(
+            text("ALTER TABLE agent_tasks ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS agent_tasks_user_enabled_due "
+            "ON agent_tasks(user_id, enabled, due_at)"
+        )
+    )
+
     # Plan 16: agent_tasks replaces reminders + todos. Drop the legacy tables
     # on upgrade so re-running metadata.create_all() doesn't recreate them
     # via leftover SQLAlchemy references in old code paths. The data was

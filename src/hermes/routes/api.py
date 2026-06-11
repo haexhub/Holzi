@@ -1651,7 +1651,9 @@ async def api_list_tasks(
 ) -> list[dict[str, Any]]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
-    items = await agent_tasks.list_all(db, limit=limit)
+    items = await agent_tasks.list_all(
+        db, user_id=current_user_id(request), limit=limit
+    )
     return [_task_to_dict(t) for t in items]
 
 
@@ -1668,6 +1670,7 @@ async def api_create_task(
     db: AsyncEngine = request.app.state.db
     t = await agent_tasks.create(
         db,
+        user_id=current_user_id(request),
         title=body.title,
         prompt=body.prompt,
         due_at=body.due_at,
@@ -1702,6 +1705,7 @@ async def api_patch_task(
         updated = await agent_tasks.update(
             db,
             task_id,
+            user_id=current_user_id(request),
             title=body.title,
             prompt=body.prompt,
             due_at=body.due_at,
@@ -1729,7 +1733,7 @@ async def api_patch_task(
 @router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def api_delete_task(request: Request, task_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
-    if not await agent_tasks.delete(db, task_id):
+    if not await agent_tasks.delete(db, task_id, user_id=current_user_id(request)):
         raise HTTPException(
             status_code=404, detail=ErrorCode.TASK_NOT_FOUND.value
         )
@@ -1751,7 +1755,7 @@ async def api_run_task_now(
     cron schedule — a manual run shouldn't skip the next due occurrence.
     """
     db: AsyncEngine = request.app.state.db
-    task = await agent_tasks.get(db, task_id)
+    task = await agent_tasks.get(db, task_id, user_id=current_user_id(request))
     if task is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.TASK_NOT_FOUND.value

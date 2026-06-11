@@ -194,14 +194,34 @@ agent_tasks = Table(
     Column("last_run_id", Text),
     Column("created_at", Integer, nullable=False),
     Column("updated_at", Integer, nullable=False),
+    # Plan 35 §C1: owning user. server_default="1" backfills existing rows
+    # on a fresh create_all (id=1 is the seeded admin). On a PRE-C1 DB the
+    # column is added by the lightweight migration instead — see db.py.
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default="1",
+    ),
 )
 
 # Hot-path for the scheduler tick: every poll we ask "what's enabled and due?".
+# The single scheduler serves every user, so `list_due` stays GLOBAL and uses
+# this index (no user_id leading column).
 Index(
     "agent_tasks_enabled_due",
     agent_tasks.c.enabled,
     agent_tasks.c.due_at,
 )
+
+# NOTE: the per-user index `agent_tasks_user_enabled_due` is intentionally NOT
+# declared here. `agent_tasks` is a pre-existing table, so on an existing
+# pre-C1 DB `metadata.create_all` (which runs BEFORE the lightweight migration
+# that adds `user_id`) would try to CREATE INDEX on a column that doesn't exist
+# yet. The index is created in db.py's `_apply_lightweight_migrations` with
+# `CREATE INDEX IF NOT EXISTS` after the ALTER, which is correct for both fresh
+# and existing DBs.
 
 
 # AES-GCM-encrypted credentials for outgoing LLM calls. `provider` chooses

@@ -96,8 +96,11 @@ def _task_create(db: AsyncEngine) -> Tool:
         # the agent loop's error path (and the run is recorded as error)
         # instead of being silently fed back to the model as a tool result.
         try:
+            # TODO(Wave C): thread the agent's user_id into the tool catalog;
+            # scoped to the admin (id=1) until the catalog carries user context.
             t = await agent_tasks.create(
                 db,
+                user_id=1,
                 title=title,
                 prompt=prompt,
                 due_at=due_at,
@@ -144,7 +147,9 @@ def _task_create(db: AsyncEngine) -> Tool:
 
 def _task_list(db: AsyncEngine) -> Tool:
     async def handler(_args: dict[str, Any]) -> str:
-        items = await agent_tasks.list_all(db)
+        # TODO(Wave C): thread the agent's user_id into the tool catalog;
+        # scoped to the admin (id=1) until the catalog carries user context.
+        items = await agent_tasks.list_all(db, user_id=1)
         return json.dumps([_task_to_dict(t) for t in items])
 
     return Tool(
@@ -165,7 +170,9 @@ def _task_delete(db: AsyncEngine) -> Tool:
             task_id = int(args["id"])
         except (KeyError, TypeError, ValueError):
             return json.dumps({"error": "id (integer) is required"})
-        ok = await agent_tasks.delete(db, task_id)
+        # TODO(Wave C): thread the agent's user_id into the tool catalog;
+        # scoped to the admin (id=1) until the catalog carries user context.
+        ok = await agent_tasks.delete(db, task_id, user_id=1)
         if not ok:
             return json.dumps({"error": f"task {task_id} not found"})
         return json.dumps({"id": task_id, "deleted": True})

@@ -82,14 +82,14 @@ async def _scheduler(
 
 async def test_fire_due_runs_one_shot_and_disables(conn: AsyncEngine) -> None:
     task = await agent_tasks.create(
-        conn, title="ping", prompt="say hi", due_at=1_000, ts=500
+        conn, user_id=1, title="ping", prompt="say hi", due_at=1_000, ts=500
     )
 
     sched = await _scheduler(conn)
     fired = await sched.fire_due(now=2_000)
 
     assert fired == 1
-    refreshed = await agent_tasks.get(conn, task.id)
+    refreshed = await agent_tasks.get(conn, task.id, user_id=1)
     assert refreshed is not None
     assert refreshed.enabled is False  # one-shot flips off after firing
     assert refreshed.last_status == "success"
@@ -162,7 +162,7 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
 
     # (a) default backfill composition.
     await agent_tasks.create(
-        conn, title="t1", prompt="run me", due_at=1_000, ts=500
+        conn, user_id=1, title="t1", prompt="run me", due_at=1_000, ts=500
     )
     sched = await _scheduler(conn, runner=capturing_runner)
     await sched.fire_due(now=2_000)
@@ -174,7 +174,7 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
     # (b) custom channel prompt → flows through.
     await channels_repo.update(conn, "task", prompt="Custom task prompt.")
     await agent_tasks.create(
-        conn, title="t2", prompt="run me too", due_at=1_000, ts=500
+        conn, user_id=1, title="t2", prompt="run me too", due_at=1_000, ts=500
     )
     await sched.fire_due(now=3_000)
     assert captured[-1] == (
@@ -182,16 +182,68 @@ async def test_fire_due_passes_composed_persona_channel_system_prompt(
     )
 
 
+async def test_fire_due_creates_conversation_owned_by_task_owner(
+    conn: AsyncEngine,
+) -> None:
+    # Wave C1: the scheduler is global (one loop serves every user), but each
+    # fired task's conversation must be owned by the task's own user_id — not
+    # hardcoded to the admin. Seed user 2 + their task and assert the resulting
+    # conversation belongs to user 2.
+    async with conn.begin() as txn:
+        await txn.execute(
+            text(
+                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, "
+                "created_at) VALUES (2,'member',0,0)"
+            )
+        )
+    task = await agent_tasks.create(
+        conn, user_id=2, title="theirs", prompt="run me", due_at=1_000, ts=500
+    )
+
+    captured: list[int] = []
+
+    async def capturing_runner(
+        *,
+        upstream: httpx.AsyncClient,  # noqa: ARG001
+        db: AsyncEngine,
+        conversation_id: int,
+        system_prompt: str,  # noqa: ARG001
+        model: str,  # noqa: ARG001
+        tools: Any | None = None,  # noqa: ARG001
+        metrics: dict[str, Any] | None = None,  # noqa: ARG001
+    ) -> str:
+        captured.append(conversation_id)
+        await messages.append(
+            db, conversation_id=conversation_id, role="assistant", content="ok"
+        )
+        return "ok"
+
+    sched = await _scheduler(conn, runner=capturing_runner)
+    fired = await sched.fire_due(now=2_000)
+
+    assert fired == 1
+    assert len(captured) == 1
+    convo_id = captured[0]
+    # The conversation is owned by user 2 (the task's owner) — visible to
+    # user 2 and invisible to the admin.
+    assert await conversations.get(conn, convo_id, user_id=2) is not None
+    assert await conversations.get(conn, convo_id, user_id=1) is None
+    # Sanity: the task itself is still owned by user 2.
+    refreshed = await agent_tasks.get(conn, task.id, user_id=2)
+    assert refreshed is not None
+    assert refreshed.user_id == 2
+
+
 async def test_fire_due_skips_disabled(conn: AsyncEngine) -> None:
     task = await agent_tasks.create(
-        conn, title="paused", prompt="x", due_at=1_000, enabled=False, ts=500
+        conn, user_id=1, title="paused", prompt="x", due_at=1_000, enabled=False, ts=500
     )
 
     sched = await _scheduler(conn)
     fired = await sched.fire_due(now=2_000)
 
     assert fired == 0
-    refreshed = await agent_tasks.get(conn, task.id)
+    refreshed = await agent_tasks.get(conn, task.id, user_id=1)
     assert refreshed is not None
     assert refreshed.last_status is None
 
@@ -202,6 +254,7 @@ async def test_fire_due_advances_recurring(conn: AsyncEngine) -> None:
     # due_at should be the *next* day at 08:00 UTC.
     task = await agent_tasks.create(
         conn,
+        user_id=1,
         title="daily",
         prompt="run me daily",
         schedule="0 8 * * *",
@@ -214,7 +267,7 @@ async def test_fire_due_advances_recurring(conn: AsyncEngine) -> None:
     fired = await sched.fire_due(now=30_000)
 
     assert fired == 1
-    refreshed = await agent_tasks.get(conn, task.id)
+    refreshed = await agent_tasks.get(conn, task.id, user_id=1)
     assert refreshed is not None
     assert refreshed.enabled is True  # recurring stays enabled
     assert refreshed.due_at == 28_800 + 86_400  # next day same UTC hour
@@ -225,7 +278,7 @@ async def test_fire_due_records_failure_without_advancing_enabled(
     conn: AsyncEngine,
 ) -> None:
     task = await agent_tasks.create(
-        conn, title="boom", prompt="x", due_at=1_000, ts=500
+        conn, user_id=1, title="boom", prompt="x", due_at=1_000, ts=500
     )
 
     sched = await _scheduler(conn, runner=_stub_runner(raises=RuntimeError("nope")))
@@ -235,7 +288,7 @@ async def test_fire_due_records_failure_without_advancing_enabled(
     # `_fire_one`, which re-raises on the runner's error). The failure is
     # still recorded on the row via `mark_run` in the finally block.
     assert fired == 0
-    refreshed = await agent_tasks.get(conn, task.id)
+    refreshed = await agent_tasks.get(conn, task.id, user_id=1)
     assert refreshed is not None
     # One-shot still disables itself even on failure: a perpetually broken
     # task shouldn't re-fire every tick and spam the agent_runs table.
@@ -257,10 +310,10 @@ async def test_fire_due_keeps_other_tasks_running_after_one_fails(
     # rather than call order: list_due only orders by due_at, so two rows
     # with the same due_at could come back in implementation-defined order.
     bad = await agent_tasks.create(
-        conn, title="bad", prompt="x", due_at=1_000, ts=500
+        conn, user_id=1, title="bad", prompt="x", due_at=1_000, ts=500
     )
     good = await agent_tasks.create(
-        conn, title="good", prompt="y", due_at=1_000, ts=500
+        conn, user_id=1, title="good", prompt="y", due_at=1_000, ts=500
     )
 
     async def runner(*, db: AsyncEngine, conversation_id: int, **kwargs: Any) -> str:
@@ -276,8 +329,8 @@ async def test_fire_due_keeps_other_tasks_running_after_one_fails(
     sched = await _scheduler(conn, runner=runner)
     await sched.fire_due(now=2_000)
 
-    bad_after = await agent_tasks.get(conn, bad.id)
-    good_after = await agent_tasks.get(conn, good.id)
+    bad_after = await agent_tasks.get(conn, bad.id, user_id=1)
+    good_after = await agent_tasks.get(conn, good.id, user_id=1)
     assert bad_after is not None and bad_after.last_status == "error"
     assert good_after is not None and good_after.last_status == "success"
 
@@ -285,6 +338,7 @@ async def test_fire_due_keeps_other_tasks_running_after_one_fails(
 async def test_run_now_does_not_advance_due_at(conn: AsyncEngine) -> None:
     task = await agent_tasks.create(
         conn,
+        user_id=1,
         title="daily",
         prompt="manual",
         schedule="0 8 * * *",
@@ -296,7 +350,7 @@ async def test_run_now_does_not_advance_due_at(conn: AsyncEngine) -> None:
     sched = await _scheduler(conn)
     await sched.run_now(task.id)
 
-    refreshed = await agent_tasks.get(conn, task.id)
+    refreshed = await agent_tasks.get(conn, task.id, user_id=1)
     assert refreshed is not None
     # Manual run records the firing but leaves the next cron occurrence alone.
     assert refreshed.due_at == original_due_at
@@ -309,13 +363,13 @@ async def test_run_now_does_not_disable_one_shot(conn: AsyncEngine) -> None:
     # The other half of advance=False: a manual run of a one-shot must NOT
     # flip enabled=0 — that disable belongs to the real scheduled firing.
     task = await agent_tasks.create(
-        conn, title="once", prompt="manual", due_at=2_000_000_000, ts=500
+        conn, user_id=1, title="once", prompt="manual", due_at=2_000_000_000, ts=500
     )
 
     sched = await _scheduler(conn)
     await sched.run_now(task.id)
 
-    refreshed = await agent_tasks.get(conn, task.id)
+    refreshed = await agent_tasks.get(conn, task.id, user_id=1)
     assert refreshed is not None
     assert refreshed.enabled is True  # still due for the real firing
     assert refreshed.due_at == 2_000_000_000
