@@ -14,11 +14,14 @@ role (NOBYPASSRLS — the role RLS bites). For each table we assert:
     1. read denial   — user B SELECTs and sees []
     2. update denial — user B's UPDATE (no WHERE) touches 0 rows
     3. delete denial — user B's DELETE (no WHERE) touches 0 rows
-    4. WITH CHECK    — user A cannot INSERT a row owned by user B (raises)
+    4. WITH CHECK    — user A cannot INSERT a row owned by user B; the table's
+       own WITH CHECK rejects it with SQLSTATE 42501. For FK-child tables the
+       parent is seeded owned by A first so the rejection lands on the LEAF.
 
 Plus two non-parametrized guards:
 
-    5. SET ROLE bypass denied — holzi_app may not escalate to postgres
+    5. SET ROLE bypass denied — holzi_app may not escalate to the table owner
+       (holzi_owner, which bypasses RLS); rejected with SQLSTATE 42501
     6. positive control       — user A *can* read its own row back, so a
        green "0 rows for B" can never silently mask "insert never happened"
 
@@ -30,23 +33,31 @@ import secrets
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from hermes.db import tx_for_user
 
 
 # --- per-table insert builders ----------------------------------------------
 #
-# Each builder inserts ONE minimal valid row owned by `uid` into its table,
-# seeding any required parent (also owned by `uid`) first. They run on a
-# connection whose `app.user_id` GUC is already set to `uid` (via tx_for_user),
-# so FK parents resolve and WITH CHECK passes for the legitimate owner.
+# Each builder inserts ONE leaf row with `user_id = uid` into its table. For
+# FK-child tables it first seeds the required parent (conversation/persona)
+# with `user_id = owner_uid`, which defaults to `uid`. Builders run on a
+# connection whose `app.user_id` GUC is already set (via tx_for_user).
+#
+# The split between `owner_uid` (parent) and `uid` (leaf) lets the WITH CHECK
+# test seed a parent owned by the GUC user (so the parent insert passes) yet
+# attempt the leaf insert with a foreign `user_id` — forcing the rejection onto
+# the LEAF table's WITH CHECK policy rather than the parent's. For the seven
+# leaf-of-users tables there is no parent, so `owner_uid` is accepted and
+# ignored.
 #
 # Required columns are taken verbatim from src/hermes/schema.py: every NOT NULL
 # column without a server default is supplied; columns with defaults are left
 # to the default.
 
 
-async def _insert_sessions(conn, uid):
+async def _insert_sessions(conn, uid, owner_uid=None):
     await conn.execute(
         text(
             "INSERT INTO sessions(user_id, token_hash, created_at) "
@@ -56,7 +67,7 @@ async def _insert_sessions(conn, uid):
     )
 
 
-async def _insert_conversations(conn, uid):
+async def _insert_conversations(conn, uid, owner_uid=None):
     await conn.execute(
         text(
             "INSERT INTO conversations(user_id, channel, started_at, updated_at) "
@@ -66,7 +77,7 @@ async def _insert_conversations(conn, uid):
     )
 
 
-async def _insert_notes(conn, uid):
+async def _insert_notes(conn, uid, owner_uid=None):
     await conn.execute(
         text(
             "INSERT INTO notes(user_id, key, content, updated_at) "
@@ -76,7 +87,7 @@ async def _insert_notes(conn, uid):
     )
 
 
-async def _insert_agent_tasks(conn, uid):
+async def _insert_agent_tasks(conn, uid, owner_uid=None):
     await conn.execute(
         text(
             "INSERT INTO agent_tasks(user_id, title, prompt, created_at, updated_at) "
@@ -86,7 +97,7 @@ async def _insert_agent_tasks(conn, uid):
     )
 
 
-async def _insert_personas(conn, uid):
+async def _insert_personas(conn, uid, owner_uid=None):
     await conn.execute(
         text(
             "INSERT INTO personas(user_id, name, created_at, updated_at) "
@@ -96,7 +107,7 @@ async def _insert_personas(conn, uid):
     )
 
 
-async def _insert_llm_credentials(conn, uid):
+async def _insert_llm_credentials(conn, uid, owner_uid=None):
     await conn.execute(
         text(
             "INSERT INTO llm_credentials"
@@ -107,7 +118,7 @@ async def _insert_llm_credentials(conn, uid):
     )
 
 
-async def _insert_tool_approvals(conn, uid):
+async def _insert_tool_approvals(conn, uid, owner_uid=None):
     # Composite PK (user_id, tool_name), no auto id.
     await conn.execute(
         text(
@@ -142,8 +153,8 @@ async def _seed_persona(conn, uid):
     return row.id
 
 
-async def _insert_messages(conn, uid):
-    cid = await _seed_conversation(conn, uid)
+async def _insert_messages(conn, uid, owner_uid=None):
+    cid = await _seed_conversation(conn, owner_uid if owner_uid is not None else uid)
     await conn.execute(
         text(
             "INSERT INTO messages(conversation_id, user_id, role, content, ts) "
@@ -153,8 +164,8 @@ async def _insert_messages(conn, uid):
     )
 
 
-async def _insert_attachments(conn, uid):
-    cid = await _seed_conversation(conn, uid)
+async def _insert_attachments(conn, uid, owner_uid=None):
+    cid = await _seed_conversation(conn, owner_uid if owner_uid is not None else uid)
     await conn.execute(
         text(
             "INSERT INTO attachments"
@@ -166,8 +177,8 @@ async def _insert_attachments(conn, uid):
     )
 
 
-async def _insert_agent_runs(conn, uid):
-    cid = await _seed_conversation(conn, uid)
+async def _insert_agent_runs(conn, uid, owner_uid=None):
+    cid = await _seed_conversation(conn, owner_uid if owner_uid is not None else uid)
     # id is a TEXT PK — must be supplied explicitly.
     await conn.execute(
         text(
@@ -179,8 +190,8 @@ async def _insert_agent_runs(conn, uid):
     )
 
 
-async def _insert_persona_history(conn, uid):
-    pid = await _seed_persona(conn, uid)
+async def _insert_persona_history(conn, uid, owner_uid=None):
+    pid = await _seed_persona(conn, owner_uid if owner_uid is not None else uid)
     await conn.execute(
         text(
             "INSERT INTO persona_history"
@@ -312,18 +323,25 @@ async def test_delete_denial(engine, owner_engine, spec):
 
 @pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.table)
 async def test_with_check_write_denial(engine, owner_engine, spec):
-    """User A cannot plant a row owned by user B — WITH CHECK rejects it.
+    """User A cannot plant a row owned by user B — the LEAF table's WITH CHECK
+    rejects it with SQLSTATE 42501 (insufficient_privilege).
 
-    The builder seeds any required parent owned by A first, then inserts the
-    leaf row with `user_id = b`; WITH CHECK (user_id = app.user_id) must reject
-    the leaf write since A's GUC is `a`, not `b`.
+    The builder runs with A's GUC. For FK-child tables it first seeds the parent
+    owned by A (`owner_uid=a`, which passes WITH CHECK since a==a), then attempts
+    the leaf INSERT with `user_id = b`; the rejection therefore lands on the leaf
+    table's own WITH CHECK, not the parent's. For leaf-of-users tables there is
+    no parent and the single INSERT with `user_id = b` is rejected directly.
     """
     a, b = await _seed_users(owner_engine)
 
-    with pytest.raises(Exception):
+    with pytest.raises(DBAPIError) as exc_info:
         async with tx_for_user(engine, user_id=a) as conn:
-            # `insert_owned(conn, b)` writes user_id=b while the GUC is a.
-            await spec.insert_owned(conn, b)
+            # Parent (if any) owned by A passes; leaf row user_id=b is rejected.
+            await spec.insert_owned(conn, b, owner_uid=a)
+    assert exc_info.value.orig.sqlstate == "42501", (
+        f"{spec.table}: expected RLS WITH CHECK rejection (42501), "
+        f"got {exc_info.value.orig.sqlstate}"
+    )
 
     # Nothing owned by B may have been planted.
     assert await _owner_count(owner_engine, spec.table) == 0, (
@@ -335,11 +353,22 @@ async def test_with_check_write_denial(engine, owner_engine, spec):
 
 
 async def test_set_role_bypass_denied(engine):
-    """holzi_app (NOSUPERUSER, not a member of postgres) must not escalate via
-    SET ROLE — that would sidestep RLS entirely."""
-    with pytest.raises(Exception):
+    """holzi_app (NOSUPERUSER, not a member of holzi_owner) must not escalate via
+    SET ROLE to the table owner — that owner bypasses RLS (USING/WITH CHECK do
+    not apply to the table owner), so a successful SET ROLE would sidestep RLS
+    entirely. The attempt is rejected with SQLSTATE 42501 (insufficient_privilege).
+
+    Target holzi_owner, the role that actually exists and owns the tables: a
+    bare `SET ROLE postgres` would false-green here because no `postgres` role
+    exists in the test cluster (it errors 22023 "role does not exist", not a
+    privilege check).
+    """
+    with pytest.raises(DBAPIError) as exc_info:
         async with engine.begin() as conn:
-            await conn.execute(text("SET ROLE postgres"))
+            await conn.execute(text("SET ROLE holzi_owner"))
+    assert exc_info.value.orig.sqlstate == "42501", (
+        f"expected SET ROLE rejection (42501), got {exc_info.value.orig.sqlstate}"
+    )
 
 
 async def test_positive_control_owner_reads_own_row(engine, owner_engine):
