@@ -9,17 +9,16 @@ auth middleware.
 """
 import asyncio
 import contextlib
+from collections.abc import AsyncIterator
 from contextvars import ContextVar, Token
-from typing import AsyncIterator
 from urllib.parse import urlsplit, urlunsplit
 
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
+from alembic import command
 from hermes.config import settings
-
 
 _current_user_id: ContextVar[int | None] = ContextVar("_current_user_id", default=None)
 

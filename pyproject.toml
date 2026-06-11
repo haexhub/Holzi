@@ -49,6 +49,12 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+# Alembic autogenerate emits create_index calls with sa.literal_column(...) that
+# routinely exceed line length. Migrations are append-only history — don't
+# reformat them to satisfy lint.
+"alembic/versions/*.py" = ["E501"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

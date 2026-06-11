@@ -25,6 +25,8 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+)
+from sqlalchemy import (
     text as sa_text,
 )
 

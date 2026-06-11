@@ -20,8 +20,8 @@ from hermes.logging import configure_logging, logger
 from hermes.mcp_manager import McpServerManager
 from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
-from hermes.personas import ensure_bootstrap_skill_seeded
 from hermes.personas import ensure_backfill as ensure_personas_backfill
+from hermes.personas import ensure_bootstrap_skill_seeded
 from hermes.repository import sandbox_crashes as sandbox_crashes_repo
 from hermes.repository import workspaces as workspaces_repo
 from hermes.routes.api import router as api_router
