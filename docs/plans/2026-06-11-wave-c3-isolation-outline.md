@@ -43,8 +43,15 @@ admin-shared, per C2's sharing model).
   reading/writing `session_approvals[conversation_id]`, confirm the
   conversation belongs to `current_user_id`. (No re-keying needed — the
   conversation ownership *is* the user scope.)
+- **`tool_approvals` (persisted "allow_always") is global** — the C1
+  CodeRabbit review flagged `routes/api.py:437-474`: `allow_always` is
+  granted/checked instance-wide and `/api/approvals/standing` walks every
+  conversation in `app.state.session_approvals`. C3 must scope persisted
+  approvals by owner (add `user_id` to `tool_approvals`) and owner-filter the
+  in-memory session map, so one user's standing grant can't suppress prompts
+  for everyone.
 - Tests: user B gets 404 trying to cancel user A's run / resolve user A's
-  approval.
+  approval; user B's `allow_always` does not suppress user A's prompt.
 
 ### B2 — Per-user sandbox containers (MEDIUM effort)
 
