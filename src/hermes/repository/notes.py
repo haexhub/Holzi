@@ -1,7 +1,7 @@
 import time
 
 from sqlalchemy import desc, select, text
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.repository.models import Note
@@ -29,7 +29,7 @@ async def upsert(
     ts: int | None = None,
 ) -> Note:
     now = ts if ts is not None else int(time.time())
-    insert_stmt = sqlite_insert(t_notes).values(
+    insert_stmt = pg_insert(t_notes).values(
         user_id=user_id, key=key, content=content, tags=tags, updated_at=now
     )
     # Conflict target is the per-user (user_id, key) constraint — on a fresh
