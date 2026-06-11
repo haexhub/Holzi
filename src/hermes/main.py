@@ -134,7 +134,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Separate engine connected as `holzi_owner` for lifespan seeding +
         # global sweepers (list_due / sweep_expired). Disposed in the finally.
         app.state.owner_db = await make_owner_engine()
-        app.state.identity_resolver = SessionResolver(app.state.db)
+        # Resolve sessions via the OWNER engine, not the holzi_app engine.
+        # `sessions` is RLS-locked (0003), but the resolver maps a bearer to a
+        # user_id *before* any user is known, so `app.user_id` is still unset
+        # (GUC default '0') and an RLS-bound read would see zero rows -> every
+        # request 401s. This is the pre-identity bootstrap read the design doc
+        # describes ("resolve -> THEN SET LOCAL app.user_id"); it bypasses RLS
+        # by design, exactly like tx_as_owner. The query is a single fixed
+        # `SELECT (user_id, role) WHERE token_hash = :h` lookup.
+        app.state.identity_resolver = SessionResolver(app.state.owner_db)
 
         # §1: seed the env-driven platform_admin row + a never-expiring
         # session keyed on HERMES_PLATFORM_ADMIN_TOKEN. Idempotent —
