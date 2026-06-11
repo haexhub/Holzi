@@ -6,8 +6,12 @@
 > threaded, the per-user default-persona seeding). Re-read the C1 design doc
 > + Plan 35 §C2 before expanding.
 >
-> Depends on: **C1 complete** (`2026-06-11-wave-c1-multi-user-impl.md`).
+> Depends on: **C1 — SHIPPED 2026-06-11** (`2026-06-11-wave-c1-multi-user-impl.md`).
 > Blocks: **C3** (per-user runtime isolation).
+> New in C2 from the C1 review: **B8** below collects the multi-user concerns
+> C1 deliberately deferred (agent tool-loop identity, per-user channel
+> prompts, per-user bootstrap flag) — these become live the moment a second
+> user exists, so they are required C2 work, not optional.
 
 **Goal:** Everyone logs in via **email magic-link → short-lived session**
 (no passwords, no long-lived token in `localStorage`). A family admin invites
@@ -81,9 +85,14 @@ meaning, and where the "child has no API key" problem is solved (sharing).
 - `provision_user_defaults(engine, user_id)`: seed the per-user default
   persona (reuse C1's `ensure_personas_backfill`, parameterised by
   `user_id`). The "new user gets a working Holzi" path C1 deferred.
-- `GET/POST/DELETE /api/users` (admin-only). Deleting a user cascades their
-  personal data **and all their `sessions`** (FK `ondelete=CASCADE` from C1)
-  → every session of that user dies immediately (revoke).
+- `GET/POST/DELETE /api/users` (admin-only). Deleting a user should remove
+  their personal data + all their `sessions`. **Caveat (C1 review):** the
+  `user_id` FK `ondelete=CASCADE` is only enforced on **fresh** DBs — SQLite
+  `ALTER TABLE ADD COLUMN` can't attach an FK, so on *upgraded* DBs the
+  cascade won't fire. So `delete_user` must **explicitly** delete the user's
+  conversations/notes/agent_tasks/personas/sessions (don't rely on the DB
+  cascade), or the affected tables must be rebuilt with the FK. Either way,
+  don't assume cascade.
 - Roles `admin`/`member`/`child`; helper `require_role(request, *allowed)`
   → 403. **`child` tool gating**: in the approval path (`routes/api.py`
   `session_approvals` + `tool_approvals`), force approval on **every** tool
@@ -142,7 +151,47 @@ global:
   `pages/settings/sessions.vue`, `pages/login.vue` (rework), composables
   (`useAuth`/`useFamily`), nav (`lib/settingsNav.ts`), i18n (DE/EN — Wave 0).
 
+### B8 — Thread per-user identity into the agent loop + remaining global infra (from the C1 review)
+
+C1 scoped the four personal-data tables but left several multi-user gaps that
+are inert under single-admin C1 and become **live cross-user bugs as soon as
+a second user exists**. The C1 CodeRabbit review surfaced these; they are
+required C2 work:
+
+- **Agent tool-execution loop is identity-blind.** `src/hermes/tools/`
+  handlers are hard-coded to `user_id=1` (flagged with TODOs in C1):
+  `bootstrap.py` (persona/bootstrap writes), `memory.py` (notes + conversation
+  recall; `recall_memory` also mixes message hits with no owner filter),
+  `productivity.py` (`task_create`/`task_list`/`task_delete`). The chat route
+  knows `current_user_id(request)`, but that identity is **not** carried into
+  the tool catalog / agent loop. C2 must thread the acting `user_id` from the
+  request → agent run → tool invocation so every tool operates on the caller's
+  rows (not the admin's). This is the largest item and a prerequisite for
+  letting non-admin users use tools at all.
+- **`channel_prompts` is global.** `default_persona_id` lives on a global
+  `channel_prompts` row, so a channel→persona pin is last-writer-wins across
+  users and can reference a persona the reader doesn't own (the resolver falls
+  back safely, but the binding is shared). C2: add `user_id` to
+  `channel_prompts` (or a `user_channel_prompts` table) and scope
+  `channels_repo.get`/`update` by `current_user_id`.
+- **Bootstrap flag is single-user.** `is_bootstrap_completed(engine)` and the
+  bootstrap-hint branch in `get_effective_system_prompt` check user 1
+  globally; `mark_bootstrap_complete` writes user 1. `users.bootstrap_completed`
+  is already per-row — thread `user_id` through the read (the prompt path
+  already has it) and the write (rides the tool-loop identity work above) so
+  each user gets their own onboarding.
+
+These pair naturally with B3 (roles) and B4 (user provisioning): a freshly
+invited user must get their own bootstrap flow, their own task/note/persona
+tools, and their own channel pins.
+
 ## Open questions to resolve at C2-plan time
+
+- **Monorepo CI gap (process):** `~/Projekte/holzi` has **no GitHub Actions
+  workflow**, so the C1 frontend shipped unverified by CI (and its vitest
+  `@nuxt/test-utils` env doesn't resolve the `~` alias locally). Add a
+  frontend test + typecheck workflow before/with the C2 `/settings/family`
+  UI so the FE is actually gated.
 
 - **SMTP transport**: bundled SMTP client to an operator-provided relay
   (Gmail app-password / Mailgun / self-hosted) — pick the config surface.

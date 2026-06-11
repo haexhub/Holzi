@@ -1,5 +1,14 @@
 # Design: Wave C1 — Account-Layer + User-Scoped DB
 
+> **STATUS: SHIPPED 2026-06-11** — merged to `main` (backend PR #85, plans
+> PR #84; frontend identity+logout via holzi-monorepo PR #3). Backend CI
+> green (ruff/mypy/pytest, 1041 tests). Built as designed below. CodeRabbit
+> review on #85: two single-admin bugs fixed (logout no longer revokes the
+> env bootstrap session; `HERMES_AUTH_TOKEN` rotation drops the stale
+> bootstrap session); its remaining findings were multi-user concerns
+> deferred to C2/C3 (see the updated C2/C3 outlines + #85's disposition
+> comment).
+
 > **For Claude:** DESIGN DOC. Resolves the C1 open questions from Plan 35
 > (`docs/plans/35-strategic-roadmap-2026h2.md` lives in the monorepo
 > `~/Projekte/holzi/`). Implementation plan:

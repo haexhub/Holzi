@@ -1,5 +1,24 @@
 # Wave C1 — Account-Layer + User-Scoped DB Implementation Plan
 
+> **STATUS: DONE 2026-06-11** (merged, PR #85). All 11 tasks executed
+> TDD-style; the four security-critical ones (auth middleware, conversations,
+> notes, personas) passed adversarial review. Notable deviations from the
+> plan as written, for the record:
+> - Tasks 1+2 were done as one "foundation" unit (the resolver can't import
+>   before the `sessions` table exists), so no xfail dance was needed.
+> - The `sessions` index lives in `schema.py` (new table), but each
+>   *pre-existing* table's per-user index is created in the migration via
+>   `CREATE INDEX IF NOT EXISTS` (create_all runs before the migration, so a
+>   schema.py index on a not-yet-added column would fail on upgraded DBs).
+> - `notes.key` / `personas.name` uniqueness became per-user composites; the
+>   personas single-default trigger became per-user; both keep the old global
+>   constraint on *upgraded* SQLite DBs (ALTER can't drop it) — harmless under
+>   single-admin C1, revisited in C2.
+> - Lifespan reordered: `ensure_users_seeded` now runs before
+>   `ensure_personas_backfill` (personas FK→users).
+> - Post-review fixes: logout guards the env bootstrap token; token rotation
+>   drops the stale bootstrap session.
+>
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (or
 > superpowers:subagent-driven-development) to implement this plan
 > task-by-task.
