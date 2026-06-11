@@ -139,9 +139,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # user_id *before* any user is known, so `app.user_id` is still unset
         # (GUC default '0') and an RLS-bound read would see zero rows -> every
         # request 401s. This is the pre-identity bootstrap read the design doc
-        # describes ("resolve -> THEN SET LOCAL app.user_id"); it bypasses RLS
-        # by design, exactly like tx_as_owner. The query is a single fixed
-        # `SELECT (user_id, role) WHERE token_hash = :h` lookup.
+        # describes ("resolve -> THEN SET LOCAL app.user_id").
+        #
+        # The bypass works because `holzi_owner` is a BYPASSRLS/superuser role
+        # (the Postgres image makes POSTGRES_USER a superuser), so it ignores
+        # the policies even though they are FORCEd. This is NOT the FORCE
+        # mechanism — FORCE would in fact bite a NON-superuser owner. If
+        # `holzi_owner` is ever hardened to NOSUPERUSER NOBYPASSRLS, this read
+        # would see zero rows and every request would 401, so that hardening
+        # must ship with a real resolver bypass (SECURITY DEFINER fn, or
+        # dropping `sessions` from RLS). The lookup is a fixed `sessions JOIN
+        # users` selecting (user_id, role) filtered by token_hash + session
+        # expiry — see identity.SessionResolver.resolve.
         app.state.identity_resolver = SessionResolver(app.state.owner_db)
 
         # §1: seed the env-driven platform_admin row + a never-expiring

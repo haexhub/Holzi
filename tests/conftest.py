@@ -73,14 +73,21 @@ def _migrated_pg(_pg_container):
     policies, and the `ALTER DATABASE holzi SET app.user_id TO '0'` GUC.
     """
     owner_url = _pg_container["owner_url"]
-    # Mutate the singleton in place — do NOT importlib.reload hermes.config.
-    # alembic/env.py overrides sqlalchemy.url via cfg.set_main_option below, but
-    # init_db() (called by app code under test) reads settings.database_url.
+    # Mutate the singleton in place for the upgrade ONLY — do NOT importlib.reload
+    # hermes.config (that rebinds a new object db.py/main.py never see). env.py
+    # forces sqlalchemy.url := settings.database_url at command.upgrade time, so
+    # the cfg.set_main_option below is redundant; what actually matters is the
+    # singleton value. Restore it afterwards so this session-scoped fixture does
+    # not leak the container DSN onto the global singleton for tests that don't
+    # use pg_db — pg_db re-pins it per test via auto-restoring monkeypatch.
+    prev_database_url = settings.database_url
     settings.database_url = owner_url
-
-    cfg = Config("alembic.ini")
-    cfg.set_main_option("sqlalchemy.url", owner_url)
-    command.upgrade(cfg, "head")
+    try:
+        cfg = Config("alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", owner_url)
+        command.upgrade(cfg, "head")
+    finally:
+        settings.database_url = prev_database_url
 
     return _pg_container
 

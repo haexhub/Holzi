@@ -68,8 +68,13 @@ async def init_db() -> AsyncEngine:
 
 
 async def make_owner_engine() -> AsyncEngine:
-    """Separate engine for owner-role paths (lifespan seeding, global sweepers).
-    Disposed by the lifespan teardown. Use with `tx_as_owner(...)`.
+    """Separate engine connected as `holzi_owner`. Used by lifespan seeding and
+    the global sweepers (via `tx_as_owner`), and — since the RLS bootstrap fix —
+    by the per-request `SessionResolver` lookup (main.py), which connects
+    directly without `tx_as_owner`. So this engine now takes request-path
+    traffic, not just rare boot/sweeper calls. Disposed by the lifespan
+    teardown. `pool_size=2` is fine at §1 single-org scale; revisit if resolver
+    concurrency grows (e.g. a dedicated read-only resolver pool).
     """
     return create_async_engine(_owner_url(), pool_pre_ping=True, pool_size=2)
 
@@ -105,11 +110,16 @@ async def tx_for_user(
 @contextlib.asynccontextmanager
 async def tx_as_owner(owner_engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
     """Escape-hatch for lifespan bootstrap (seed platform admin) and the
-    scheduler's GLOBAL queries (e.g. `list_expired`, `agent_tasks list_due`).
-    Connects as `holzi_owner` — RLS still applies (FORCE), but the GUC
-    default of '0' lets owner queries see zero rows from personal tables
-    unless they also `SET LOCAL app.user_id`. The bootstrap inserts users
-    while connected as owner, then uses `tx_for_user` for everything after.
+    scheduler's GLOBAL queries (e.g. `list_expired`, `agent_tasks list_due`)
+    that must span every user. Connects as `holzi_owner`, which is a
+    BYPASSRLS/superuser role (the Postgres image makes POSTGRES_USER a
+    superuser), so it sees ALL rows across users regardless of the FORCEd
+    policies — exactly what the global sweepers need. NOTE: this relies on the
+    owner being superuser/BYPASSRLS; if `holzi_owner` is ever hardened to
+    NOSUPERUSER NOBYPASSRLS, FORCE would filter these queries by the GUC
+    default ('0') and the sweepers would silently process nothing. The
+    bootstrap inserts users while connected as owner, then uses `tx_for_user`
+    for everything after.
     """
     async with owner_engine.begin() as conn:
         yield conn
