@@ -1,8 +1,9 @@
 # Hermes
 
 Personal AI assistant. The `hermes-server` FastAPI backend powers the
-[holzi-frontend](https://github.com/haexhub/holzi-frontend) Web UI, plus
-optional Signal and Telegram bridges. Memory lives in SQLite + FTS5,
+[holzi-frontend](https://github.com/haexhub/holzi-frontend) Web UI.
+Memory lives in SQLite + FTS5 (being ported to Postgres + RLS — see
+[`docs/plans/2026-06-11-saas-coding-agent-design.md`](docs/plans/2026-06-11-saas-coding-agent-design.md)),
 LLM access is OpenAI-compatible (Anthropic OAuth via the bundled
 `haex-claude-proxy`, OpenAI, OpenRouter, Google, or any custom
 endpoint).
@@ -28,10 +29,9 @@ make install
 cp .env.example .env
 echo "HERMES_AUTH_TOKEN=$(make -s token)" >> .env
 echo "HERMES_SECRET_KEY=$(openssl rand -hex 32)" >> .env
-# Optional: edit .env to set HERMES_SIGNAL_NUMBER (E.164), HERMES_DOMAIN,
-# HERMES_LOG_FILE, etc.
+# Optional: edit .env to set HERMES_DOMAIN, HERMES_LOG_FILE, etc.
 
-# 3. Bring up the local dev-stack (backend + LLM proxy + signal-cli)
+# 3. Bring up the local dev-stack (backend + LLM proxy + Postgres)
 make up-local            # backend only
 make up-local-full       # backend + holzi-frontend (Nuxt dev with HMR)
 make logs-local
@@ -72,26 +72,6 @@ PROXY_NETWORK_EXTERNAL=false make up-traefik
 You'll need `HERMES_DOMAIN` and `LETSENCRYPT_EMAIL` set in `.env` for
 ACME-HTTP-01 to work. Everything else is identical to the dev-stack
 configuration.
-
-## Linking Signal (one-time)
-
-The Signal worker is disabled unless `HERMES_SIGNAL_NUMBER` is set.
-Signal is connected as a **primary device** in v1 (linked secondary
-devices in signal-cli don't receive Note-to-Self sync messages — see
-[`docs/troubleshooting.md`](docs/troubleshooting.md) under "Signal
-Note-to-Self silent" for the workaround). The pairing flow lives at
-`/settings/messengers` in the UI:
-
-1. Start the stack (`make up-local` or `make up`). The
-   `signal-cli-rest-api` container needs to be running.
-2. Open `/settings/messengers` and click **Link Signal**. The UI shows
-   the QR. Scan it from Signal → Settings → Linked devices → Add
-   device.
-3. Set `HERMES_SIGNAL_NUMBER` in `.env` to the linked number (E.164,
-   e.g. `+491701234567`) and restart: `make down-local && make up-local`.
-
-For the Telegram bridge, paste a BotFather token at
-`/settings/messengers` — no `.env` change needed.
 
 ## Repo layout
 

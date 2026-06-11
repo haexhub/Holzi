@@ -25,6 +25,8 @@ psql postgresql://holzi_owner:holzi_owner_dev_pw@127.0.0.1:5433/holzi
 To reset the data volume:
 
 ```bash
-docker compose -f docker-compose.local.yml down
-docker volume rm holzi_holzi-pg  # or whatever `docker volume ls` shows
+docker compose -f docker-compose.local.yml -p hermes-local down -v
 ```
+
+(`-v` drops the project's named volumes, matching the `make` targets which
+also pass `-p hermes-local`.)
