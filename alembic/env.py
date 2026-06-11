@@ -24,8 +24,18 @@ def run_migrations_offline() -> None:
 
 def _do_run_migrations(connection) -> None:
     """Configure + run migrations on a sync connection — both must share the
-    same transaction (Alembic owns it via begin_transaction)."""
-    context.configure(connection=connection, target_metadata=target_metadata)
+    same transaction (Alembic owns it via begin_transaction).
+
+    `compare_type` + `compare_server_default` let autogenerate spot column-type
+    swaps (e.g. INTEGER→BOOLEAN in Task 5's schema port) and default flips that
+    the default diff would miss.
+    """
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        compare_server_default=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

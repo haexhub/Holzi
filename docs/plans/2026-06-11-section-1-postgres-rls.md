@@ -253,6 +253,20 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _do_run_migrations(connection) -> None:
+    # configure + run share one transaction owned by alembic's
+    # begin_transaction(). compare_type + compare_server_default catch
+    # column-type swaps (Task 5: Integer→Boolean) that the default diff misses.
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        compare_server_default=True,
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
 async def run_migrations_online() -> None:
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
@@ -260,13 +274,7 @@ async def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     async with connectable.connect() as conn:
-        await conn.run_sync(
-            lambda sync_conn: context.configure(
-                connection=sync_conn, target_metadata=target_metadata
-            )
-        )
-        async with conn.begin():
-            await conn.run_sync(lambda _sync: context.run_migrations())
+        await conn.run_sync(_do_run_migrations)
     await connectable.dispose()
 
 
@@ -279,8 +287,19 @@ else:
 
 **Step 3: Verify**
 
-Run: `uv run alembic current` (against a running `db` service).
-Expected: prints nothing (no revisions yet) and exits 0.
+`hermes.config` validates `HERMES_PLATFORM_ADMIN_TOKEN` + `HERMES_PLATFORM_ADMIN_EMAIL`
+at import time, so `alembic` CLI invocations need them in the shell env (or via
+`.env`). For local verification against the docker-compose `db` service:
+
+```bash
+export HERMES_PLATFORM_ADMIN_TOKEN=dev-token
+export HERMES_PLATFORM_ADMIN_EMAIL=dev@local
+export HERMES_DATABASE_URL='postgresql+asyncpg://holzi_owner:holzi_owner_dev_pw@127.0.0.1:5433/holzi'
+.venv/bin/python -m alembic current
+```
+
+Expected: alembic logs `Context impl PostgresqlImpl` + `Will assume transactional DDL`,
+no revision listed (none exist yet), exit 0.
 
 **Step 4: Commit**
 

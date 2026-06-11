@@ -1,1 +1,9 @@
-Generic single-database configuration with an async dbapi.
+Alembic config for the Holzi Postgres + RLS schema (§1 of the SaaS plan).
+
+Online migrations connect via `settings.database_url` (owner role, full DDL).
+The app runtime connects via `settings.runtime_database_url` (holzi_app role,
+NOBYPASSRLS) — see src/hermes/db.py once Task 10 lands.
+
+Running alembic from a shell requires HERMES_PLATFORM_ADMIN_TOKEN +
+HERMES_PLATFORM_ADMIN_EMAIL in the env (alembic/env.py imports
+hermes.config, which validates required fields at import time).
