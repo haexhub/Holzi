@@ -35,11 +35,12 @@ async def _seed_default_persona(
     identity: str = "",
     agents: str = "",
     name: str = "Hermes",
-    bootstrap_completed: int = 1,
+    bootstrap_completed: bool = True,
 ):
     """Helper: seed channels + a single default persona with the given
-    fragments. Also seeds the users row so the bootstrap hint is
-    controlled. Returns the created persona row.
+    fragments. Also updates the user-1 row (already seeded by the `conn`
+    fixture) so the bootstrap hint is controlled. Returns the created
+    persona row.
     """
     import time
     await channels_repo.ensure_seeded(engine)
@@ -55,8 +56,8 @@ async def _seed_default_persona(
     async with engine.begin() as txn:
         await txn.execute(
             text(
-                "INSERT OR IGNORE INTO users(id, bootstrap_completed, created_at) "
-                "VALUES (1, :bc, :ts)"
+                "UPDATE users SET bootstrap_completed = :bc, created_at = :ts "
+                "WHERE id = 1"
             ),
             {"bc": bootstrap_completed, "ts": int(time.time())},
         )
@@ -217,8 +218,8 @@ async def test_composition_falls_back_to_default_persona_when_channel_persona_un
     async with conn.begin() as txn:
         await txn.execute(
             text(
-                "INSERT OR IGNORE INTO users(id, bootstrap_completed, created_at) "
-                "VALUES (1, 1, :ts)"
+                "UPDATE users SET bootstrap_completed = true, created_at = :ts "
+                "WHERE id = 1"
             ),
             {"ts": int(time.time())},
         )
@@ -260,8 +261,8 @@ async def test_channel_specific_persona_wins_over_global_default(
     async with conn.begin() as txn:
         await txn.execute(
             text(
-                "INSERT OR IGNORE INTO users(id, bootstrap_completed, created_at) "
-                "VALUES (1, 1, :ts)"
+                "UPDATE users SET bootstrap_completed = true, created_at = :ts "
+                "WHERE id = 1"
             ),
             {"ts": int(time.time())},
         )
@@ -347,6 +348,7 @@ async def _seed_credential(
     from sqlalchemy import text
     cred = await cred_repo.create_api_key(
         engine,
+        user_id=1,
         provider="openai",
         display_name="test-cred",
         base_url=None,
@@ -354,8 +356,11 @@ async def _seed_credential(
     )
     async with engine.begin() as conn:
         await conn.execute(
+            text("SELECT set_config('app.user_id', '1', true)")
+        )
+        await conn.execute(
             text("UPDATE llm_credentials SET model=:m, is_active=:a WHERE id=:id"),
-            {"m": model, "a": 1 if is_active else 0, "id": cred.id},
+            {"m": model, "a": is_active, "id": cred.id},
         )
     return cred.id
 

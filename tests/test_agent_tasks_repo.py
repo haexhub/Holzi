@@ -52,7 +52,7 @@ async def test_create_rejects_invalid_cron(conn: AsyncEngine) -> None:
 
 
 async def test_list_due_returns_only_enabled_and_due(
-    conn: AsyncEngine,
+    conn: AsyncEngine, owner_engine: AsyncEngine,
 ) -> None:
     enabled_due = await agent_tasks.create(
         conn, user_id=1, title="due", prompt="x", due_at=1_000, ts=500
@@ -64,14 +64,14 @@ async def test_list_due_returns_only_enabled_and_due(
         conn, user_id=1, title="paused", prompt="x", due_at=1_000, enabled=False, ts=500
     )
 
-    due = await agent_tasks.list_due(conn, now=2_000)
+    due = await agent_tasks.list_due(owner_engine, now=2_000)
     ids = [t.id for t in due]
     assert ids == [enabled_due.id]
     assert disabled.id not in ids
 
 
 async def test_mark_run_advances_recurring_schedule(
-    conn: AsyncEngine,
+    conn: AsyncEngine, owner_engine: AsyncEngine,
 ) -> None:
     t = await agent_tasks.create(
         conn,
@@ -85,7 +85,7 @@ async def test_mark_run_advances_recurring_schedule(
     assert t.due_at == 28_800
 
     updated = await agent_tasks.mark_run(
-        conn, t.id, run_id="abc", status="success", ts=30_000
+        owner_engine, t.id, run_id="abc", status="success", ts=30_000
     )
     assert updated is not None
     assert updated.due_at == 28_800 + 86_400
@@ -94,12 +94,14 @@ async def test_mark_run_advances_recurring_schedule(
     assert updated.last_run_id == "abc"
 
 
-async def test_mark_run_disables_one_shot(conn: AsyncEngine) -> None:
+async def test_mark_run_disables_one_shot(
+    conn: AsyncEngine, owner_engine: AsyncEngine
+) -> None:
     t = await agent_tasks.create(
         conn, user_id=1, title="once", prompt="x", due_at=1_000, ts=500
     )
     updated = await agent_tasks.mark_run(
-        conn, t.id, run_id="abc", status="success", ts=2_000
+        owner_engine, t.id, run_id="abc", status="success", ts=2_000
     )
     assert updated is not None
     assert updated.enabled is False
@@ -218,16 +220,12 @@ async def _seed_two_users(conn: AsyncEngine) -> None:
     from sqlalchemy import text
 
     async with conn.begin() as db:
+        # User 1 is already seeded by the `conn` fixture (platform_admin);
+        # only user 2 needs adding so the agent_tasks.user_id FK holds.
         await db.execute(
             text(
-                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, "
-                "created_at) VALUES (1,'admin',0,0)"
-            )
-        )
-        await db.execute(
-            text(
-                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, "
-                "created_at) VALUES (2,'member',0,0)"
+                "INSERT INTO users(id, role, bootstrap_completed, "
+                "created_at) VALUES (2,'member',false,0) ON CONFLICT (id) DO NOTHING"
             )
         )
 
@@ -282,7 +280,9 @@ async def test_delete_is_scoped_to_owner(conn: AsyncEngine) -> None:
     assert still is not None
 
 
-async def test_list_due_is_global_across_users(conn: AsyncEngine) -> None:
+async def test_list_due_is_global_across_users(
+    conn: AsyncEngine, owner_engine: AsyncEngine
+) -> None:
     # `list_due` powers the single in-process scheduler, which serves every
     # user — it must return due tasks regardless of owner.
     await _seed_two_users(conn)
@@ -292,7 +292,7 @@ async def test_list_due_is_global_across_users(conn: AsyncEngine) -> None:
     theirs = await agent_tasks.create(
         conn, user_id=2, title="theirs", prompt="x", due_at=1_000, ts=500
     )
-    due = await agent_tasks.list_due(conn, now=2_000)
+    due = await agent_tasks.list_due(owner_engine, now=2_000)
     ids = {t.id for t in due}
     assert mine.id in ids
     assert theirs.id in ids
