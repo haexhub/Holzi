@@ -19,6 +19,7 @@ import time
 from sqlalchemy import asc, desc, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.db import tx_for_user
 from hermes.repository import persona_history as history_repo
 from hermes.repository.models import Persona
 from hermes.schema import personas as t_personas
@@ -53,7 +54,7 @@ async def list_all(engine: AsyncEngine, *, user_id: int) -> list[Persona]:
             asc(t_personas.c.name),
         )
     )
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(stmt)
         rows = result.all()
     return [_row_to_persona(r) for r in rows]
@@ -63,7 +64,7 @@ async def get(
     engine: AsyncEngine, persona_id: int, *, user_id: int
 ) -> Persona | None:
     """Fetch a persona the caller owns. Another user's persona returns None."""
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_personas).where(
                 t_personas.c.id == persona_id,
@@ -79,7 +80,7 @@ async def get_by_name(
 ) -> Persona | None:
     """Fetch the caller's persona by name. Scoped — a name owned by another
     user returns None (names are unique per user)."""
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_personas).where(
                 t_personas.c.name == name,
@@ -92,7 +93,7 @@ async def get_by_name(
 
 async def get_default(engine: AsyncEngine, *, user_id: int) -> Persona | None:
     """Return THIS user's default persona (per-user single-default invariant)."""
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_personas).where(
                 t_personas.c.is_default == 1,
@@ -128,7 +129,7 @@ async def create(
     edits in the audit trail.
     """
     now = ts if ts is not None else int(time.time())
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             t_personas.insert()
             .values(
@@ -219,7 +220,7 @@ async def update(
         updates[t_personas.c.llm_credential_id] = llm_credential_id
     if model is not _UNSET:
         updates[t_personas.c.model] = model
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         await conn.execute(
             t_personas.update()
             .where(
@@ -262,7 +263,7 @@ async def delete(engine: AsyncEngine, persona_id: int, *, user_id: int) -> bool:
     # promote the row to default between read and delete. The single
     # DELETE … WHERE is_default = 0 is race-free; rowcount=0 means
     # either the row didn't exist or it was the default.
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             t_personas.delete().where(
                 (t_personas.c.id == persona_id)
