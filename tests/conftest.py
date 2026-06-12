@@ -7,6 +7,10 @@ import os
 # API/WS test while the app seeds the admin under the shell's token.
 os.environ["HERMES_PLATFORM_ADMIN_TOKEN"] = "test-token-for-pytest"
 os.environ["HERMES_PLATFORM_ADMIN_EMAIL"] = "admin@test.local"
+# holzi_app role password — REQUIRED env (config.py makes it mandatory; migration
+# 0002 reads it to CREATE the role). Set BEFORE importing hermes.config (which
+# constructs Settings() at import) and before _migrated_pg runs the migration.
+os.environ["HERMES_RUNTIME_ROLE_PASSWORD"] = "holzi_app_test_pw"
 os.environ.setdefault("HERMES_LOG_LEVEL", "WARNING")
 
 # DATABASE_URL is provided per-test by the testcontainers fixtures (Task 18).
@@ -33,11 +37,11 @@ from hermes.config import settings  # noqa: E402
 # --- testcontainers Postgres -------------------------------------------------
 #
 # The shipped migrations hardcode the database name `holzi` (0002:
-# `GRANT CONNECT ON DATABASE holzi`, 0003: `ALTER DATABASE holzi SET app.user_id`)
-# and the holzi_app password `holzi_app_dev_pw` (0002 CREATE ROLE). So the test
-# container's database MUST be named `holzi`, and the app DSN MUST use that
-# password — otherwise migrations raise `database "holzi" does not exist` or the
-# app engine fails authentication.
+# `GRANT CONNECT ON DATABASE holzi`, 0003: `ALTER DATABASE holzi SET app.user_id`).
+# 0002 reads the holzi_app password from HERMES_RUNTIME_ROLE_PASSWORD (set at the
+# top of this file). So the test container's database MUST be named `holzi`, and
+# the app DSN MUST use that same env password — otherwise migrations raise
+# `database "holzi" does not exist` or the app engine fails authentication.
 #
 # Roles are cluster-global and the db name is fixed, so rather than create/drop
 # a database per test we boot ONE session container named `holzi`, migrate it
@@ -47,9 +51,10 @@ from hermes.config import settings  # noqa: E402
 
 _OWNER_USER = "holzi_owner"
 _OWNER_PASSWORD = "holzi_owner_test_pw"
-# holzi_app's password is baked into migration 0002 — do not change it here.
+# holzi_app's password comes from HERMES_RUNTIME_ROLE_PASSWORD (set at the top of
+# this file); migration 0002 CREATEs the role with the same env value.
 _APP_USER = "holzi_app"
-_APP_PASSWORD = "holzi_app_dev_pw"
+_APP_PASSWORD = os.environ["HERMES_RUNTIME_ROLE_PASSWORD"]
 _DB_NAME = "holzi"
 
 

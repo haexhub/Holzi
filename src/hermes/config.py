@@ -24,9 +24,11 @@ class Settings(BaseSettings):
 
     # Runtime DSN: the app connects as holzi_app, NOT as the migration owner.
     # When unset, derived from database_url by substituting the role + password.
-    # Production MUST override `runtime_role_password` via HERMES_RUNTIME_ROLE_PASSWORD.
     runtime_database_url: str | None = None
-    runtime_role_password: str = "holzi_app_dev_pw"
+    # holzi_app role password — REQUIRED from env (HERMES_RUNTIME_ROLE_PASSWORD),
+    # never hardcoded. Migration 0002 reads the SAME env var when it creates the
+    # role, so role-creation and app-connection stay in sync. Boot fails if unset.
+    runtime_role_password: str = Field(..., min_length=1)
 
     log_level: str = "INFO"
     # Plan 27: when set, structlog also writes JSON rows to this file
