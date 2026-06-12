@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.personas import CHANNEL_REGISTRY
@@ -138,6 +138,15 @@ class ChannelUpdate(BaseModel):
     # the globally-default persona). The repo layer uses a sentinel to
     # distinguish "omitted" from "set to NULL".
     default_persona_id: int | None = None
+
+    @model_validator(mode="after")
+    def _forbid_explicit_null_prompt(self) -> ChannelUpdate:
+        # `prompt` omitted means "leave unchanged"; an explicit null has no
+        # valid meaning (reset has its own endpoint) and would persist a NULL
+        # the non-nullable ChannelPromptResponse can't represent.
+        if "prompt" in self.model_fields_set and self.prompt is None:
+            raise ValueError("prompt may not be null")
+        return self
 
 
 # ---------------------------------------------------------------------------

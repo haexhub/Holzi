@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.auth import current_user_id
@@ -19,15 +19,26 @@ from hermes.routes._helpers import validate_limit
 router = APIRouter()
 
 
+def _reject_comma_tags(tags: list[str]) -> list[str]:
+    # Tags are persisted as a comma-joined string, so a comma inside a tag
+    # would silently split into two on read. Reject it at the boundary.
+    if any("," in t for t in tags):
+        raise ValueError("tag values may not contain ','")
+    return tags
+
+
+_TagList = Annotated[list[str], AfterValidator(_reject_comma_tags)]
+
+
 class NoteCreate(BaseModel):
     key: str = Field(min_length=1)
     content: str
-    tags: list[str] = Field(default_factory=list)
+    tags: _TagList = Field(default_factory=list)
 
 
 class NoteUpdate(BaseModel):
     content: str
-    tags: list[str] = Field(default_factory=list)
+    tags: _TagList = Field(default_factory=list)
 
 
 class NoteResponse(BaseModel):

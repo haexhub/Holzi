@@ -258,6 +258,25 @@ async def test_file_update_409_on_base_sha_mismatch(
     )
 
 
+async def test_file_update_422_on_malformed_base_sha(
+    client: httpx.AsyncClient,
+) -> None:
+    # base_sha is compared against a sha256 hexdigest; a non-hex value is a
+    # bad request (422 at validation), not an edit conflict (409).
+    response = await client.put(
+        "/api/workspace/file",
+        json={
+            "root": "ws-1",
+            "path": "file.py",
+            "content": "x",
+            "base_sha": "not-a-valid-sha",
+            "conversation_id": "1",
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 422
+
+
 async def test_file_update_404_when_missing(
     client: httpx.AsyncClient, configure_workspaces, install_sandbox
 ) -> None:

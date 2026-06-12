@@ -69,7 +69,10 @@ class WorkspaceUpdateRequest(BaseModel):
     root: str
     path: str
     content: str
-    base_sha: str = Field(min_length=1)
+    # 64-char lowercase hex — writer.py compares this against
+    # hashlib.sha256(...).hexdigest(), so a malformed value should fail
+    # validation (422) rather than masquerade as an edit conflict (409).
+    base_sha: str = Field(pattern=r"^[0-9a-f]{64}$")
     conversation_id: str = Field(min_length=1)
 
 

@@ -78,6 +78,19 @@ async def test_update_channel_unknown_channel_returns_404(
     assert detail["params"]["channel"] == "discord"
 
 
+async def test_update_channel_rejects_explicit_null_prompt(
+    client: httpx.AsyncClient,
+) -> None:
+    # Omitting `prompt` leaves it unchanged, but an explicit null has no valid
+    # meaning (reset has its own endpoint) and is rejected at validation.
+    response = await client.put(
+        "/api/channels/web",
+        headers=AUTH,
+        json={"prompt": None},
+    )
+    assert response.status_code == 422
+
+
 async def test_update_channel_unknown_persona_returns_422(
     client: httpx.AsyncClient,
 ) -> None:
