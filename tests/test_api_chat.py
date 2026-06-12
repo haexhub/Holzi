@@ -4,7 +4,6 @@ from typing import Any
 
 import httpx
 import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.agent import ApprovalDecision
 from hermes.main import app
@@ -92,21 +91,6 @@ def _to_sse_stream(payload: dict[str, Any]) -> bytes:
     return out
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        # Several tests anchor conversations at an ancient `ts=1000`, putting
-        # `expires_at` in the past. Stop the background ConversationSweepScheduler
-        # so it can't race the test and DELETE those rows mid-request.
-        if app.state.conversation_sweeper is not None:
-            await app.state.conversation_sweeper.stop()
-        yield c
 
 
 def _parse_sse(body: bytes) -> list[tuple[str, dict[str, Any]]]:

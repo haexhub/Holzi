@@ -13,8 +13,6 @@ import json
 from typing import Any
 
 import httpx
-import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.main import app
 from hermes.repository import conversations, runs
@@ -102,16 +100,6 @@ def _parse_sse(body: bytes) -> list[tuple[str, dict[str, Any]]]:
     return events
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 # ---------------------------------------------------------------------------

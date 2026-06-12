@@ -6,8 +6,6 @@ by the `/settings/skills` page and (later) by Plan 29-E's persona tool
 allowlist multi-select.
 """
 import httpx
-import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.agent import Tool
 from hermes.main import app
@@ -16,16 +14,6 @@ VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 async def test_tools_requires_auth(client: httpx.AsyncClient) -> None:

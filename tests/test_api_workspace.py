@@ -8,15 +8,8 @@ import zlib
 
 import httpx
 import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.main import app
-from hermes.repository import workspaces as workspaces_repo
-from hermes.sandbox import (
-    ResourceLimits,
-    SandboxManager,
-)
-from hermes.sandbox.fake import FakeSandboxBackend
 
 VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -26,60 +19,10 @@ TEXT_PREVIEW_CAP = 256 * 1024
 IMAGE_PREVIEW_CAP = 2 * 1024 * 1024
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
-@pytest.fixture
-def configure_workspaces():
-    """Plan 25-A: seed the `workspaces` table with the given slugs so the
-    request-time membership check in `_active_root_slugs(db)` accepts
-    them. The display_name doubles as the slug (no separate humanised
-    name needed for these tests). DB engine is per-test (see conftest),
-    so no explicit teardown is required."""
-
-    async def _set(slugs: list[str]) -> None:
-        for slug in slugs:
-            await workspaces_repo.create(
-                app.state.db, workspace_id=slug, display_name=slug
-            )
-
-    return _set
 
 
-@pytest.fixture
-async def install_sandbox():
-    """Install a FakeSandboxBackend-backed manager on app.state and tear it
-    down so the next test starts with the default `None` manager."""
-    installed: list[SandboxManager] = []
-
-    def _install() -> tuple[SandboxManager, FakeSandboxBackend]:
-        backend = FakeSandboxBackend()
-        mgr = SandboxManager(
-            backend=backend,
-            image="hermes-sandbox:test",
-            network="none",
-            default_limits=ResourceLimits(
-                cpus=1.0, memory_mb=512, disk_mb=1024
-            ),
-        )
-        app.state.sandbox_manager = mgr
-        installed.append(mgr)
-        return mgr, backend
-
-    yield _install
-
-    for mgr in installed:
-        await mgr.shutdown()
-    app.state.sandbox_manager = None
 
 
 # Tiny valid PNG (1x1 transparent) for image-preview tests. Built inline so

@@ -7,10 +7,7 @@ seeds the default persona with the fragments shape natively — no
 monkeypatching of the lifespan boot is needed.
 """
 import httpx
-import pytest
-from asgi_lifespan import LifespanManager
 
-from hermes import main as hermes_main
 from hermes.personas import (
     CHANNEL_REGISTRY,
     DEFAULT_PERSONA_AGENTS,
@@ -23,16 +20,6 @@ VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app=hermes_main.app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=hermes_main.app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 # ---------------------------------------------------------------------------

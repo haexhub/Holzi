@@ -9,7 +9,6 @@ import secrets
 
 import httpx
 import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.crypto import EncryptedBlob, Encryptor
 from hermes.main import app
@@ -25,16 +24,6 @@ VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 # ─── pure resolver ──────────────────────────────────────────────────

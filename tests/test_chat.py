@@ -1,8 +1,6 @@
 import json
 
 import httpx
-import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.main import app
 from hermes.repository import conversations, messages
@@ -59,18 +57,6 @@ def _install_upstream(handler):
     app.state.upstream = httpx.AsyncClient(transport=transport, base_url="http://fake-proxy")
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        if app.state.conversation_sweeper is not None:
-            await app.state.conversation_sweeper.stop()
-        yield c
 
 
 async def test_chat_completions_requires_auth(client: httpx.AsyncClient) -> None:

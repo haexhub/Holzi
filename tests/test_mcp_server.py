@@ -2,7 +2,6 @@ from typing import Any
 
 import httpx
 import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.agent import Tool
 from hermes.main import app
@@ -52,16 +51,6 @@ def test_tool_manifest_serialises_catalog() -> None:
 # ---------------------------------------------------------------------------
 # Endpoint integration
 # ---------------------------------------------------------------------------
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 async def test_mcp_manifest_returns_catalog(client: httpx.AsyncClient) -> None:

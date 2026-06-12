@@ -3,7 +3,6 @@ import json
 
 import httpx
 import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.main import app
 
@@ -21,16 +20,6 @@ def _sse_done_stream() -> bytes:
     ])
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 @pytest.fixture(autouse=True)

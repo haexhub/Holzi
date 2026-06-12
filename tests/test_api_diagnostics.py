@@ -12,7 +12,6 @@ on it.
 """
 import httpx
 import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes import config as hermes_config
 from hermes.main import app
@@ -25,16 +24,6 @@ AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 CHECK_IDS = {"database", "llm", "scheduler", "workspace", "sandbox"}
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 # ---------------------------------------------------------------------------

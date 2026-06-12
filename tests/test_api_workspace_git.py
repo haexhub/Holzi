@@ -11,15 +11,8 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes import config as hermes_config
-from hermes.main import app
-from hermes.repository import workspaces as workspaces_repo
-from hermes.sandbox import (
-    ResourceLimits,
-    SandboxManager,
-)
 from hermes.sandbox.fake import FakeSandboxBackend
 from hermes.sandbox.models import ExecExit, ExecOutput
 
@@ -28,31 +21,8 @@ AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 WORKSPACE_MOUNT = "/workspace"
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
-@pytest.fixture
-def configure_workspaces():
-    """Plan 25-A: seed the `workspaces` table with the given slugs so the
-    request-time membership check in `_active_root_slugs(db)` accepts
-    them. DB engine is per-test, so no explicit teardown is required."""
-
-    async def _set(slugs: list[str]) -> None:
-        for slug in slugs:
-            await workspaces_repo.create(
-                app.state.db, workspace_id=slug, display_name=slug
-            )
-
-    return _set
 
 
 @pytest.fixture
@@ -64,27 +34,6 @@ def destructive_on(monkeypatch):
     )
 
 
-@pytest.fixture
-async def install_sandbox():
-    installed: list[SandboxManager] = []
-
-    def _install() -> tuple[SandboxManager, FakeSandboxBackend]:
-        backend = FakeSandboxBackend()
-        mgr = SandboxManager(
-            backend=backend,
-            image="hermes-sandbox:test",
-            network="none",
-            default_limits=ResourceLimits(cpus=1.0, memory_mb=512, disk_mb=1024),
-        )
-        app.state.sandbox_manager = mgr
-        installed.append(mgr)
-        return mgr, backend
-
-    yield _install
-
-    for mgr in installed:
-        await mgr.shutdown()
-    app.state.sandbox_manager = None
 
 
 def _git_argvs(backend: FakeSandboxBackend) -> list[list[str]]:
