@@ -1,7 +1,7 @@
 [project]
 name = "hermes-server"
 version = "0.0.1"
-description = "Hermes — personal AI assistant backend (FastAPI, SQLite/FTS5, MCP, Signal worker)"
+description = "Hermes — personal AI assistant backend (FastAPI, Postgres + RLS, MCP)"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

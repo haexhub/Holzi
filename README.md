@@ -28,14 +28,25 @@ make install
 
 # 2. Set up secrets
 cp .env.example .env
-echo "HERMES_AUTH_TOKEN=$(make -s token)" >> .env
+echo "HERMES_PLATFORM_ADMIN_TOKEN=$(make -s token)" >> .env
 echo "HERMES_SECRET_KEY=$(openssl rand -hex 32)" >> .env
-# Optional: edit .env to set HERMES_DOMAIN, HERMES_LOG_FILE, etc.
+# Edit .env to set HERMES_PLATFORM_ADMIN_EMAIL (and optionally
+# HERMES_DOMAIN, HERMES_LOG_FILE, etc.). The dev defaults for
+# HERMES_DATABASE_URL already point at the compose `db` service.
 
-# 3. Bring up the local dev-stack (backend + LLM proxy + Postgres)
-make up-local            # backend only
-make up-local-full       # backend + holzi-frontend (Nuxt dev with HMR)
+# 3. Bring up the local dev-stack (Postgres + backend + LLM proxy)
+make up-local            # backend + db
+make up-local-full       # backend + db + holzi-frontend (Nuxt dev with HMR)
 make logs-local
+```
+
+Memory lives in Postgres with per-user Row-Level Security; the `db`
+service comes up as part of `make up-local`. To run the backend outside
+Compose (`make dev`), bring up just Postgres first and apply migrations
+— see [`docs/postgres-dev.md`](docs/postgres-dev.md):
+
+```bash
+docker compose -f docker-compose.local.yml up -d db
 ```
 
 The dev-stack routes through a bundled Traefik on `*.localhost` (RFC
@@ -52,8 +63,8 @@ Port 80 already in use? Set `HERMES_LOCAL_WEB_PORT=11080` in `.env` and
 the URLs become `http://app.localhost:11080` etc.
 
 On first load the UI shows a login screen — paste the value of
-`HERMES_AUTH_TOKEN` from your `.env` (the same `make token` output).
-It is persisted in `localStorage` and sent as
+`HERMES_PLATFORM_ADMIN_TOKEN` from your `.env` (the same `make token`
+output). It is persisted in `localStorage` and sent as
 `Authorization: Bearer <token>` on every API call.
 
 Then add an LLM credential at `/settings/llm` — see
@@ -104,8 +115,8 @@ configuration.
 - `make down-local` / `make logs-local` / `make ps-local` — dev-stack lifecycle
 - `make sandbox-image` — rebuild the sandbox image after editing `Dockerfile.sandbox`
 - `make frontend-reinstall` — recreate the frontend container with a fresh `node_modules` (run after `package.json`/lockfile changes in `../holzi-frontend`)
-- `make token` — emit a fresh 32-byte hex token for `HERMES_AUTH_TOKEN`
-- `make clean` — `compose down -v`, **destroys `hermes.db`**
+- `make token` — emit a fresh 32-byte hex token for `HERMES_PLATFORM_ADMIN_TOKEN`
+- `make clean` — `compose down -v`, **destroys the Postgres data volume**
 
 ## Diagnostics
 

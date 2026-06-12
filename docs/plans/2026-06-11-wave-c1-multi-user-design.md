@@ -1,3 +1,5 @@
+> **SUPERSEDED** by [`2026-06-11-saas-coding-agent-design.md`](2026-06-11-saas-coding-agent-design.md) §1 — SQLite framing replaced by Postgres + RLS. The structural decisions in this doc still apply.
+
 # Design: Wave C1 — Account-Layer + User-Scoped DB
 
 > **STATUS: SHIPPED 2026-06-11** — merged to `main` (backend PR #85, plans

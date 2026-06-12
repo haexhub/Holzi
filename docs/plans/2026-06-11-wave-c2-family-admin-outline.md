@@ -1,3 +1,5 @@
+> **SUPERSEDED** by [`2026-06-11-saas-coding-agent-design.md`](2026-06-11-saas-coding-agent-design.md) §1 — SQLite framing replaced by Postgres + RLS. The structural decisions in this doc still apply.
+
 # Wave C2 — Email Magic-Link Login, Invites, Roles & Sharing (OUTLINE)
 
 > **For Claude:** OUTLINE, not a task-by-task plan. Firm this up into a full
