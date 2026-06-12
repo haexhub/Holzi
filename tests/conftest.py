@@ -369,18 +369,25 @@ def _patch_persona_context_for_app_tests(request, monkeypatch) -> None:
     (e.g., `test_personas_resolver.py`) import from the original module,
     not from `routes.api`, so they are unaffected by this patch.
     """
-    import hermes.routes.api as api_mod
+    # `routes.api` is a package; the names below live on the submodules that
+    # actually USE them. Patching the package's re-exports would have no effect
+    # on the submodule-local references — so we target the submodules directly.
     from hermes.main import app
     from hermes.personas import PersonaContext, get_effective_system_prompt
     from hermes.repository.models import LlmCredential
+    from hermes.routes.api import chat as api_chat_mod
+    from hermes.routes.api import chat_stream as api_chat_stream_mod
 
     # `build_client_for_credential` always returns the test mock so tests that
     # set `app.state.upstream` don't need to worry about credential-bound
-    # client creation. This patch applies to ALL integration tests.
+    # client creation. This patch applies to ALL integration tests. The symbol
+    # is referenced from chat_stream (`_stream_web_agent_run`) and chat
+    # (re-export for backward-compat / `api_models` fallback path).
     def _fake_build_client(cred, **kwargs):
         return app.state.upstream
 
-    monkeypatch.setattr(api_mod, "build_client_for_credential", _fake_build_client)
+    monkeypatch.setattr(api_chat_stream_mod, "build_client_for_credential", _fake_build_client)
+    monkeypatch.setattr(api_chat_mod, "build_client_for_credential", _fake_build_client)
 
     # `resolve_persona_context` requires an active credential in the DB.
     # Tests marked `real_persona_context` seed their own credential and opt
@@ -439,7 +446,9 @@ def _patch_persona_context_for_app_tests(request, monkeypatch) -> None:
             model=model,
         )
 
-    monkeypatch.setattr(api_mod, "resolve_persona_context", _fake_resolve_persona_context)
+    monkeypatch.setattr(
+        api_chat_stream_mod, "resolve_persona_context", _fake_resolve_persona_context
+    )
 
     async def _fake_resolve_chat_context_meta(channel: str, engine, *, user_id: int):
         from hermes.config import settings
@@ -453,4 +462,6 @@ def _patch_persona_context_for_app_tests(request, monkeypatch) -> None:
             model,
         )
 
-    monkeypatch.setattr(api_mod, "resolve_chat_context_meta", _fake_resolve_chat_context_meta)
+    monkeypatch.setattr(
+        api_chat_mod, "resolve_chat_context_meta", _fake_resolve_chat_context_meta
+    )

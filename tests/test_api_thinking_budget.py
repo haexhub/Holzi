@@ -76,7 +76,11 @@ def _patch_persona_to(monkeypatch, *, provider: str):
     `build_thinking_payload` sees the right wire format."""
     from hermes.personas import PersonaContext
     from hermes.repository.models import LlmCredential
-    from hermes.routes import api as api_mod
+
+    # `resolve_persona_context` is consumed by `chat_stream._stream_web_agent_run`;
+    # the submodule-local reference is what the agent run sees, so patching the
+    # package's re-export would have no effect.
+    from hermes.routes.api import chat_stream as api_mod
 
     cred = LlmCredential(
         id=0,
