@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Request, status
 from fastapi.responses import Response
 from sqlalchemy.exc import IntegrityError
 
@@ -280,6 +280,12 @@ async def list_persona_models(persona_id: int, request: Request) -> dict[str, An
             encryptor=request.app.state.encryptor,
         )
     except ProviderModelsError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Mirror GET /api/llm/credentials/{id}/models (routes/llm.py) so this
+        # wrapper returns the same canonical envelope it proxies.
+        raise http_error(
+            502,
+            ErrorCode.LLM_PROVIDER_FAILED,
+            params={"message": str(exc)},
+        ) from exc
 
     return {"models": [{"id": m.id, "label": m.label} for m in models]}

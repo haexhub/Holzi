@@ -8,6 +8,7 @@ monkeypatching of the lifespan boot is needed.
 """
 import httpx
 
+from hermes.main import app
 from hermes.personas import (
     DEFAULT_PERSONA_AGENTS,
     DEFAULT_PERSONA_IDENTITY,
@@ -574,6 +575,30 @@ async def test_get_persona_models_no_credential_503(client: httpx.AsyncClient) -
 async def test_get_persona_models_persona_not_found_404(client: httpx.AsyncClient) -> None:
     resp = await client.get("/api/personas/9999/models", headers=AUTH)
     assert resp.status_code == 404
+
+
+async def test_get_persona_models_provider_error_502(client: httpx.AsyncClient) -> None:
+    # The persona /models route proxies the credential /models route, so a
+    # provider failure must surface the same canonical 502 envelope.
+    app.state.external_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(401, json={"error": {"message": "bad key"}})
+        ),
+        timeout=5.0,
+    )
+    created = await client.post(
+        "/api/llm/credentials",
+        json={"provider": "openai", "display_name": "p", "api_key": "k"},
+        headers=AUTH,
+    )
+    cred_id = created.json()["id"]
+    await client.patch(f"/api/llm/credentials/{cred_id}/activate", headers=AUTH)
+
+    resp = await client.get("/api/personas/1/models", headers=AUTH)
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["detail"]["code"] == "LLM_PROVIDER_FAILED"
+    assert "401" in body["detail"]["params"]["message"]
 
 
 async def test_delete_credential_nulls_persona_model(client: httpx.AsyncClient) -> None:
