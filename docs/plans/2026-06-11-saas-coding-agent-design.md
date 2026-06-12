@@ -44,6 +44,7 @@ only as an MIT *reference/parts donor*).
 - **§7 — Layer A: optional code index (tree-sitter)** ← *locked*
 - **§8 — Migration & rollout (greenfield, sequencing)** ← *locked*
 - **§9 — Architecture evolution: Open-Core, client-agent & haex-space** ← *target (2026-06-12)*
+- **§10 — Client-agent: Cline-based, assembled not built** ← *target (2026-06-12, spike-validated)*
 
 ---
 
@@ -651,3 +652,64 @@ is **server-side (plaintext)**; the haex-space/E2E model is the target.
 **Immediate path unchanged:** v1 stays server-side (§1 shipped). §2+ continue on that
 baseline, now understood as building the **thin control-plane**, with personal state
 kept behind seams so the haex-vault migration is a later swap.
+
+---
+
+## §10 — Client-agent: Cline-based, assembled not built  *(target, 2026-06-12; spike-validated)*
+
+The §9 "Client" layer, made concrete. **Decision: build the client agent on
+**Cline** (Apache-2.0) — assemble, don't reinvent.** Validated at code level by a
+spike (2026-06-12): `holzi-monorepo/spike/cline-integration/`.
+
+**Why Cline (vs Roo vs custom):** it is the only candidate that lets us layer
+*all* our capabilities with **near-zero forking** — via three native seams (a
+Claude-subscription provider, an MCP host, and turn-lifecycle **hooks**) — plus a
+published **`@cline/sdk`** engine so we can run it under our own UI later. Roo has
+only observe-only events (no mid-loop hooks) and no engine library → would force a
+fork. Custom = reimplement loop/tools/diff/approval/streaming/MCP ourselves.
+
+**Three integration seams (no fork):**
+
+1. **LLM access.** Solo/now: Cline's built-in **"Claude Code" provider** uses the
+   **Claude Max/Pro subscription directly** (via the `claude` CLI OAuth) — no API
+   key, no proxy, **no Holzi backend**. Later/SaaS: the **"OpenAI-Compatible"**
+   provider points at the LLM-gateway / local `haex-claude-proxy` (custom base URL).
+2. **Capabilities = MCP servers** (config, no fork): **graphify** (code-graph),
+   **hindsight** (memory: recall/retain/reflect), **fallow** (deterministic
+   code-audit; bin **`fallow-mcp`**, *not* a `fallow mcp` subcommand). graphify +
+   hindsight install the same way.
+3. **Learning loop = hooks** (child processes, JSON via stdin/stdout):
+   - `before_agent_start` → inject the **"what we know" memory block** (hindsight/vault).
+   - `PostToolUse` / `TaskComplete` → **auto-retain** + **skill-induction**
+     (`hindsight.retain/reflect` + `skill_manage`); counter-based **self-nudge**.
+   - Unix: extensionless shim + exec-bit (shebang); Windows: a `.ps1` sibling
+     launcher — **not** a blocker. Spike proved the `PostToolUse` shim → `retain.cjs`
+     path end-to-end (emits `{}`, retains one JSONL record per tool use).
+
+**Own UI later.** `@cline/sdk` (`Agent`/`ClineCore`, headless) runs the engine
+under **holzi-ui** — deferred until the SDK (currently v0.0.x) is mature enough;
+until then Cline's own UI is the front.
+
+**Build vs adopt.** *Adopt:* the Cline engine + the three MCP servers (all exist).
+*Build:* the **hooks package** — the learning-loop logic ported from
+`NousResearch/hermes-agent` (induction/reflect prompts, self-nudge, session_search
+wiring) — plus the memory wiring (hindsight now; vault-native at the endpoint later, §9).
+
+**Phasing (incremental, from the spike up):**
+- **P0** Cline + "Claude Code" provider → agent on your Abo, **no backend**. *(spike Link 1)*
+- **P1** + `fallow-mcp` (cheapest capability). *(spike Link 3)*
+- **P2** + hooks package: `PostToolUse` retain → wire to a real memory store. *(spike Link 2 → real)*
+- **P3** + `before_agent_start` memory-inject + `TaskComplete` skill-induction = the full loop.
+- **P4** + graphify (code-graph) + hindsight (memory) as first-class MCP.
+- **P5** own UI via `@cline/sdk`; then haex-vault as the state substrate (external bridge, §9).
+
+**Where it lives:** `holzi-monorepo` — the hooks package as a new `packages/` member;
+the spike at `spike/cline-integration/` is the seed. The Holzi server (§1–§8) is
+*not needed* for P0–P3 (solo/Abo); it returns as the **thin control-plane** (§9)
+when multi-tenant / Open-Core ships.
+
+**Open questions / risks:**
+1. `@cline/sdk` maturity (v0.0.x) before betting the UI on it.
+2. Cross-platform hook packaging (Windows `.ps1` launchers).
+3. Memory engine at the endpoint: hindsight-embedded vs vault-native (§9).
+4. "Claude Code" provider is subject to Anthropic terms (personal use).
