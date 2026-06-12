@@ -33,6 +33,30 @@ def validate_limit(limit: int, *, max_limit: int = MAX_LIST_LIMIT) -> int:
     return limit
 
 
+def http_error(
+    status_code: int,
+    code: ErrorCode,
+    *,
+    params: dict[str, Any] | None = None,
+) -> HTTPException:
+    """Build an ``HTTPException`` with the canonical error envelope.
+
+    Pass ``params=None`` (default) for the bare-string detail shape
+    (``detail="<CODE>"``); pass an explicit dict — including ``params={}``
+    — for the wrapped shape (``detail={"code": "<CODE>", "params": {...}}``).
+    Both shapes are intentional, the frontend handles both via i18n.
+
+    Returns the exception rather than raising so that callers can use
+    ``raise http_error(...) from exc`` for chaining.
+    """
+    if params is None:
+        return HTTPException(status_code=status_code, detail=code.value)
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code.value, "params": params},
+    )
+
+
 def require_sandbox_manager(request: Request) -> Any:
     mgr = request.app.state.sandbox_manager
     if mgr is None:

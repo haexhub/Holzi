@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 from hermes.errors import ErrorCode
-from hermes.routes._helpers import require_sandbox_manager, validate_limit
+from hermes.routes._helpers import http_error, require_sandbox_manager, validate_limit
 
 
 def _fake_request(sandbox_manager):
@@ -59,3 +59,30 @@ def test_validate_limit_respects_custom_max():
     with pytest.raises(HTTPException) as exc:
         validate_limit(11, max_limit=10)
     assert exc.value.detail["params"] == {"min": 1, "max": 10}
+
+
+def test_http_error_returns_exception_with_dict_detail_when_params_given():
+    err = http_error(404, ErrorCode.PERSONA_NOT_FOUND, params={"id": 7})
+    assert isinstance(err, HTTPException)
+    assert err.status_code == 404
+    assert err.detail == {"code": ErrorCode.PERSONA_NOT_FOUND.value, "params": {"id": 7}}
+
+
+def test_http_error_returns_bare_string_detail_when_no_params():
+    err = http_error(422, ErrorCode.PERSONA_DEFAULT_DEMOTE)
+    assert err.detail == ErrorCode.PERSONA_DEFAULT_DEMOTE.value
+
+
+def test_http_error_accepts_empty_params_dict_as_explicit_dict_shape():
+    err = http_error(422, ErrorCode.PERSONA_FRAGMENTS_ALL_EMPTY, params={})
+    assert err.detail == {"code": ErrorCode.PERSONA_FRAGMENTS_ALL_EMPTY.value, "params": {}}
+
+
+def test_http_error_chains_with_from_exc():
+    cause = ValueError("boom")
+    try:
+        raise http_error(409, ErrorCode.PERSONA_NAME_CONFLICT, params={"name": "x"}) from cause
+    except HTTPException as exc:
+        assert exc.__cause__ is cause
+    else:
+        pytest.fail("HTTPException not raised")

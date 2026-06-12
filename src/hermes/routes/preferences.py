@@ -46,6 +46,7 @@ from hermes.repository.models import (
     PersonaHistory,
 )
 from hermes.repository.personas import _UNSET as REPO_UNSET
+from hermes.routes._helpers import http_error
 
 router = APIRouter(prefix="/api")
 
@@ -220,12 +221,10 @@ async def create_persona(
     if not (
         body.soul.strip() or body.identity.strip() or body.agents.strip()
     ):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={
-                "code": ErrorCode.PERSONA_FRAGMENTS_ALL_EMPTY.value,
-                "params": {},
-            },
+        raise http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorCode.PERSONA_FRAGMENTS_ALL_EMPTY,
+            params={},
         )
     try:
         persona = await personas_repo.create(
@@ -238,12 +237,10 @@ async def create_persona(
             is_default=body.is_default,
         )
     except IntegrityError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": ErrorCode.PERSONA_NAME_CONFLICT.value,
-                "params": {"name": body.name},
-            },
+        raise http_error(
+            status.HTTP_409_CONFLICT,
+            ErrorCode.PERSONA_NAME_CONFLICT,
+            params={"name": body.name},
         ) from exc
     return _persona_to_dict(persona)
 
@@ -256,12 +253,10 @@ async def update_persona(
     uid = current_user_id(request)
     existing = await personas_repo.get(db, persona_id, user_id=uid)
     if existing is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.PERSONA_NOT_FOUND.value,
-                "params": {"id": persona_id},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.PERSONA_NOT_FOUND,
+            params={"id": persona_id},
         )
 
     # Refuse to demote the only default — the resolver always needs one.
@@ -269,9 +264,9 @@ async def update_persona(
         body.is_default is False
         and existing.is_default
     ):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=ErrorCode.PERSONA_DEFAULT_DEMOTE.value,
+        raise http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorCode.PERSONA_DEFAULT_DEMOTE,
         )
 
     # All-empty check on the POST-merge state: fields with `None` keep
@@ -288,12 +283,10 @@ async def update_persona(
         or merged_identity.strip()
         or merged_agents.strip()
     ):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={
-                "code": ErrorCode.PERSONA_FRAGMENTS_ALL_EMPTY.value,
-                "params": {},
-            },
+        raise http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorCode.PERSONA_FRAGMENTS_ALL_EMPTY,
+            params={},
         )
 
     # Resolve new credential/model fields — only touch if they appear in the request body.
@@ -307,12 +300,10 @@ async def update_persona(
                 db, body.llm_credential_id, user_id=uid
             )
             if _fetched_cred is None:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail={
-                        "code": ErrorCode.PERSONA_INVALID_CREDENTIAL.value,
-                        "params": {"id": body.llm_credential_id},
-                    },
+                raise http_error(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    ErrorCode.PERSONA_INVALID_CREDENTIAL,
+                    params={"id": body.llm_credential_id},
                 )
         new_cred_id = body.llm_credential_id
         # Clearing the credential also orphans any pinned model — auto-clear it
@@ -329,12 +320,10 @@ async def update_persona(
                 else existing.llm_credential_id
             )
             if effective_cred_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail={
-                        "code": ErrorCode.PERSONA_INVALID_MODEL.value,
-                        "params": {"model": body.model, "reason": "no_credential"},
-                    },
+                raise http_error(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    ErrorCode.PERSONA_INVALID_MODEL,
+                    params={"model": body.model, "reason": "no_credential"},
                 )
             # Reuse the credential already fetched above when possible.
             cred_for_model: LlmCredential | None
@@ -345,12 +334,10 @@ async def update_persona(
                     db, effective_cred_id, user_id=uid
                 )
                 if cred_for_model is None:
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                        detail={
-                            "code": ErrorCode.PERSONA_INVALID_CREDENTIAL.value,
-                            "params": {"id": effective_cred_id},
-                        },
+                    raise http_error(
+                        status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        ErrorCode.PERSONA_INVALID_CREDENTIAL,
+                        params={"id": effective_cred_id},
                     )
             try:
                 available_models = await list_provider_models(
@@ -359,12 +346,10 @@ async def update_persona(
                     encryptor=request.app.state.encryptor,
                 )
                 if not any(m.id == body.model for m in available_models):
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                        detail={
-                            "code": ErrorCode.PERSONA_INVALID_MODEL.value,
-                            "params": {"model": body.model},
-                        },
+                    raise http_error(
+                        status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        ErrorCode.PERSONA_INVALID_MODEL,
+                        params={"model": body.model},
                     )
             except ProviderModelsError:
                 pass  # provider unreachable; skip model validation
@@ -384,21 +369,17 @@ async def update_persona(
             model=new_model,
         )
     except IntegrityError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": ErrorCode.PERSONA_NAME_CONFLICT.value,
-                "params": {"name": body.name or ""},
-            },
+        raise http_error(
+            status.HTTP_409_CONFLICT,
+            ErrorCode.PERSONA_NAME_CONFLICT,
+            params={"name": body.name or ""},
         ) from exc
     if updated is None:
         # Race: someone deleted the row between the get and the update.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.PERSONA_NOT_FOUND.value,
-                "params": {"id": persona_id},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.PERSONA_NOT_FOUND,
+            params={"id": persona_id},
         )
     return _persona_to_dict(updated)
 
@@ -411,27 +392,23 @@ async def delete_persona(persona_id: int, request: Request) -> Response:
     uid = current_user_id(request)
     existing = await personas_repo.get(db, persona_id, user_id=uid)
     if existing is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.PERSONA_NOT_FOUND.value,
-                "params": {"id": persona_id},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.PERSONA_NOT_FOUND,
+            params={"id": persona_id},
         )
     if existing.is_default:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=ErrorCode.PERSONA_DEFAULT_DELETE.value,
+        raise http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorCode.PERSONA_DEFAULT_DELETE,
         )
     deleted = await personas_repo.delete(db, persona_id, user_id=uid)
     if not deleted:
         # Race or unexpected — surface as 404.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.PERSONA_NOT_FOUND.value,
-                "params": {"id": persona_id},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.PERSONA_NOT_FOUND,
+            params={"id": persona_id},
         )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -447,12 +424,10 @@ async def list_persona_models(persona_id: int, request: Request) -> dict[str, An
     uid = current_user_id(request)
     persona = await personas_repo.get(db, persona_id, user_id=uid)
     if persona is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.PERSONA_NOT_FOUND.value,
-                "params": {"id": persona_id},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.PERSONA_NOT_FOUND,
+            params={"id": persona_id},
         )
 
     cred = None
@@ -461,10 +436,7 @@ async def list_persona_models(persona_id: int, request: Request) -> dict[str, An
     if cred is None:
         cred = await llm_credentials_repo.get_active(db, user_id=uid)
     if cred is None:
-        raise HTTPException(
-            status_code=503,
-            detail=ErrorCode.PERSONA_NO_CREDENTIAL.value,
-        )
+        raise http_error(503, ErrorCode.PERSONA_NO_CREDENTIAL)
 
     try:
         models = await list_provider_models(
@@ -493,12 +465,10 @@ async def list_persona_history(
     db = _db(request)
     persona = await personas_repo.get(db, persona_id, user_id=current_user_id(request))
     if persona is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.PERSONA_NOT_FOUND.value,
-                "params": {"id": persona_id},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.PERSONA_NOT_FOUND,
+            params={"id": persona_id},
         )
     rows = await persona_history_repo.list_for_persona(
         db, persona_id, user_id=current_user_id(request)
@@ -517,34 +487,28 @@ async def restore_persona_history(
     uid = current_user_id(request)
     persona = await personas_repo.get(db, persona_id, user_id=uid)
     if persona is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.PERSONA_NOT_FOUND.value,
-                "params": {"id": persona_id},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.PERSONA_NOT_FOUND,
+            params={"id": persona_id},
         )
     snapshot = await persona_history_repo.get(db, snapshot_id, user_id=uid)
     if snapshot is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.PERSONA_HISTORY_NOT_FOUND.value,
-                "params": {"id": snapshot_id},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.PERSONA_HISTORY_NOT_FOUND,
+            params={"id": snapshot_id},
         )
     # Guard against cross-persona restore — the snapshot belongs to a
     # different persona, so applying it would silently rename + overwrite
     # the target. Refuse with a 422 the FE can surface as a routing error.
     if snapshot.persona_id != persona_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={
-                "code": ErrorCode.PERSONA_HISTORY_PERSONA_MISMATCH.value,
-                "params": {
-                    "persona_id": persona_id,
-                    "snapshot_id": snapshot_id,
-                },
+        raise http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorCode.PERSONA_HISTORY_PERSONA_MISMATCH,
+            params={
+                "persona_id": persona_id,
+                "snapshot_id": snapshot_id,
             },
         )
     snap = json.loads(snapshot.snapshot_json)
@@ -566,21 +530,17 @@ async def restore_persona_history(
         # The snapshot's `name` could now collide with a sibling persona
         # that was renamed after the snapshot was taken. Surface as the
         # same 409 PERSONA_NAME_CONFLICT shape as POST/PUT.
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": ErrorCode.PERSONA_NAME_CONFLICT.value,
-                "params": {"name": snap["name"]},
-            },
+        raise http_error(
+            status.HTTP_409_CONFLICT,
+            ErrorCode.PERSONA_NAME_CONFLICT,
+            params={"name": snap["name"]},
         ) from exc
     if updated is None:
         # Race: persona was deleted between the get and the update.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.PERSONA_NOT_FOUND.value,
-                "params": {"id": persona_id},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.PERSONA_NOT_FOUND,
+            params={"id": persona_id},
         )
     return _persona_to_dict(updated)
 
@@ -609,12 +569,10 @@ async def update_channel(
     channel: str, body: ChannelUpdate, request: Request
 ) -> dict[str, Any]:
     if channel not in CHANNEL_REGISTRY:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.CHANNEL_NOT_FOUND.value,
-                "params": {"channel": channel},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.CHANNEL_NOT_FOUND,
+            params={"channel": channel},
         )
     db = _db(request)
 
@@ -623,12 +581,10 @@ async def update_channel(
             db, body.default_persona_id, user_id=current_user_id(request)
         )
         if target is None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail={
-                    "code": ErrorCode.PERSONA_REF_INVALID.value,
-                    "params": {"id": body.default_persona_id},
-                },
+            raise http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                ErrorCode.PERSONA_REF_INVALID,
+                params={"id": body.default_persona_id},
             )
 
     # Pydantic collapses "field omitted" and "field: null" into the same
@@ -645,12 +601,10 @@ async def update_channel(
     if updated is None:
         # Should be unreachable now that we checked CHANNEL_REGISTRY above,
         # but covers the channel-row-missing case explicitly.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.CHANNEL_ROW_MISSING.value,
-                "params": {"channel": channel},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.CHANNEL_ROW_MISSING,
+            params={"channel": channel},
         )
     return _channel_to_dict(updated)
 
@@ -662,20 +616,16 @@ async def reset_channel_prompt(
     channel: str, request: Request
 ) -> dict[str, Any]:
     if channel not in CHANNEL_REGISTRY:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.CHANNEL_NOT_FOUND.value,
-                "params": {"channel": channel},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.CHANNEL_NOT_FOUND,
+            params={"channel": channel},
         )
     reset = await channels_repo.reset_prompt(_db(request), channel)
     if reset is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": ErrorCode.CHANNEL_ROW_MISSING.value,
-                "params": {"channel": channel},
-            },
+        raise http_error(
+            status.HTTP_404_NOT_FOUND,
+            ErrorCode.CHANNEL_ROW_MISSING,
+            params={"channel": channel},
         )
     return _channel_to_dict(reset)
