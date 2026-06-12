@@ -1033,7 +1033,12 @@ async def test_edit_rejects_assistant_message(
         app.state.db, user_id=1, conversation_id=convo.id, role="user", content="ask", ts=1001
     )
     assistant = await messages.append(
-        app.state.db, user_id=1, conversation_id=convo.id, role="assistant", content="reply", ts=1002
+        app.state.db,
+        user_id=1,
+        conversation_id=convo.id,
+        role="assistant",
+        content="reply",
+        ts=1002,
     )
     _install_upstream_responses([_assistant_oneshot("never reached")])
 

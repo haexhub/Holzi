@@ -84,7 +84,9 @@ async def _scheduler(
 # ---------------------------------------------------------------------------
 
 
-async def test_fire_due_runs_one_shot_and_disables(conn: AsyncEngine, owner_engine: AsyncEngine) -> None:
+async def test_fire_due_runs_one_shot_and_disables(
+    conn: AsyncEngine, owner_engine: AsyncEngine
+) -> None:
     task = await agent_tasks.create(
         conn, user_id=1, title="ping", prompt="say hi", due_at=1_000, ts=500
     )
@@ -301,7 +303,9 @@ async def test_fire_due_records_failure_without_advancing_enabled(
         conn, user_id=1, title="boom", prompt="x", due_at=1_000, ts=500
     )
 
-    sched = await _scheduler(conn, owner_db=owner_engine, runner=_stub_runner(raises=RuntimeError("nope")))
+    sched = await _scheduler(
+        conn, owner_db=owner_engine, runner=_stub_runner(raises=RuntimeError("nope"))
+    )
     fired = await sched.fire_due(now=2_000)
 
     # `fired` counts only successful firings (the `fired += 1` lives after
@@ -361,7 +365,9 @@ async def test_fire_due_keeps_other_tasks_running_after_one_fails(
     assert good_after is not None and good_after.last_status == "success"
 
 
-async def test_run_now_does_not_advance_due_at(conn: AsyncEngine, owner_engine: AsyncEngine) -> None:
+async def test_run_now_does_not_advance_due_at(
+    conn: AsyncEngine, owner_engine: AsyncEngine
+) -> None:
     task = await agent_tasks.create(
         conn,
         user_id=1,
@@ -385,7 +391,9 @@ async def test_run_now_does_not_advance_due_at(conn: AsyncEngine, owner_engine: 
     assert refreshed.enabled is True  # not flipped off either
 
 
-async def test_run_now_does_not_disable_one_shot(conn: AsyncEngine, owner_engine: AsyncEngine) -> None:
+async def test_run_now_does_not_disable_one_shot(
+    conn: AsyncEngine, owner_engine: AsyncEngine
+) -> None:
     # The other half of advance=False: a manual run of a one-shot must NOT
     # flip enabled=0 — that disable belongs to the real scheduled firing.
     task = await agent_tasks.create(
@@ -402,7 +410,9 @@ async def test_run_now_does_not_disable_one_shot(conn: AsyncEngine, owner_engine
     assert refreshed.last_status == "success"
 
 
-async def test_run_now_missing_raises_lookup_error(conn: AsyncEngine, owner_engine: AsyncEngine) -> None:
+async def test_run_now_missing_raises_lookup_error(
+    conn: AsyncEngine, owner_engine: AsyncEngine
+) -> None:
     sched = await _scheduler(conn, owner_db=owner_engine)
     try:
         await sched.run_now(9999)

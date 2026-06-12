@@ -55,7 +55,9 @@ async def test_run_agent_returns_text_and_persists_assistant_message(
     conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
-    await messages.append(conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001)
+    await messages.append(
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
 
     upstream, _ = _make_upstream([_assistant_response("hello back")])
 
@@ -78,7 +80,9 @@ async def test_run_agent_injects_system_prompt_and_history(
     conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
-    await messages.append(conn, user_id=1, conversation_id=convo.id, role="user", content="first", ts=1001)
+    await messages.append(
+        conn, user_id=1, conversation_id=convo.id, role="user", content="first", ts=1001
+    )
     await messages.append(
         conn, user_id=1, conversation_id=convo.id, role="assistant", content="reply 1", ts=1002
     )
@@ -111,7 +115,9 @@ async def test_run_agent_includes_tools_definition_in_request(
     conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, user_id=1, channel="task", ts=1000)
-    await messages.append(conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001)
+    await messages.append(
+        conn, user_id=1, conversation_id=convo.id, role="user", content="hi", ts=1001
+    )
 
     upstream, requests_seen = _make_upstream([_assistant_response("hi back")])
 

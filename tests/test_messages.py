@@ -32,11 +32,15 @@ async def test_append_returns_message_with_id_and_fields(
 async def test_list_by_conversation_returns_messages_in_chronological_order(
     conn: AsyncEngine, convo_id: int
 ) -> None:
-    a = await messages.append(conn, user_id=1, conversation_id=convo_id, role="user", content="first", ts=10)
+    a = await messages.append(
+        conn, user_id=1, conversation_id=convo_id, role="user", content="first", ts=10
+    )
     b = await messages.append(
         conn, user_id=1, conversation_id=convo_id, role="assistant", content="second", ts=20
     )
-    c = await messages.append(conn, user_id=1, conversation_id=convo_id, role="user", content="third", ts=30)
+    c = await messages.append(
+        conn, user_id=1, conversation_id=convo_id, role="user", content="third", ts=30
+    )
 
     listed = await messages.list_by_conversation(conn, convo_id, user_id=1)
     assert [m.id for m in listed] == [a.id, b.id, c.id]
@@ -47,8 +51,12 @@ async def test_list_by_conversation_does_not_leak_other_conversations(
 ) -> None:
     convo_a = await conversations.create(conn, user_id=1, channel="task", ts=1)
     convo_b = await conversations.create(conn, user_id=1, channel="web", ts=2)
-    await messages.append(conn, user_id=1, conversation_id=convo_a.id, role="user", content="A", ts=10)
-    await messages.append(conn, user_id=1, conversation_id=convo_b.id, role="user", content="B", ts=20)
+    await messages.append(
+        conn, user_id=1, conversation_id=convo_a.id, role="user", content="A", ts=10
+    )
+    await messages.append(
+        conn, user_id=1, conversation_id=convo_b.id, role="user", content="B", ts=20
+    )
 
     a_msgs = await messages.list_by_conversation(conn, convo_a.id, user_id=1)
     assert [m.content for m in a_msgs] == ["A"]
@@ -58,9 +66,16 @@ async def test_fts_search_finds_matching_messages(
     conn: AsyncEngine, convo_id: int
 ) -> None:
     await messages.append(
-        conn, user_id=1, conversation_id=convo_id, role="user", content="reschedule the meeting", ts=10
+        conn,
+        user_id=1,
+        conversation_id=convo_id,
+        role="user",
+        content="reschedule the meeting",
+        ts=10,
     )
-    await messages.append(conn, user_id=1, conversation_id=convo_id, role="user", content="buy milk", ts=20)
+    await messages.append(
+        conn, user_id=1, conversation_id=convo_id, role="user", content="buy milk", ts=20
+    )
     await messages.append(
         conn, user_id=1, conversation_id=convo_id, role="user", content="cancel the meeting", ts=30
     )
@@ -108,7 +123,9 @@ async def test_fts_index_updates_when_message_is_deleted(
 async def test_last_user_message_returns_most_recent_user_turn(
     conn: AsyncEngine, convo_id: int
 ) -> None:
-    await messages.append(conn, user_id=1, conversation_id=convo_id, role="user", content="first", ts=10)
+    await messages.append(
+        conn, user_id=1, conversation_id=convo_id, role="user", content="first", ts=10
+    )
     await messages.append(
         conn, user_id=1, conversation_id=convo_id, role="assistant", content="reply", ts=20
     )
@@ -137,14 +154,18 @@ async def test_last_user_message_returns_none_when_no_user_turn(
 async def test_delete_after_removes_trailing_messages(
     conn: AsyncEngine, convo_id: int
 ) -> None:
-    await messages.append(conn, user_id=1, conversation_id=convo_id, role="user", content="q", ts=10)
+    await messages.append(
+        conn, user_id=1, conversation_id=convo_id, role="user", content="q", ts=10
+    )
     user = await messages.append(
         conn, user_id=1, conversation_id=convo_id, role="user", content="ask again", ts=20
     )
     await messages.append(
         conn, user_id=1, conversation_id=convo_id, role="assistant", content="tool call", ts=30
     )
-    await messages.append(conn, user_id=1, conversation_id=convo_id, role="tool", content="result", ts=40)
+    await messages.append(
+        conn, user_id=1, conversation_id=convo_id, role="tool", content="result", ts=40
+    )
     await messages.append(
         conn, user_id=1, conversation_id=convo_id, role="assistant", content="answer", ts=50
     )

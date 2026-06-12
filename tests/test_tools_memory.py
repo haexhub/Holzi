@@ -79,7 +79,9 @@ async def test_list_conversations_returns_all_with_message_count(
     a = await conversations.create(conn, user_id=1, channel="task", title="A", ts=1)
     b = await conversations.create(conn, user_id=1, channel="web", title="B", ts=3)
     await messages.append(conn, user_id=1, conversation_id=a.id, role="user", content="x", ts=10)
-    await messages.append(conn, user_id=1, conversation_id=a.id, role="assistant", content="y", ts=11)
+    await messages.append(
+        conn, user_id=1, conversation_id=a.id, role="assistant", content="y", ts=11
+    )
     await messages.append(conn, user_id=1, conversation_id=b.id, role="user", content="z", ts=12)
 
     tool = _by_name(build_memory_tools(conn), "list_conversations")
@@ -114,8 +116,12 @@ async def test_get_conversation_returns_metadata_and_messages(
     conn: AsyncEngine,
 ) -> None:
     convo = await conversations.create(conn, user_id=1, channel="task", title="t", ts=1)
-    await messages.append(conn, user_id=1, conversation_id=convo.id, role="user", content="a", ts=10)
-    await messages.append(conn, user_id=1, conversation_id=convo.id, role="assistant", content="b", ts=11)
+    await messages.append(
+        conn, user_id=1, conversation_id=convo.id, role="user", content="a", ts=10
+    )
+    await messages.append(
+        conn, user_id=1, conversation_id=convo.id, role="assistant", content="b", ts=11
+    )
 
     tool = _by_name(build_memory_tools(conn), "get_conversation")
     payload = await tool.handler({"id": convo.id})

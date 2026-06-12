@@ -149,7 +149,9 @@ async def test_message_count_counts_only_target_conversation(
     a = await conversations.create(conn, user_id=1, channel="task", ts=1)
     b = await conversations.create(conn, user_id=1, channel="web", ts=2)
     await messages.append(conn, user_id=1, conversation_id=a.id, role="user", content="x", ts=10)
-    await messages.append(conn, user_id=1, conversation_id=a.id, role="assistant", content="y", ts=11)
+    await messages.append(
+        conn, user_id=1, conversation_id=a.id, role="assistant", content="y", ts=11
+    )
     await messages.append(conn, user_id=1, conversation_id=b.id, role="user", content="z", ts=12)
 
     assert await conversations.message_count(conn, a.id, user_id=1) == 2
