@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from hermes.config import settings
 from hermes.errors import ErrorCode
 from hermes.repository import workspaces as workspaces_repo
+from hermes.routes._helpers import require_sandbox_manager
 from hermes.sandbox import (
     DirEntry,
     ExecExit,
@@ -287,16 +288,6 @@ async def _active_root_slugs(db: AsyncEngine) -> list[str]:
     return [r.id for r in rows]
 
 
-def _require_sandbox_manager(request: Request) -> Any:
-    mgr = request.app.state.sandbox_manager
-    if mgr is None:
-        raise HTTPException(
-            status_code=503,
-            detail=ErrorCode.SANDBOX_NOT_CONFIGURED.value,
-        )
-    return mgr
-
-
 async def _require_known_root(request: Request, root: str) -> None:
     db: AsyncEngine = request.app.state.db
     if root not in await _active_root_slugs(db):
@@ -543,7 +534,7 @@ async def api_workspace_tree(
     request: Request, root: str, path: str = ""
 ) -> dict[str, Any]:
     await _require_known_root(request, root)
-    mgr = _require_sandbox_manager(request)
+    mgr = require_sandbox_manager(request)
     rel = _normalise_relative(path)
     abs_path = _absolute_in_sandbox(rel)
 
@@ -588,7 +579,7 @@ async def api_workspace_file(
     request: Request, root: str, path: str
 ) -> dict[str, Any]:
     await _require_known_root(request, root)
-    mgr = _require_sandbox_manager(request)
+    mgr = require_sandbox_manager(request)
     rel = _normalise_relative(path)
     if rel == "":
         # `/file` with an empty path would point at the workspace root —
@@ -822,7 +813,7 @@ async def api_workspace_file_create(
     request: Request, body: WorkspaceCreateRequest
 ) -> dict[str, Any]:
     await _require_known_root(request, body.root)
-    mgr = _require_sandbox_manager(request)
+    mgr = require_sandbox_manager(request)
     rel = _normalise_relative(body.path)
     if rel == "":
         raise HTTPException(
@@ -876,7 +867,7 @@ async def api_workspace_file_update(
     request: Request, body: WorkspaceUpdateRequest
 ) -> dict[str, Any]:
     await _require_known_root(request, body.root)
-    mgr = _require_sandbox_manager(request)
+    mgr = require_sandbox_manager(request)
     rel = _normalise_relative(body.path)
     if rel == "":
         raise HTTPException(
@@ -943,7 +934,7 @@ async def api_workspace_file_rename(
     request: Request, body: WorkspaceRenameRequest
 ) -> dict[str, Any]:
     await _require_known_root(request, body.root)
-    mgr = _require_sandbox_manager(request)
+    mgr = require_sandbox_manager(request)
     src_rel = _normalise_relative(body.src)
     dest_rel = _normalise_relative(body.dest)
     if src_rel == "" or dest_rel == "":
@@ -1024,7 +1015,7 @@ async def api_workspace_file_delete(
     request: Request, body: WorkspaceDeleteRequest
 ) -> dict[str, Any]:
     await _require_known_root(request, body.root)
-    mgr = _require_sandbox_manager(request)
+    mgr = require_sandbox_manager(request)
     rel = _normalise_relative(body.path)
     if rel == "":
         raise HTTPException(
@@ -1086,7 +1077,7 @@ async def api_workspace_file_delete(
 @router.get("/git", response_model=WorkspaceGitResponse)
 async def api_workspace_git(request: Request, root: str) -> dict[str, Any]:
     await _require_known_root(request, root)
-    mgr = _require_sandbox_manager(request)
+    mgr = require_sandbox_manager(request)
     handle = await mgr.get_workspace(root)
 
     try:
@@ -1167,7 +1158,7 @@ async def _resolve_git_workspace(
     (or reuse) the workspace handle. Raises 404/503 the same way every git
     endpoint should."""
     await _require_known_root(request, root)
-    mgr = _require_sandbox_manager(request)
+    mgr = require_sandbox_manager(request)
     try:
         handle = await mgr.get_workspace(root)
     except SandboxNotRunning as exc:

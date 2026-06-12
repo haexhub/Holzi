@@ -63,6 +63,7 @@ from hermes.repository import (
 from hermes.repository import (
     skills as skills_repo,
 )
+from hermes.routes._helpers import require_sandbox_manager, validate_limit
 from hermes.run_tracker import track_run
 from hermes.sandbox import WorkspaceCrash
 from hermes.thinking import resolve_thinking_support
@@ -78,23 +79,6 @@ CLINE_CHANNEL = "cline"
 # silent SSE connections. Emit a comment heartbeat at this cadence whenever no
 # real event is flowing so the connection stays warm while we wait.
 SSE_HEARTBEAT_SECONDS = 15.0
-
-# Negative LIMIT disables LIMIT in SQLite — refuse non-positive values at the
-# API boundary so an authenticated client can't trigger an unbounded scan.
-MAX_LIST_LIMIT = 500
-
-
-def _validate_limit(limit: int, *, max_limit: int = MAX_LIST_LIMIT) -> int:
-    if limit < 1 or limit > max_limit:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": ErrorCode.REQUEST_LIMIT_OUT_OF_RANGE.value,
-                "params": {"min": 1, "max": max_limit},
-            },
-        )
-    return limit
-
 
 def _derive_conversation_title(message: str, *, max_len: int = 60) -> str:
     title = " ".join(message.split())
@@ -933,7 +917,7 @@ async def api_list_runs(
     `status` accepts the same enum the table itself uses; an unknown
     value returns 400 rather than silently widening to "all rows".
     """
-    limit = _validate_limit(limit)
+    limit = validate_limit(limit)
     if offset < 0:
         raise HTTPException(
             status_code=400, detail=ErrorCode.REQUEST_INVALID_OFFSET.value
@@ -1163,7 +1147,7 @@ async def api_list_conversations(
     q: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    limit = _validate_limit(limit)
+    limit = validate_limit(limit)
     db: AsyncEngine = request.app.state.db
     user_id = current_user_id(request)
     if q is not None and q.strip():
@@ -1187,7 +1171,7 @@ async def api_list_conversations(
 async def api_get_conversation(
     request: Request, conv_id: int, limit: int = 200
 ) -> dict[str, Any]:
-    limit = _validate_limit(limit)
+    limit = validate_limit(limit)
     db: AsyncEngine = request.app.state.db
     uid = current_user_id(request)
     convo = await conversations.get(db, conv_id, user_id=uid)
@@ -1491,7 +1475,7 @@ def _tsquery(raw: str) -> str:
 async def api_list_notes(
     request: Request, limit: int = 100, q: str | None = None
 ) -> list[dict[str, Any]]:
-    limit = _validate_limit(limit)
+    limit = validate_limit(limit)
     db: AsyncEngine = request.app.state.db
     user_id = current_user_id(request)
     # Whitespace-only `q` is treated the same as an absent `q` — falling
@@ -1670,7 +1654,7 @@ def _validate_task_schedule_payload(
 async def api_list_tasks(
     request: Request, limit: int = 200
 ) -> list[dict[str, Any]]:
-    limit = _validate_limit(limit)
+    limit = validate_limit(limit)
     db: AsyncEngine = request.app.state.db
     items = await agent_tasks.list_all(
         db, user_id=current_user_id(request), limit=limit
@@ -1821,16 +1805,6 @@ class SandboxStatusResponse(BaseModel):
     exit_code: int | None = None
 
 
-def _require_sandbox_manager(request: Request) -> Any:
-    mgr = request.app.state.sandbox_manager
-    if mgr is None:
-        raise HTTPException(
-            status_code=503,
-            detail=ErrorCode.SANDBOX_NOT_CONFIGURED.value,
-        )
-    return mgr
-
-
 @router.get(
     "/workspaces/{workspace_id}/sandbox",
     response_model=SandboxStatusResponse,
@@ -1838,7 +1812,7 @@ def _require_sandbox_manager(request: Request) -> Any:
 async def api_get_sandbox_status(
     request: Request, workspace_id: str
 ) -> dict[str, Any]:
-    mgr = _require_sandbox_manager(request)
+    mgr = require_sandbox_manager(request)
     handle = mgr.peek_workspace(workspace_id)
     if handle is None:
         # No sandbox has been spun up for this workspace yet. "absent" is
@@ -1859,7 +1833,7 @@ async def api_get_sandbox_status(
 async def api_restart_sandbox(
     request: Request, workspace_id: str
 ) -> dict[str, Any]:
-    mgr = _require_sandbox_manager(request)
+    mgr = require_sandbox_manager(request)
     handle = await mgr.restart_workspace(workspace_id)
     status_value = await mgr.status(handle)
     return {
