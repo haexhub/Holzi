@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 from hermes import attachments as attachments_mod
 from hermes.main import app
@@ -51,6 +52,28 @@ async def test_upload_text_stores_metadata_and_file(
     assert att is not None
     path = attachments_mod.file_path(att)
     assert path.read_bytes() == b"line one\nline two"
+
+
+async def test_upload_removes_blob_when_metadata_insert_fails(
+    client: httpx.AsyncClient, monkeypatch
+) -> None:
+    # The blob is written before the metadata row. If the insert fails the
+    # staged file must be removed, otherwise every partial failure orphans a
+    # file on disk with no row pointing at it.
+    conv_id = await _new_web_conversation()
+    target_dir = attachments_mod.attachment_dir(conv_id)
+    before = set(target_dir.iterdir()) if target_dir.exists() else set()
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("metadata insert failed")
+
+    monkeypatch.setattr(attachments, "create", _boom)
+
+    with pytest.raises(RuntimeError):
+        await _upload(client, conv_id, data=b"orphan me")
+
+    after = set(target_dir.iterdir()) if target_dir.exists() else set()
+    assert after == before
 
 
 async def test_upload_unknown_conversation_404(client: httpx.AsyncClient) -> None:

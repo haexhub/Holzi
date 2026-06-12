@@ -222,8 +222,14 @@ async def _resolve_first_pending_approval(decision: str) -> str:
     exercises the emit→pause→resume path end-to-end; the endpoint itself is
     covered by the dedicated unit tests below.
     """
+    # Snapshot approvals that already exist so a pending entry left behind by
+    # another test can't be resolved by mistake — only a future created by
+    # *this* flow is eligible.
+    preexisting = set(app.state.approvals)
     for _ in range(500):
         for approval_id, future in list(app.state.approvals.items()):
+            if approval_id in preexisting:
+                continue
             if not future.done():
                 future.set_result(ApprovalDecision(decision=decision))  # type: ignore[arg-type]
                 return approval_id

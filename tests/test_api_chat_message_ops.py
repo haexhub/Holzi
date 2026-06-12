@@ -59,12 +59,14 @@ async def test_api_chat_cancels_agent_task_when_client_disconnects(
         base_url="http://fake-proxy",
     )
 
+    body = b""
     async with client.stream(
         "POST", "/api/chat", headers=AUTH, json={"message": "hi"}
     ) as response:
         assert response.status_code == 200
         # Read just enough to confirm the stream started.
         async for chunk in response.aiter_bytes():
+            body += chunk
             if b"start" in chunk or b"session" in chunk:
                 break
         # Client disconnects — closing the context cancels the generator.
@@ -75,8 +77,14 @@ async def test_api_chat_cancels_agent_task_when_client_disconnects(
     release_upstream.set()
     # Give the loop a tick to actually run the cancellation cleanup path.
     await anyio.sleep(0.05)
-    # Test passes simply by not hanging / not crashing — the real verification
-    # is that no unhandled-task exceptions are reported by pytest-asyncio.
+
+    # Cancellation proof: a cancelled agent task never reaches `[DONE]`, so it
+    # never persists an assistant turn. If disconnect-cancellation regresses,
+    # releasing the upstream above lets the task run to completion and write an
+    # assistant message — which this assertion then catches.
+    conv_id = _parse_sse(body)[0][1]["conversation_id"]
+    rows = await messages.list_by_conversation(app.state.db, conv_id, user_id=1)
+    assert not any(m.role == "assistant" for m in rows)
 
 
 async def test_api_chat_cancel_unknown_run_returns_404(

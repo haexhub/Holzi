@@ -74,15 +74,23 @@ async def api_upload_attachment(
     token = uuid.uuid4().hex
     target_dir = attachments_mod.attachment_dir(conv_id)
     target_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / token).write_bytes(bytes(data))
+    target_path = target_dir / token
+    target_path.write_bytes(bytes(data))
 
-    att = await attachments.create(
-        db,
-        user_id=uid,
-        conversation_id=conv_id,
-        filename=attachments_mod.safe_display_filename(file.filename),
-        content_type=content_type,
-        size=len(data),
-        storage_path=token,
-    )
+    # The blob is on disk before the metadata row exists; if the insert fails
+    # we must remove it, otherwise every partial failure orphans a file with
+    # no row pointing at it.
+    try:
+        att = await attachments.create(
+            db,
+            user_id=uid,
+            conversation_id=conv_id,
+            filename=attachments_mod.safe_display_filename(file.filename),
+            content_type=content_type,
+            size=len(data),
+            storage_path=token,
+        )
+    except Exception:
+        target_path.unlink(missing_ok=True)
+        raise
     return _attachment_to_dict(att)
