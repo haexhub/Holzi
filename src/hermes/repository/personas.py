@@ -3,8 +3,10 @@
 Personas are the *who* of the agent — identity + style. Each row carries
 a name (UNIQUE) and three opaque prompt fragments (`soul`, `identity`,
 `agents`) that the resolver composes at runtime. At most one row has
-`is_default = 1`, enforced by repo-layer logic: inserting or
-updating any row with `is_default = 1` demotes every other row.
+`is_default = true`, enforced by repo-layer logic: inserting or
+updating any row with `is_default = true` demotes every other row for
+that user (the SQLite single-default trigger is not recreated in the
+Postgres schema — the repo enforces the invariant explicitly).
 
 Every successful `create`/`update` also appends a row to
 `persona_history` inside the same transaction so the audit log can't
@@ -119,8 +121,8 @@ async def create(
     history_author: str = "user",
 ) -> Persona:
     """Insert a row. UNIQUE(name) means a duplicate raises IntegrityError —
-    route layer translates to 409. Triggers demote any prior default if
-    `is_default=True`.
+    route layer translates to 409. Demotes any prior default for this user
+    if `is_default=True` (repo-layer single-default invariant).
 
     A `persona_history` row capturing the new state is appended inside
     the same transaction (atomic with the INSERT). `history_author`
@@ -254,7 +256,7 @@ async def update(
         )
         # Read the post-update row on the same connection so the
         # snapshot reflects exactly what the UPDATE produced (including
-        # any trigger-driven demotion of `is_default` on this row).
+        # the repo-layer demotion of any prior default).
         result = await conn.execute(
             select(t_personas).where(
                 t_personas.c.id == persona_id,

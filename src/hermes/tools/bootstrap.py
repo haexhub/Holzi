@@ -2,7 +2,7 @@
 
 These tools are used by the bootstrap-first-chat skill during onboarding.
 `persona_update` writes fragments to the default persona with author='bootstrap'.
-`mark_bootstrap_complete` flips users.bootstrap_completed to 1 (idempotent).
+`mark_bootstrap_complete` flips users.bootstrap_completed to true (idempotent).
 """
 import json
 from typing import Any
