@@ -12,7 +12,7 @@ AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
 @pytest.fixture
-async def client():
+async def client(pg_db):
     async with (
         LifespanManager(app),
         httpx.AsyncClient(
@@ -59,7 +59,7 @@ async def test_upload_text_stores_metadata_and_file(
     assert body["message_id"] is None
 
     # Persisted and on disk under the conversation scratch dir.
-    att = await attachments.get(app.state.db, body["id"])
+    att = await attachments.get(app.state.db, body["id"], user_id=1)
     assert att is not None
     path = attachments_mod.file_path(att)
     assert path.read_bytes() == b"line one\nline two"
@@ -102,7 +102,7 @@ async def test_upload_sanitizes_traversal_filename(
     conv_id = await _new_web_conversation()
     resp = await _upload(client, conv_id, name="../../../etc/passwd", data=b"x")
     assert resp.status_code == 201
-    att = await attachments.get(app.state.db, resp.json()["id"])
+    att = await attachments.get(app.state.db, resp.json()["id"], user_id=1)
     assert att is not None
     # Display name reduced to a basename; on-disk name is an opaque token
     # inside the conversation's own attachments dir — no escape possible.
@@ -225,7 +225,7 @@ async def test_edit_and_regenerate_unlinks_later_attachment_files(
     await send("first")
     second_att_id = await send("second")
 
-    second = await attachments.get(app.state.db, second_att_id)
+    second = await attachments.get(app.state.db, second_att_id, user_id=1)
     assert second is not None
     second_path = attachments_mod.file_path(second)
     assert second_path.exists()
@@ -244,7 +244,7 @@ async def test_edit_and_regenerate_unlinks_later_attachment_files(
         async for _ in r.aiter_bytes():
             pass
 
-    assert await attachments.get(app.state.db, second_att_id) is None
+    assert await attachments.get(app.state.db, second_att_id, user_id=1) is None
     assert not second_path.exists()
 
 

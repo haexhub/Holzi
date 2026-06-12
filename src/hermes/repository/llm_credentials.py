@@ -10,6 +10,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.crypto import EncryptedBlob
+from hermes.db import tx_for_user
 from hermes.repository.models import LlmCredential
 from hermes.schema import llm_credentials as t
 
@@ -39,6 +40,7 @@ def _row_to_credential(row) -> LlmCredential:
 async def create_api_key(
     engine: AsyncEngine,
     *,
+    user_id: int,
     provider: str,
     display_name: str,
     base_url: str | None,
@@ -59,10 +61,11 @@ async def create_api_key(
             api_key_data=ciphertext.data,
             created_at=now,
             updated_at=now,
+            user_id=user_id,
         )
         .returning(*t.c)
     )
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(stmt)
         row = result.first()
     if row is None:
@@ -73,6 +76,7 @@ async def create_api_key(
 async def create_oauth_pending(
     engine: AsyncEngine,
     *,
+    user_id: int,
     display_name: str,
     ts: int | None = None,
 ) -> LlmCredential:
@@ -94,10 +98,11 @@ async def create_oauth_pending(
             oauth_status="pending",
             created_at=now,
             updated_at=now,
+            user_id=user_id,
         )
         .returning(*t.c)
     )
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(stmt)
         row = result.first()
     if row is None:
@@ -108,6 +113,7 @@ async def create_oauth_pending(
 async def update_oauth_authorized(
     engine: AsyncEngine,
     *,
+    user_id: int,
     cred_id: int,
     ciphertext: EncryptedBlob,
     authorized_at: int,
@@ -127,37 +133,45 @@ async def update_oauth_authorized(
         )
         .returning(*t.c)
     )
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(stmt)
         row = result.first()
     return _row_to_credential(row) if row is not None else None
 
 
-async def get(engine: AsyncEngine, cred_id: int) -> LlmCredential | None:
-    async with engine.connect() as conn:
+async def get(
+    engine: AsyncEngine, cred_id: int, *, user_id: int
+) -> LlmCredential | None:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(select(t).where(t.c.id == cred_id))
         row = result.first()
     return _row_to_credential(row) if row is not None else None
 
 
-async def get_active(engine: AsyncEngine) -> LlmCredential | None:
-    async with engine.connect() as conn:
-        result = await conn.execute(select(t).where(t.c.is_active == 1))
+async def get_active(
+    engine: AsyncEngine, *, user_id: int
+) -> LlmCredential | None:
+    async with tx_for_user(engine, user_id=user_id) as conn:
+        result = await conn.execute(select(t).where(t.c.is_active.is_(True)))
         row = result.first()
     return _row_to_credential(row) if row is not None else None
 
 
-async def get_active_model(engine: AsyncEngine) -> str | None:
+async def get_active_model(
+    engine: AsyncEngine, *, user_id: int
+) -> str | None:
     """Return the active credential's `model` (or None when no credential
     is active / the active one inherits from `settings.model`). Used by
     the chat routes to pick the per-request `model` before calling the
     agent loop."""
-    active = await get_active(engine)
+    active = await get_active(engine, user_id=user_id)
     return active.model if active is not None else None
 
 
-async def list_all(engine: AsyncEngine) -> list[LlmCredential]:
-    async with engine.connect() as conn:
+async def list_all(
+    engine: AsyncEngine, *, user_id: int
+) -> list[LlmCredential]:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t).order_by(desc(t.c.created_at), desc(t.c.id))
         )
@@ -165,14 +179,14 @@ async def list_all(engine: AsyncEngine) -> list[LlmCredential]:
     return [_row_to_credential(r) for r in rows]
 
 
-async def delete(engine: AsyncEngine, cred_id: int) -> bool:
-    async with engine.begin() as conn:
+async def delete(engine: AsyncEngine, cred_id: int, *, user_id: int) -> bool:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(t.delete().where(t.c.id == cred_id))
     return (result.rowcount or 0) > 0
 
 
 async def set_model(
-    engine: AsyncEngine, cred_id: int, model: str | None
+    engine: AsyncEngine, cred_id: int, model: str | None, *, user_id: int
 ) -> LlmCredential | None:
     """Update the preferred model on a credential. `None` clears it back
     to the env-var fallback (`settings.model`)."""
@@ -183,32 +197,33 @@ async def set_model(
         .values(model=model, updated_at=now)
         .returning(*t.c)
     )
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(stmt)
         row = result.first()
     return _row_to_credential(row) if row is not None else None
 
 
-async def activate(engine: AsyncEngine, cred_id: int) -> bool:
-    """Set `is_active=1` on the target row, clear it on all others.
+async def activate(engine: AsyncEngine, cred_id: int, *, user_id: int) -> bool:
+    """Set `is_active=1` on the target row, clear it on all others
+    belonging to this user.
 
     Both writes go in the same transaction so the partial unique index
-    on (`is_active=1`) never sees a transient state with two active rows.
-    Returns False if the target row doesn't exist.
+    on (user_id, is_active=1) never sees a transient state with two
+    active rows. Returns False if the target row doesn't exist.
     """
     now = int(time.time())
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         # Deactivate everything else first. WHERE id != X keeps the noisy
-        # UPDATE off the target row.
+        # UPDATE off the target row. RLS already scopes to this user.
         await conn.execute(
             t.update()
             .where(t.c.id != cred_id)
-            .where(t.c.is_active == 1)
-            .values(is_active=0, updated_at=now)
+            .where(t.c.is_active.is_(True))
+            .values(is_active=False, updated_at=now)
         )
         result = await conn.execute(
             t.update()
             .where(t.c.id == cred_id)
-            .values(is_active=1, updated_at=now)
+            .values(is_active=True, updated_at=now)
         )
     return (result.rowcount or 0) > 0

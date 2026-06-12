@@ -2,7 +2,7 @@
 
 Hermes talks to any upstream that speaks the OpenAI
 `/v1/chat/completions` contract. Credentials are stored in the
-`llm_credentials` SQLite table (AES-256-GCM-encrypted at rest) and
+`llm_credentials` Postgres table (AES-256-GCM-encrypted at rest) and
 managed through `/settings/llm` in the Web UI. Exactly one credential
 is active at a time — the agent loop and the bundled
 `haex-claude-proxy` both read it via the same encrypted column.

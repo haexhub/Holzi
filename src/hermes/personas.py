@@ -20,7 +20,6 @@ chosen persona's prompt with the chosen channel's prompt at runtime —
 the four call-sites that used to inline `*_SYSTEM_PROMPT` constants now
 go through this single function.
 """
-import json
 import time
 from dataclasses import dataclass
 from typing import Final
@@ -207,150 +206,11 @@ beabsichtigt — kein silent fallback.
 """
 
 
-async def _migrate_prompt_to_fragments(engine: AsyncEngine) -> None:
-    """One-shot lifespan migration: bring `personas` up to the Plan-36
-    shape (soul/identity/agents) from the pre-Plan-36 single-`prompt`
-    shape.
-
-    Plan-36 changes the `personas` table from a single `prompt` text
-    column to three typed fragments (`soul`, `identity`, `agents`).
-    SQLAlchemy's `metadata.create_all` issues `CREATE TABLE IF NOT
-    EXISTS` and does NOT alter existing tables, so on a legacy DB the
-    three new columns are missing — this helper adds them, copies the
-    old `prompt` into `identity`, writes a baseline `persona_history`
-    row per migrated persona (so the audit trail is complete from
-    day-one), and finally drops the `prompt` column.
-
-    Idempotent: a single `PRAGMA table_info(personas)` check on the
-    `prompt` column drives the whole branch — present means "legacy
-    DB, run migration"; absent means "already on Plan-36 shape, no-op".
-    Safe to delete once every deployed box has booted on Plan-36 code
-    (tracked as a follow-up; see Plan 36 Risk Register).
-
-    The `WHERE identity = ''` guard on the UPDATE prevents clobbering
-    any `identity` content a user may have written between two boot
-    cycles in the theoretical "partial migration → crash → restart"
-    scenario.
-    """
-    async with engine.connect() as conn:
-        cols = (await conn.execute(text("PRAGMA table_info(personas)"))).all()
-        has_prompt = any(row.name == "prompt" for row in cols)
-    if not has_prompt:
-        return
-
-    async with engine.begin() as conn:
-        # ALTER TABLE ADD COLUMN is idempotent only through the PRAGMA
-        # guard above; SQLite has no "ADD COLUMN IF NOT EXISTS".
-        for col in ("soul", "identity", "agents"):
-            await conn.execute(
-                text(
-                    f"ALTER TABLE personas ADD COLUMN {col} "
-                    "TEXT NOT NULL DEFAULT ''"
-                )
-            )
-        await conn.execute(
-            text("UPDATE personas SET identity = prompt WHERE identity = ''")
-        )
-        # Baseline history row per migrated persona so the Verlauf-Tab
-        # shows the migrated-from state. author='migration' distinguishes
-        # this from user-edit ('user') and seed ('system') rows. The
-        # snapshot reflects the POST-migration values (i.e. soul='',
-        # identity=<legacy prompt>, agents='').
-        now = int(time.time())
-        rows = (
-            await conn.execute(
-                text("SELECT id, name, soul, identity, agents FROM personas")
-            )
-        ).all()
-        for row in rows:
-            snapshot = json.dumps(
-                {
-                    "name": row.name,
-                    "soul": row.soul,
-                    "identity": row.identity,
-                    "agents": row.agents,
-                }
-            )
-            await conn.execute(
-                text(
-                    "INSERT INTO persona_history "
-                    "(persona_id, author, snapshot_json, created_at) "
-                    "VALUES (:pid, 'migration', :snap, :ts)"
-                ),
-                {"pid": row.id, "snap": snapshot, "ts": now},
-            )
-        await conn.execute(text("ALTER TABLE personas DROP COLUMN prompt"))
-
-
-async def _drop_persona_skills_table(engine: AsyncEngine) -> None:
-    """One-shot: drop the Plan-33 `persona_skills` table if it still
-    exists. Idempotent.
-    """
-    async with engine.connect() as conn:
-        tables = (
-            await conn.execute(
-                text(
-                    "SELECT name FROM sqlite_master WHERE type='table' "
-                    "AND name='persona_skills'"
-                )
-            )
-        ).all()
-    if not tables:
-        return
-    async with engine.begin() as conn:
-        await conn.execute(text("DROP TABLE persona_skills"))
-
-
-async def _migrate_skills_add_enabled(engine: AsyncEngine) -> None:
-    """One-shot: add `skills.enabled` if missing. Idempotent —
-    PRAGMA-gated. Existing rows default to 1 (enabled).
-    """
-    async with engine.connect() as conn:
-        cols = (
-            await conn.execute(text("PRAGMA table_info(skills)"))
-        ).all()
-        has_enabled = any(row.name == "enabled" for row in cols)
-    if has_enabled:
-        return
-    async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "ALTER TABLE skills ADD COLUMN enabled INTEGER "
-                "NOT NULL DEFAULT 1"
-            )
-        )
-
-
-async def _migrate_personas_add_credential_columns(engine: AsyncEngine) -> None:
-    """One-shot: add llm_credential_id + model to personas if missing. Idempotent."""
-    async with engine.connect() as conn:
-        cols = (await conn.execute(text("PRAGMA table_info(personas)"))).all()
-        has_cred = any(row.name == "llm_credential_id" for row in cols)
-    if has_cred:
-        return
-    async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "ALTER TABLE personas ADD COLUMN llm_credential_id INTEGER "
-                "REFERENCES llm_credentials(id) ON DELETE SET NULL"
-            )
-        )
-        await conn.execute(
-            text("ALTER TABLE personas ADD COLUMN model TEXT")
-        )
-
-
-# Plan 35 §C1: the seeded persona belongs to the admin user (id=1). Backfill
-# only ever runs for the admin — real multi-user persona seeding is a C2
-# concern.
-ADMIN_USER_ID: Final[int] = 1
-
-
-async def ensure_backfill(engine: AsyncEngine) -> None:
-    """Seed the admin's (user_id=1) default persona + every channel row.
+async def ensure_backfill(engine: AsyncEngine, *, user_id: int) -> None:
+    """Seed `user_id`'s default persona + every channel row.
 
     Idempotent — safe to call on every boot. Two guards:
-    - Personas: only inserts the default if the admin has no persona. Once
+    - Personas: only inserts the default if the user has no persona. Once
       the user has any persona, don't reintroduce "Hermes" (they may have
       renamed/deleted it intentionally).
     - Channels: per-key check via `channels_repo.ensure_seeded`.
@@ -358,14 +218,13 @@ async def ensure_backfill(engine: AsyncEngine) -> None:
     The seed write goes through `personas_repo.create` with
     ``history_author="system"`` so the initial `persona_history`
     snapshot is tagged as system-emitted (distinct from `'user'`
-    edits and `'migration'` rows produced by
-    `_migrate_prompt_to_fragments`).
+    edits and `'migration'` rows).
     """
-    existing_personas = await personas_repo.list_all(engine, user_id=ADMIN_USER_ID)
+    existing_personas = await personas_repo.list_all(engine, user_id=user_id)
     if not existing_personas:
         await personas_repo.create(
             engine,
-            user_id=ADMIN_USER_ID,
+            user_id=user_id,
             name=DEFAULT_PERSONA_NAME,
             soul=DEFAULT_PERSONA_SOUL,
             identity=DEFAULT_PERSONA_IDENTITY,
@@ -448,16 +307,18 @@ async def _resolve_default_persona(
 
 
 async def _resolve_credential(
-    engine: AsyncEngine, persona: Persona | None
+    engine: AsyncEngine, persona: Persona | None, *, user_id: int
 ) -> LlmCredential:
     """Persona credential → active credential. Raises 503 when neither exists."""
     from fastapi import HTTPException
 
     credential: LlmCredential | None = None
     if persona is not None and persona.llm_credential_id is not None:
-        credential = await llm_credentials_repo.get(engine, persona.llm_credential_id)
+        credential = await llm_credentials_repo.get(
+            engine, persona.llm_credential_id, user_id=user_id
+        )
     if credential is None:
-        credential = await llm_credentials_repo.get_active(engine)
+        credential = await llm_credentials_repo.get_active(engine, user_id=user_id)
     if credential is None:
         raise HTTPException(
             status_code=503,
@@ -572,7 +433,7 @@ async def get_effective_system_prompt(
         parts.append(index)
     parts.append(channel_prompt)
 
-    bootstrap_done = await users_mod.is_bootstrap_completed(engine)
+    bootstrap_done = await users_mod.is_bootstrap_completed(engine, user_id)
     bootstrap_loadable = any(
         s.slug == "bootstrap-first-chat" for s in enabled_skills
     )
@@ -621,7 +482,7 @@ async def resolve_persona_context(
     system_prompt = await get_effective_system_prompt(
         channel, engine, user_id=user_id, persona_override=persona
     )
-    credential = await _resolve_credential(engine, persona)
+    credential = await _resolve_credential(engine, persona, user_id=user_id)
 
     # Model resolution (override wins)
     model: str = model_override or (
@@ -652,7 +513,7 @@ async def resolve_chat_context_meta(
     from hermes.config import settings
 
     persona = await _resolve_default_persona(channel, engine, user_id=user_id)
-    credential = await _resolve_credential(engine, persona)
+    credential = await _resolve_credential(engine, persona, user_id=user_id)
 
     model: str = (
         (persona.model if persona is not None else None)
@@ -668,21 +529,23 @@ async def resolve_chat_context_meta(
 
 
 async def ensure_bootstrap_skill_seeded(engine: AsyncEngine) -> None:
-    """Idempotent: INSERT OR IGNORE the bootstrap-first-chat skill row.
+    """Idempotent: insert the bootstrap-first-chat skill row.
 
-    Called once per boot (after ``ensure_users_seeded``). If the user
-    has edited the body via the Skills-Page, ``INSERT OR IGNORE`` matched
-    on the UNIQUE slug leaves the row untouched — no overwrite.
+    Called once per boot (after ``ensure_platform_admin_seeded``). If the
+    user has edited the body via the Skills-Page, ``ON CONFLICT (slug) DO
+    NOTHING`` leaves the row untouched — no overwrite. `skills` is a
+    global table (no RLS), so a direct `engine.begin()` is fine.
     """
     now = int(time.time())
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT OR IGNORE INTO skills"
+                "INSERT INTO skills"
                 "(slug, name, description, when_to_use, body_markdown,"
                 " enabled, created_at, updated_at) "
                 "VALUES (:slug, :name, :description, :when_to_use,"
-                " :body_markdown, 1, :now, :now)"
+                " :body_markdown, true, :now, :now) "
+                "ON CONFLICT (slug) DO NOTHING"
             ),
             {
                 "slug": "bootstrap-first-chat",

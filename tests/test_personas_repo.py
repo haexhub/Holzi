@@ -43,7 +43,7 @@ async def test_create_basic_persona(conn: AsyncEngine) -> None:
 
     # create() must have written exactly one history row capturing the
     # new persona's three fragments (and NOT is_default).
-    history = await history_repo.list_for_persona(conn, p.id)
+    history = await history_repo.list_for_persona(conn, p.id, user_id=1)
     assert len(history) == 1
     body = json.loads(history[0].snapshot_json)
     assert body == {
@@ -75,7 +75,7 @@ async def test_create_with_history_author_overrides_default(
         is_default=True,
         history_author="system",
     )
-    history = await history_repo.list_for_persona(conn, p.id)
+    history = await history_repo.list_for_persona(conn, p.id, user_id=1)
     assert len(history) == 1
     assert history[0].author == "system"
 
@@ -183,7 +183,7 @@ async def test_update_partial_fields(conn: AsyncEngine) -> None:
     assert updated.updated_at >= p.updated_at
 
     # create() + one update() ⇒ two history rows total.
-    history = await history_repo.list_for_persona(conn, p.id)
+    history = await history_repo.list_for_persona(conn, p.id, user_id=1)
     assert len(history) == 2
     # Newest-first ordering: row[0] is the post-update snapshot.
     body = json.loads(history[0].snapshot_json)
@@ -226,8 +226,10 @@ async def test_delete_non_default_returns_true(conn: AsyncEngine) -> None:
     # The default persona survives.
     assert await repo.get(conn, default.id, user_id=1) is not None
 
-    # FK CASCADE wipes history rows for the deleted persona.
-    assert await history_repo.list_for_persona(conn, other.id) == []
+    # FK CASCADE wipes history rows for the deleted persona. Query as the
+    # owner (user 1) — if we asked as user 2, RLS would mask the rows and
+    # the assertion would pass even when cascade was broken.
+    assert await history_repo.list_for_persona(conn, other.id, user_id=1) == []
 
 
 @pytest.mark.asyncio
@@ -262,16 +264,12 @@ async def _seed_two_users(conn: AsyncEngine) -> None:
     from sqlalchemy import text
 
     async with conn.begin() as db:
+        # User 1 is already seeded by the `conn` fixture (platform_admin);
+        # only user 2 needs adding so the personas.user_id FK holds.
         await db.execute(
             text(
-                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, "
-                "created_at) VALUES (1,'admin',0,0)"
-            )
-        )
-        await db.execute(
-            text(
-                "INSERT OR IGNORE INTO users(id, role, bootstrap_completed, "
-                "created_at) VALUES (2,'member',0,0)"
+                "INSERT INTO users(id, role, bootstrap_completed, "
+                "created_at) VALUES (2,'member',false,0) ON CONFLICT (id) DO NOTHING"
             )
         )
 

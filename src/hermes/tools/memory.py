@@ -1,10 +1,27 @@
 import json
+import re
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.agent import Tool
 from hermes.repository import conversations, messages, notes
+
+# `messages.fts_search` / `notes.find` feed their `query` straight into
+# Postgres `to_tsquery('simple', ...)`, which rejects raw free-form input
+# (spaces, punctuation) and only does exact-token matching. The tools take
+# free-form LLM input, so tokenise into `\w+` runs and OR them together as
+# prefix terms (`tok:*`) — same recall semantics as `conversations.search`.
+_FTS_TOKEN_RE = re.compile(r"\w+", flags=re.UNICODE)
+
+
+def _to_prefix_tsquery(query: str) -> str | None:
+    """Build an OR-of-prefixes tsquery from free-form input, or None when
+    the input has no word characters (caller treats that as "no matches")."""
+    tokens = _FTS_TOKEN_RE.findall(query)
+    if not tokens:
+        return None
+    return " | ".join(f"{t}:*" for t in tokens)
 
 
 def build_memory_tools(db: AsyncEngine) -> list[Tool]:
@@ -24,10 +41,14 @@ def _recall_memory(db: AsyncEngine) -> Tool:
         query = str(args.get("query", ""))
         limit = int(args.get("limit", 10))
 
-        msg_hits = await messages.fts_search(db, query=query, limit=limit)
+        tsquery = _to_prefix_tsquery(query)
+        if tsquery is None:
+            return json.dumps({"messages": [], "notes": []})
+
         # TODO(Wave C): thread the agent's user_id into the tool catalog;
         # scoped to the admin (id=1) until the catalog carries user context.
-        note_hits = await notes.find(db, user_id=1, query=query, limit=limit)
+        msg_hits = await messages.fts_search(db, user_id=1, query=tsquery, limit=limit)
+        note_hits = await notes.find(db, user_id=1, query=tsquery, limit=limit)
 
         return json.dumps(
             {
@@ -135,7 +156,7 @@ def _get_conversation(db: AsyncEngine) -> Tool:
         if convo is None:
             return json.dumps({"error": f"conversation {conv_id} not found"})
 
-        msgs = await messages.list_by_conversation(db, conv_id, limit=limit)
+        msgs = await messages.list_by_conversation(db, conv_id, user_id=1, limit=limit)
         return json.dumps(
             {
                 "conversation": {
@@ -263,9 +284,13 @@ def _find_notes(db: AsyncEngine) -> Tool:
         else:
             return json.dumps({"error": "tags must be a string or array of strings"})
 
+        tsquery = _to_prefix_tsquery(query)
+        if tsquery is None:
+            return json.dumps([])
+
         # TODO(Wave C): thread the agent's user_id into the tool catalog;
         # scoped to the admin (id=1) until the catalog carries user context.
-        hits = await notes.find(db, user_id=1, query=query, limit=limit)
+        hits = await notes.find(db, user_id=1, query=tsquery, limit=limit)
 
         # Whitespace-only tag entries shouldn't act as "filter out untagged
         # notes" — treat that case as no-filter.

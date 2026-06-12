@@ -123,7 +123,7 @@ class _FakeClaudeSession:
 
 
 @pytest.fixture
-async def client():
+async def client(pg_db):
     async with (
         LifespanManager(app),
         httpx.AsyncClient(
@@ -166,7 +166,7 @@ async def test_oauth_start_returns_id_and_url_and_persists_pending(
     body = r.json()
     assert body["url"] == FAKE_URL
     assert isinstance(body["id"], int) and body["id"] > 0
-    row = await repo.get(app.state.db, body["id"])
+    row = await repo.get(app.state.db, body["id"], user_id=1)
     assert row is not None
     assert row.mode == "oauth_claude"
     assert row.oauth_status == "pending"
@@ -198,7 +198,7 @@ async def test_oauth_start_replaces_existing_pending_row(
     # The old pending row was swept; only the new pending row should be
     # in the DB. SQLite reuses freed ROWIDs by default, so the two ids
     # may legitimately coincide — but there can only be one row.
-    rows = await repo.list_all(app.state.db)
+    rows = await repo.list_all(app.state.db, user_id=1)
     oauth_rows = [r for r in rows if r.mode == "oauth_claude"]
     assert len(oauth_rows) == 1
     assert oauth_rows[0].id == second["id"]
@@ -224,7 +224,7 @@ async def test_oauth_start_rolls_back_row_on_spawn_failure(
     assert body["detail"]["code"] == "LLM_OAUTH_START_FAILED"
     assert "spawn failed" in body["detail"]["params"]["message"]
     # The placeholder row should have been deleted.
-    rows = await repo.list_all(app.state.db)
+    rows = await repo.list_all(app.state.db, user_id=1)
     assert [r for r in rows if r.mode == "oauth_claude"] == []
 
 
@@ -261,7 +261,7 @@ async def test_oauth_code_persists_authorized_credential(
     assert body["oauth_authorized_at"] is not None
 
     # Ciphertext columns must be set; round-trip via the encryptor.
-    row = await repo.get(app.state.db, flow_id)
+    row = await repo.get(app.state.db, flow_id, user_id=1)
     assert row is not None
     assert row.oauth_status == "authorized"
     assert row.oauth_iv and row.oauth_tag and row.oauth_data
@@ -380,7 +380,7 @@ async def test_oauth_cancel_kills_subprocess_and_deletes_row(
     assert session.proc is not None and session.proc.killed
 
     # Row gone; temp HOME gone.
-    assert await repo.get(app.state.db, flow_id) is None
+    assert await repo.get(app.state.db, flow_id, user_id=1) is None
     assert not (Path("/tmp") / "hermes-oauth" / str(flow_id)).exists()
 
 

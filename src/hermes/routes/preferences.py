@@ -3,8 +3,8 @@
 Two thin CRUD surfaces over the `personas` / `channel_prompts` tables.
 The per-persona skill-activation layer (Plan 33) was dropped in Plan 37
 in favour of the global catalog-index + `skill_load` tool pattern.
-The single-default invariant on personas is held by triggers in
-`schema.sql`; this layer is responsible for the API-level guardrails
+The single-default invariant on personas is held in the repo layer;
+this layer is responsible for the API-level guardrails
 (duplicate name → 409, blank/oversized prompt → 422, deleting the
 default persona → 422, unknown channel → 404).
 
@@ -303,7 +303,9 @@ async def update_persona(
 
     if "llm_credential_id" in body.model_fields_set:
         if body.llm_credential_id is not None:
-            _fetched_cred = await llm_credentials_repo.get(db, body.llm_credential_id)
+            _fetched_cred = await llm_credentials_repo.get(
+                db, body.llm_credential_id, user_id=uid
+            )
             if _fetched_cred is None:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -339,7 +341,9 @@ async def update_persona(
             if _fetched_cred is not None and _fetched_cred.id == effective_cred_id:
                 cred_for_model = _fetched_cred
             else:
-                cred_for_model = await llm_credentials_repo.get(db, effective_cred_id)
+                cred_for_model = await llm_credentials_repo.get(
+                    db, effective_cred_id, user_id=uid
+                )
                 if cred_for_model is None:
                     raise HTTPException(
                         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -440,7 +444,8 @@ async def list_persona_models(persona_id: int, request: Request) -> dict[str, An
     which credential a persona uses.
     """
     db = _db(request)
-    persona = await personas_repo.get(db, persona_id, user_id=current_user_id(request))
+    uid = current_user_id(request)
+    persona = await personas_repo.get(db, persona_id, user_id=uid)
     if persona is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -452,9 +457,9 @@ async def list_persona_models(persona_id: int, request: Request) -> dict[str, An
 
     cred = None
     if persona.llm_credential_id is not None:
-        cred = await llm_credentials_repo.get(db, persona.llm_credential_id)
+        cred = await llm_credentials_repo.get(db, persona.llm_credential_id, user_id=uid)
     if cred is None:
-        cred = await llm_credentials_repo.get_active(db)
+        cred = await llm_credentials_repo.get_active(db, user_id=uid)
     if cred is None:
         raise HTTPException(
             status_code=503,
@@ -495,7 +500,9 @@ async def list_persona_history(
                 "params": {"id": persona_id},
             },
         )
-    rows = await persona_history_repo.list_for_persona(db, persona_id)
+    rows = await persona_history_repo.list_for_persona(
+        db, persona_id, user_id=current_user_id(request)
+    )
     return {"history": [_history_to_dict(r) for r in rows]}
 
 
@@ -517,7 +524,7 @@ async def restore_persona_history(
                 "params": {"id": persona_id},
             },
         )
-    snapshot = await persona_history_repo.get(db, snapshot_id)
+    snapshot = await persona_history_repo.get(db, snapshot_id, user_id=uid)
     if snapshot is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

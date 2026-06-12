@@ -105,6 +105,7 @@ async def run_agent(
     *,
     upstream: httpx.AsyncClient,
     db: AsyncEngine,
+    user_id: int,
     conversation_id: int,
     system_prompt: str,
     model: str,
@@ -141,12 +142,12 @@ async def run_agent(
     cancellation remain in history, since the conversation truly contains
     those side effects.
     """
-    history = await messages.list_by_conversation(db, conversation_id)
+    history = await messages.list_by_conversation(db, conversation_id, user_id=user_id)
     # Attachments are linked to user messages at send time (Plan 11). Group
     # them by message id so each user turn inlines its own files into the
     # context without persisting that bulk into the stored message content.
     atts_by_message: dict[int, list[Attachment]] = {}
-    for att in await attachments.list_by_conversation(db, conversation_id):
+    for att in await attachments.list_by_conversation(db, conversation_id, user_id=user_id):
         if att.message_id is not None:
             atts_by_message.setdefault(att.message_id, []).append(att)
     request_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -193,6 +194,7 @@ async def run_agent(
             final_meta = {"reasoning": reasoning_text} if reasoning_text else None
             await messages.append(
                 db,
+                user_id=user_id,
                 conversation_id=conversation_id,
                 role="assistant",
                 content=assistant_text,
@@ -222,6 +224,7 @@ async def run_agent(
             assistant_meta["reasoning"] = reasoning_text
         await messages.append(
             db,
+            user_id=user_id,
             conversation_id=conversation_id,
             role="assistant",
             content=assistant_text,
@@ -283,6 +286,7 @@ async def run_agent(
             )
             await messages.append(
                 db,
+                user_id=user_id,
                 conversation_id=conversation_id,
                 role="tool",
                 content=result,

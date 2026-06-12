@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.auth import current_user_id
 from hermes.config import settings
 from hermes.errors import ErrorCode
 from hermes.logging import logger
@@ -85,8 +86,8 @@ async def _check_database(db: AsyncEngine | None) -> DiagnosticsCheck:
     )
 
 
-async def _check_llm(db: AsyncEngine) -> DiagnosticsCheck:
-    active = await llm_repo.get_active(db)
+async def _check_llm(db: AsyncEngine, user_id: int) -> DiagnosticsCheck:
+    active = await llm_repo.get_active(db, user_id=user_id)
     if active is None:
         return DiagnosticsCheck(
             id="llm",
@@ -203,7 +204,7 @@ async def api_diagnostics(request: Request) -> DiagnosticsResponse:
         await _check_database(db),
     ]
     if db is not None:
-        checks.append(await _check_llm(db))
+        checks.append(await _check_llm(db, current_user_id(request)))
     else:
         checks.append(
             DiagnosticsCheck(

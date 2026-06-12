@@ -16,6 +16,7 @@ from croniter import croniter
 from sqlalchemy import asc, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.db import tx_as_owner, tx_for_user
 from hermes.repository.models import AgentTask
 from hermes.schema import agent_tasks as t_agent_tasks
 
@@ -38,12 +39,16 @@ def _row_to_task(row) -> AgentTask:
     )
 
 
-async def _get_unscoped(engine: AsyncEngine, task_id: int) -> AgentTask | None:
+async def _get_unscoped(owner_engine: AsyncEngine, task_id: int) -> AgentTask | None:
     """Fetch a task by id WITHOUT a user filter. Internal helper for the
     scheduler-facing `mark_run`, which legitimately operates across all users
     (it's a background context, not an API caller). API code must use the
-    user-scoped `get` instead."""
-    async with engine.connect() as conn:
+    user-scoped `get` instead.
+
+    Uses `tx_as_owner` to bypass RLS — the scheduler legitimately needs
+    visibility across every user's rows.
+    """
+    async with tx_as_owner(owner_engine) as conn:
         result = await conn.execute(
             select(t_agent_tasks).where(t_agent_tasks.c.id == task_id)
         )
@@ -102,7 +107,7 @@ async def create(
     else:
         assert schedule is not None
         effective_due_at = next_fire_after(schedule, after=now, timezone=timezone)
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             t_agent_tasks.insert()
             .values(
@@ -112,7 +117,7 @@ async def create(
                 due_at=effective_due_at,
                 schedule=schedule,
                 timezone=timezone,
-                enabled=1 if enabled else 0,
+                enabled=enabled,
                 created_at=now,
                 updated_at=now,
             )
@@ -140,7 +145,7 @@ async def create(
 
 async def get(engine: AsyncEngine, task_id: int, *, user_id: int) -> AgentTask | None:
     """Fetch a task the caller owns. Another user's task returns None."""
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_agent_tasks).where(
                 t_agent_tasks.c.id == task_id,
@@ -165,24 +170,27 @@ async def list_all(
         )
         .limit(limit)
     )
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(stmt)
         rows = result.all()
     return [_row_to_task(r) for r in rows]
 
 
-async def list_due(engine: AsyncEngine, *, now: int) -> list[AgentTask]:
+async def list_due(owner_engine: AsyncEngine, *, now: int) -> list[AgentTask]:
     """Scheduler hot path: enabled rows whose next firing has arrived.
 
     Intentionally GLOBAL (not user-scoped): the single in-process scheduler
     serves every user, so it must see due tasks across ALL users. Each
     returned task carries its own `user_id` so the scheduler can fire the
     run under the correct owner.
+
+    Uses `tx_as_owner` to bypass RLS — sweep semantics require visibility
+    across every user.
     """
-    async with engine.connect() as conn:
+    async with tx_as_owner(owner_engine) as conn:
         result = await conn.execute(
             select(t_agent_tasks)
-            .where(t_agent_tasks.c.enabled == 1)
+            .where(t_agent_tasks.c.enabled.is_(True))
             .where(t_agent_tasks.c.due_at.is_not(None))
             .where(t_agent_tasks.c.due_at <= now)
             .order_by(asc(t_agent_tasks.c.due_at))
@@ -277,7 +285,7 @@ async def update(
 
     new_enabled = existing.enabled if enabled is None else enabled
 
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         await conn.execute(
             t_agent_tasks.update()
             .where(
@@ -290,7 +298,7 @@ async def update(
                 due_at=new_due_at,
                 schedule=new_schedule,
                 timezone=new_timezone,
-                enabled=1 if new_enabled else 0,
+                enabled=new_enabled,
                 updated_at=now,
             )
         )
@@ -300,7 +308,7 @@ async def update(
 async def delete(engine: AsyncEngine, task_id: int, *, user_id: int) -> bool:
     """Remove a task the caller owns. A task belonging to another user is a
     no-op (returns False) — the `user_id` filter is part of the DELETE WHERE."""
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             t_agent_tasks.delete().where(
                 t_agent_tasks.c.id == task_id,
@@ -311,7 +319,7 @@ async def delete(engine: AsyncEngine, task_id: int, *, user_id: int) -> bool:
 
 
 async def mark_run(
-    engine: AsyncEngine,
+    owner_engine: AsyncEngine,
     task_id: int,
     *,
     run_id: str,
@@ -331,9 +339,10 @@ async def mark_run(
 
     Keyed by task id only (no user filter): the scheduler is a global
     background context that fires tasks across every user, so it must be
-    able to record a firing regardless of owner.
+    able to record a firing regardless of owner. Connects via
+    `tx_as_owner` to bypass RLS for the cross-user write.
     """
-    existing = await _get_unscoped(engine, task_id)
+    existing = await _get_unscoped(owner_engine, task_id)
     if existing is None:
         return None
 
@@ -352,10 +361,10 @@ async def mark_run(
         else:
             values["enabled"] = 0
 
-    async with engine.begin() as conn:
+    async with tx_as_owner(owner_engine) as conn:
         await conn.execute(
             t_agent_tasks.update()
             .where(t_agent_tasks.c.id == task_id)
             .values(**values)
         )
-    return await _get_unscoped(engine, task_id)
+    return await _get_unscoped(owner_engine, task_id)

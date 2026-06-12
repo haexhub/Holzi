@@ -3,8 +3,10 @@
 Personas are the *who* of the agent — identity + style. Each row carries
 a name (UNIQUE) and three opaque prompt fragments (`soul`, `identity`,
 `agents`) that the resolver composes at runtime. At most one row has
-`is_default = 1`, enforced by triggers in `schema.sql`: inserting or
-updating any row with `is_default = 1` demotes every other row.
+`is_default = true`, enforced by repo-layer logic: inserting or
+updating any row with `is_default = true` demotes every other row for
+that user (the SQLite single-default trigger is not recreated in the
+Postgres schema — the repo enforces the invariant explicitly).
 
 Every successful `create`/`update` also appends a row to
 `persona_history` inside the same transaction so the audit log can't
@@ -19,6 +21,7 @@ import time
 from sqlalchemy import asc, desc, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.db import tx_for_user
 from hermes.repository import persona_history as history_repo
 from hermes.repository.models import Persona
 from hermes.schema import personas as t_personas
@@ -53,7 +56,7 @@ async def list_all(engine: AsyncEngine, *, user_id: int) -> list[Persona]:
             asc(t_personas.c.name),
         )
     )
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(stmt)
         rows = result.all()
     return [_row_to_persona(r) for r in rows]
@@ -63,7 +66,7 @@ async def get(
     engine: AsyncEngine, persona_id: int, *, user_id: int
 ) -> Persona | None:
     """Fetch a persona the caller owns. Another user's persona returns None."""
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_personas).where(
                 t_personas.c.id == persona_id,
@@ -79,7 +82,7 @@ async def get_by_name(
 ) -> Persona | None:
     """Fetch the caller's persona by name. Scoped — a name owned by another
     user returns None (names are unique per user)."""
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_personas).where(
                 t_personas.c.name == name,
@@ -92,10 +95,10 @@ async def get_by_name(
 
 async def get_default(engine: AsyncEngine, *, user_id: int) -> Persona | None:
     """Return THIS user's default persona (per-user single-default invariant)."""
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_personas).where(
-                t_personas.c.is_default == 1,
+                t_personas.c.is_default.is_(True),
                 t_personas.c.user_id == user_id,
             )
         )
@@ -118,8 +121,8 @@ async def create(
     history_author: str = "user",
 ) -> Persona:
     """Insert a row. UNIQUE(name) means a duplicate raises IntegrityError —
-    route layer translates to 409. Triggers demote any prior default if
-    `is_default=True`.
+    route layer translates to 409. Demotes any prior default for this user
+    if `is_default=True` (repo-layer single-default invariant).
 
     A `persona_history` row capturing the new state is appended inside
     the same transaction (atomic with the INSERT). `history_author`
@@ -128,7 +131,18 @@ async def create(
     edits in the audit trail.
     """
     now = ts if ts is not None else int(time.time())
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
+        if is_default:
+            # Single-default invariant (per user): demote any current default
+            # before inserting the new one.
+            await conn.execute(
+                t_personas.update()
+                .where(
+                    t_personas.c.user_id == user_id,
+                    t_personas.c.is_default.is_(True),
+                )
+                .values({t_personas.c.is_default: False})
+            )
         result = await conn.execute(
             t_personas.insert()
             .values(
@@ -185,7 +199,7 @@ async def update(
     history_author: str = "user",
 ) -> Persona | None:
     """Patch a row. None means "leave this field alone". Demotion of
-    other defaults happens via the schema.sql trigger (scoped per user).
+    other defaults happens here in the repo layer (scoped per user).
 
     Scoped to the owner: another user's persona returns None (no-op).
 
@@ -219,7 +233,19 @@ async def update(
         updates[t_personas.c.llm_credential_id] = llm_credential_id
     if model is not _UNSET:
         updates[t_personas.c.model] = model
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
+        if new_is_default:
+            # Single-default invariant (per user): demote every OTHER default
+            # before promoting this row.
+            await conn.execute(
+                t_personas.update()
+                .where(
+                    t_personas.c.user_id == user_id,
+                    t_personas.c.id != persona_id,
+                    t_personas.c.is_default.is_(True),
+                )
+                .values({t_personas.c.is_default: False})
+            )
         await conn.execute(
             t_personas.update()
             .where(
@@ -230,7 +256,7 @@ async def update(
         )
         # Read the post-update row on the same connection so the
         # snapshot reflects exactly what the UPDATE produced (including
-        # any trigger-driven demotion of `is_default` on this row).
+        # the repo-layer demotion of any prior default).
         result = await conn.execute(
             select(t_personas).where(
                 t_personas.c.id == persona_id,
@@ -262,11 +288,11 @@ async def delete(engine: AsyncEngine, persona_id: int, *, user_id: int) -> bool:
     # promote the row to default between read and delete. The single
     # DELETE … WHERE is_default = 0 is race-free; rowcount=0 means
     # either the row didn't exist or it was the default.
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             t_personas.delete().where(
                 (t_personas.c.id == persona_id)
-                & (t_personas.c.is_default == 0)
+                & (t_personas.c.is_default.is_(False))
                 & (t_personas.c.user_id == user_id)
             )
         )

@@ -214,7 +214,7 @@ async def list_all(engine: AsyncEngine) -> list[McpServer]:
 async def list_enabled(engine: AsyncEngine) -> list[McpServer]:
     async with engine.connect() as conn:
         result = await conn.execute(
-            select(t).where(t.c.enabled == 1).order_by(asc(t.c.name))
+            select(t).where(t.c.enabled.is_(True)).order_by(asc(t.c.name))
         )
         rows = result.all()
     return [_row_to_server(r) for r in rows]

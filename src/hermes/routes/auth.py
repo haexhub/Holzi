@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.auth import BEARER_PREFIX, current_role, current_user_id
 from hermes.config import settings
+from hermes.db import tx_for_user
 from hermes.identity import hash_token
 from hermes.schema import sessions, users
 
@@ -53,9 +54,13 @@ async def logout(request: Request) -> dict[str, Any]:
     # The env bootstrap token is infra (re-seeded at startup), not API-revocable;
     # deleting its session would brick the deployment until restart. Real C2
     # (magic-link) sessions are revocable normally.
-    if token and hash_token(token) == hash_token(settings.auth_token):
+    if token and hash_token(token) == hash_token(settings.platform_admin_token):
         return {"ok": True}
-    async with _db(request).begin() as conn:
+    # `sessions` is FORCE RLS; a plain `.begin()` runs with app.user_id unset
+    # (GUC default '0') so the DELETE would match zero rows and the session
+    # would silently survive. Scope it to the resolved user via tx_for_user
+    # (the auth middleware set the ContextVar).
+    async with tx_for_user(_db(request)) as conn:
         await conn.execute(
             sessions.delete().where(sessions.c.token_hash == hash_token(token))
         )

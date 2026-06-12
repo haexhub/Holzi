@@ -25,8 +25,10 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.auth import current_user_id
 from hermes.config import settings
 from hermes.crypto import Encryptor
+from hermes.db import tx_for_user
 from hermes.errors import ErrorCode
 from hermes.logging import logger
 from hermes.oauth import (
@@ -95,7 +97,7 @@ def _to_response(cred: LlmCredential) -> dict[str, Any]:
 @router.get("/credentials", response_model=list[LlmCredentialResponse])
 async def list_credentials(request: Request) -> list[dict[str, Any]]:
     db: AsyncEngine = request.app.state.db
-    rows = await repo.list_all(db)
+    rows = await repo.list_all(db, user_id=current_user_id(request))
     return [_to_response(r) for r in rows]
 
 
@@ -112,6 +114,7 @@ async def create_credential(
     blob = encryptor.encrypt(body.api_key)
     cred = await repo.create_api_key(
         db,
+        user_id=current_user_id(request),
         provider=body.provider,
         display_name=body.display_name,
         base_url=body.base_url,
@@ -125,10 +128,13 @@ async def create_credential(
 )
 async def delete_credential(request: Request, cred_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
+    uid = current_user_id(request)
     # Null out persona.model and delete the credential in one transaction.
     # The FK cascade handles llm_credential_id=NULL; model has no cascade rule
     # so we clear it explicitly before the DELETE while we can still target by id.
-    async with db.begin() as conn:
+    # `tx_for_user` sets app.user_id so these raw writes pass RLS (both tables
+    # are FORCE-RLS personal tables).
+    async with tx_for_user(db, user_id=uid) as conn:
         await conn.execute(
             sql_text(
                 "UPDATE personas SET model = NULL WHERE llm_credential_id = :cid"
@@ -179,7 +185,9 @@ async def update_credential_model(
     request: Request, cred_id: int, body: ModelUpdateRequest
 ) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
-    updated = await repo.set_model(db, cred_id, body.model)
+    updated = await repo.set_model(
+        db, cred_id, body.model, user_id=current_user_id(request)
+    )
     if updated is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.LLM_CREDENTIAL_NOT_FOUND.value
@@ -204,7 +212,7 @@ async def list_credential_models(
     and the user can try a different credential or refresh.
     """
     db: AsyncEngine = request.app.state.db
-    cred = await repo.get(db, cred_id)
+    cred = await repo.get(db, cred_id, user_id=current_user_id(request))
     if cred is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.LLM_CREDENTIAL_NOT_FOUND.value
@@ -236,7 +244,7 @@ def _choice_to_response(m: ModelChoice) -> dict[str, str]:
 )
 async def activate_credential(request: Request, cred_id: int) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
-    cred = await repo.get(db, cred_id)
+    cred = await repo.get(db, cred_id, user_id=current_user_id(request))
     if cred is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.LLM_CREDENTIAL_NOT_FOUND.value
@@ -253,11 +261,12 @@ async def activate_credential(request: Request, cred_id: int) -> dict[str, Any]:
                 "params": {"state": cred.oauth_status or "pending"},
             },
         )
-    if not await repo.activate(db, cred_id):
+    uid = current_user_id(request)
+    if not await repo.activate(db, cred_id, user_id=uid):
         raise HTTPException(
             status_code=404, detail=ErrorCode.LLM_CREDENTIAL_NOT_FOUND.value
         )
-    cred = await repo.get(db, cred_id)
+    cred = await repo.get(db, cred_id, user_id=uid)
     if cred is None:
         # Race with a concurrent delete — vanishingly unlikely on a
         # single-user instance, but explicit > KeyError.
@@ -274,6 +283,7 @@ async def _refresh_upstream(request: Request) -> None:
     await rebuild_upstream_from_db(
         request.app,
         db=request.app.state.db,
+        user_id=request.state.user_id,
         encryptor=request.app.state.encryptor,
         fallback_llm_url=settings.llm_url,
         fallback_llm_api_key=settings.llm_api_key,
@@ -310,19 +320,20 @@ async def oauth_start(request: Request) -> dict[str, Any]:
     """
     db: AsyncEngine = request.app.state.db
     driver: ClaudeOAuthDriver = request.app.state.oauth_driver
+    uid = current_user_id(request)
 
     # Tear down any pre-existing oauth_claude row (cancel in-memory flow
     # + wipe tmp HOME + delete row). Pending leftovers, expired drift,
     # and authorised-but-re-auth-requested rows all get the same
     # treatment — single Anthropic identity per Hermes instance.
-    rows = await repo.list_all(db)
+    rows = await repo.list_all(db, user_id=uid)
     swept = False
     for row in rows:
         if row.mode == "oauth_claude":
             with contextlib.suppress(OAuthDriverError):
                 await driver.cancel(row.id)
             remove_oauth_temp_home(row.id)
-            await repo.delete(db, row.id)
+            await repo.delete(db, row.id, user_id=uid)
             swept = True
     if swept:
         # If the swept row was the active one, the agent loop would
@@ -330,14 +341,16 @@ async def oauth_start(request: Request) -> dict[str, Any]:
         # rebuild now so subsequent requests fall back correctly.
         await _refresh_upstream(request)
 
-    cred = await repo.create_oauth_pending(db, display_name="Claude (OAuth)")
+    cred = await repo.create_oauth_pending(
+        db, user_id=uid, display_name="Claude (OAuth)"
+    )
     home = oauth_temp_home(cred.id)
     try:
         url = await driver.start_login(flow_id=cred.id, home=home)
     except Exception as exc:
         logger.warning("oauth_start_failed", cred_id=cred.id, error=str(exc))
         remove_oauth_temp_home(cred.id)
-        await repo.delete(db, cred.id)
+        await repo.delete(db, cred.id, user_id=uid)
         raise HTTPException(
             status_code=500,
             detail={
@@ -360,8 +373,9 @@ async def oauth_submit_code(
     db: AsyncEngine = request.app.state.db
     driver: ClaudeOAuthDriver = request.app.state.oauth_driver
     encryptor: Encryptor = request.app.state.encryptor
+    uid = current_user_id(request)
 
-    row = await repo.get(db, cred_id)
+    row = await repo.get(db, cred_id, user_id=uid)
     if row is None or row.mode != "oauth_claude":
         raise HTTPException(
             status_code=404, detail=ErrorCode.LLM_OAUTH_FLOW_NOT_FOUND.value
@@ -401,6 +415,7 @@ async def oauth_submit_code(
     blob = encryptor.encrypt(creds.raw)
     updated = await repo.update_oauth_authorized(
         db,
+        user_id=uid,
         cred_id=cred_id,
         ciphertext=blob,
         authorized_at=int(time.time()),
@@ -419,7 +434,7 @@ async def oauth_submit_code(
 )
 async def oauth_status(request: Request, cred_id: int) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
-    row = await repo.get(db, cred_id)
+    row = await repo.get(db, cred_id, user_id=current_user_id(request))
     if row is None or row.mode != "oauth_claude":
         raise HTTPException(
             status_code=404, detail=ErrorCode.LLM_OAUTH_FLOW_NOT_FOUND.value
@@ -434,8 +449,9 @@ async def oauth_status(request: Request, cred_id: int) -> dict[str, Any]:
 async def oauth_cancel(request: Request, cred_id: int) -> Response:
     db: AsyncEngine = request.app.state.db
     driver: ClaudeOAuthDriver = request.app.state.oauth_driver
+    uid = current_user_id(request)
 
-    row = await repo.get(db, cred_id)
+    row = await repo.get(db, cred_id, user_id=uid)
     if row is None or row.mode != "oauth_claude":
         raise HTTPException(
             status_code=404, detail=ErrorCode.LLM_OAUTH_FLOW_NOT_FOUND.value
@@ -443,6 +459,6 @@ async def oauth_cancel(request: Request, cred_id: int) -> Response:
     with contextlib.suppress(OAuthDriverError):
         await driver.cancel(cred_id)
     remove_oauth_temp_home(cred_id)
-    await repo.delete(db, cred_id)
+    await repo.delete(db, cred_id, user_id=uid)
     await _refresh_upstream(request)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

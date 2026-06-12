@@ -12,7 +12,7 @@ _DAY = 86_400
 
 
 @pytest.fixture
-async def client():
+async def client(pg_db):
     async with (
         LifespanManager(app),
         httpx.AsyncClient(
@@ -20,6 +20,13 @@ async def client():
             base_url="http://testserver",
         ) as c,
     ):
+        # Several tests anchor conversations at an ancient `ts=1000`, which
+        # makes `expires_at` already in the past. The lifespan's background
+        # ConversationSweepScheduler would race the test and DELETE those
+        # rows out from under the request. Stop it so the sweep can't fire
+        # during the test (no test in this file exercises the sweeper).
+        if app.state.conversation_sweeper is not None:
+            await app.state.conversation_sweeper.stop()
         yield c
 
 
@@ -34,13 +41,13 @@ async def test_api_conversations_list_returns_recent_with_counts(
     c1 = await conversations.create(app.state.db, user_id=1, channel="task", ts=1000)
     c2 = await conversations.create(app.state.db, user_id=1, channel="web", ts=2000)
     await messages.append(
-        app.state.db, conversation_id=c1.id, role="user", content="hi", ts=1001
+        app.state.db, user_id=1, conversation_id=c1.id, role="user", content="hi", ts=1001
     )
     await messages.append(
-        app.state.db, conversation_id=c1.id, role="assistant", content="hi back", ts=1002
+        app.state.db, user_id=1, conversation_id=c1.id, role="assistant", content="hi back", ts=1002
     )
     await messages.append(
-        app.state.db, conversation_id=c2.id, role="user", content="hello", ts=2001
+        app.state.db, user_id=1, conversation_id=c2.id, role="user", content="hello", ts=2001
     )
 
     response = await client.get("/api/conversations", headers=AUTH)
@@ -71,10 +78,10 @@ async def test_api_conversation_detail_returns_messages_in_order(
 ) -> None:
     convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     await messages.append(
-        app.state.db, conversation_id=convo.id, role="user", content="m1", ts=1001
+        app.state.db, user_id=1, conversation_id=convo.id, role="user", content="m1", ts=1001
     )
     await messages.append(
-        app.state.db, conversation_id=convo.id, role="assistant", content="m2", ts=1002
+        app.state.db, user_id=1, conversation_id=convo.id, role="assistant", content="m2", ts=1002
     )
 
     response = await client.get(f"/api/conversations/{convo.id}", headers=AUTH)
@@ -144,14 +151,14 @@ async def test_api_conversation_delete_removes_conversation_and_messages(
 ) -> None:
     convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
     await messages.append(
-        app.state.db, conversation_id=convo.id, role="user", content="bye", ts=1001
+        app.state.db, user_id=1, conversation_id=convo.id, role="user", content="bye", ts=1001
     )
 
     response = await client.delete(f"/api/conversations/{convo.id}", headers=AUTH)
 
     assert response.status_code == 204
     assert await conversations.get(app.state.db, convo.id, user_id=1) is None
-    assert await messages.list_by_conversation(app.state.db, convo.id) == []
+    assert await messages.list_by_conversation(app.state.db, convo.id, user_id=1) == []
 
 
 async def test_api_conversation_delete_removes_scratch_dir(
@@ -224,6 +231,7 @@ async def test_api_conversations_search_matches_message_content(
     )
     await messages.append(
         app.state.db,
+        user_id=1,
         conversation_id=needle.id,
         role="user",
         content="please reschedule the dentist appointment",
@@ -231,6 +239,7 @@ async def test_api_conversations_search_matches_message_content(
     )
     await messages.append(
         app.state.db,
+        user_id=1,
         conversation_id=other.id,
         role="user",
         content="something unrelated",
@@ -252,6 +261,7 @@ async def test_api_conversations_search_dedups_title_and_message_hits(
     )
     await messages.append(
         app.state.db,
+        user_id=1,
         conversation_id=convo.id,
         role="user",
         content="dentist confirmed for tomorrow",

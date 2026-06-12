@@ -6,20 +6,21 @@ Diagnoses for the failure modes the
 flag, plus the few that happen *before* you can reach the UI at all.
 Each entry: symptom → root cause → fix.
 
-## Backend won't start (`HERMES_AUTH_TOKEN` missing)
+## Backend won't start (`HERMES_PLATFORM_ADMIN_TOKEN` missing)
 
 **Symptom.** `make up-local` boots all containers but `hermes-server`
 exits immediately. `make logs-local` shows a Pydantic validation error
-mentioning `auth_token`.
+mentioning `platform_admin_token` (or `platform_admin_email`).
 
-**Cause.** `HERMES_AUTH_TOKEN` is mandatory (`min_length=1`,
-[`src/hermes/config.py`](../src/hermes/config.py)). An empty value
-fails validation at boot.
+**Cause.** `HERMES_PLATFORM_ADMIN_TOKEN` and `HERMES_PLATFORM_ADMIN_EMAIL`
+are both mandatory (`min_length`, [`src/hermes/config.py`](../src/hermes/config.py)).
+An empty or unset value fails validation at boot.
 
 **Fix.**
 
 ```bash
-echo "HERMES_AUTH_TOKEN=$(make -s token)" >> .env
+echo "HERMES_PLATFORM_ADMIN_TOKEN=$(make -s token)" >> .env
+echo "HERMES_PLATFORM_ADMIN_EMAIL=admin@example.com" >> .env
 make down-local && make up-local
 ```
 
@@ -33,9 +34,9 @@ persisted in `localStorage` under `hermes.auth.token` and sent as
 panel shows a 401-style error.
 
 **Cause.** The bearer token in `localStorage` doesn't match
-`HERMES_AUTH_TOKEN`. Common reasons:
+`HERMES_PLATFORM_ADMIN_TOKEN`. Common reasons:
 
-- You rotated `HERMES_AUTH_TOKEN` in `.env` but the browser still
+- You rotated `HERMES_PLATFORM_ADMIN_TOKEN` in `.env` but the browser still
   holds the old one.
 - You pasted the value with a trailing newline. (The frontend trims
   on `setToken`, but a hand-edited `localStorage` entry might still
@@ -47,7 +48,7 @@ panel shows a 401-style error.
 **Fix.** Browser DevTools → Application → Local Storage →
 `http://app.localhost` → delete `hermes.auth.token`, reload, paste
 again. If that doesn't fix it, confirm with
-`grep HERMES_AUTH_TOKEN .env` and
+`grep HERMES_PLATFORM_ADMIN_TOKEN .env` and
 `make ps-local | grep hermes-server`.
 
 ## Frontend can't reach backend (no `/api/*` response)
@@ -253,16 +254,15 @@ That recreates the `holzi-frontend` container with
 after running `make clean`.
 
 **Cause.** `make clean` runs `compose down -v`, which removes the
-`hermes-data` named volume that holds `hermes.db`. This is documented
-in the Makefile help (`# DESTROYS hermes.db`) but easy to miss.
+`holzi-pg` named volume that holds the Postgres data directory. This is
+documented in the Makefile help but easy to miss.
 
-**Fix.** None retrospectively. Restore from a backup of the
-`hermes-data` volume contents. To avoid recurrence, take a snapshot
-before structural experiments:
+**Fix.** None retrospectively. Restore from a `pg_dump` backup. To
+avoid recurrence, take a dump before structural experiments:
 
 ```bash
-docker run --rm -v hermes_hermes-data:/data -v "$PWD":/backup \
-    alpine tar czf /backup/hermes-data.tgz -C /data .
+docker compose -f docker-compose.local.yml exec -T db \
+    pg_dump -U holzi_owner holzi | gzip > holzi-backup.sql.gz
 ```
 
-(Substitute `podman` for `docker` on Podman hosts.)
+(Substitute `podman compose` for `docker compose` on Podman hosts.)

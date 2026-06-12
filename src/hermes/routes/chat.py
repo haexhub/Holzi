@@ -34,7 +34,7 @@ async def chat_completions(request: Request) -> Response:
     user_id = current_user_id(request)
 
     convo = await _resolve_conversation(request, db, user_id)
-    await _persist_last_user_message(db, body.get("messages", []), convo.id)
+    await _persist_last_user_message(db, body.get("messages", []), convo.id, user_id)
 
     response_headers = {"X-Hermes-Session": str(convo.id)}
 
@@ -77,7 +77,7 @@ async def _resolve_conversation(
 
 
 async def _persist_last_user_message(
-    db: AsyncEngine, msgs: list[dict[str, Any]], conv_id: int
+    db: AsyncEngine, msgs: list[dict[str, Any]], conv_id: int, user_id: int
 ) -> None:
     if not msgs:
         return
@@ -92,7 +92,13 @@ async def _persist_last_user_message(
             for p in content
             if isinstance(p, dict) and p.get("type") == "text"
         )
-    await messages.append(db, conversation_id=conv_id, role="user", content=str(content))
+    await messages.append(
+        db,
+        user_id=user_id,
+        conversation_id=conv_id,
+        role="user",
+        content=str(content),
+    )
 
 
 async def _oneshot_forward(
@@ -131,7 +137,11 @@ async def _oneshot_forward(
     assistant_content = _extract_assistant_from_oneshot(data)
     if assistant_content:
         await messages.append(
-            db, conversation_id=conv_id, role="assistant", content=assistant_content
+            db,
+            user_id=user_id,
+            conversation_id=conv_id,
+            role="assistant",
+            content=assistant_content,
         )
     await conversations.touch(db, conv_id, user_id=user_id)
 
@@ -187,7 +197,11 @@ async def _stream_forward(
             content = _extract_assistant_from_sse(b"".join(chunks))
             if content:
                 await messages.append(
-                    db, conversation_id=conv_id, role="assistant", content=content
+                    db,
+                    user_id=user_id,
+                    conversation_id=conv_id,
+                    role="assistant",
+                    content=content,
                 )
             await conversations.touch(db, conv_id, user_id=user_id)
 

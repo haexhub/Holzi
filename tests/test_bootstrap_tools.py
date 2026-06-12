@@ -10,13 +10,12 @@ from hermes.personas import ensure_backfill
 from hermes.repository import persona_history as history_repo
 from hermes.repository import personas as personas_repo
 from hermes.tools.bootstrap import build_bootstrap_tools
-from hermes.users import ensure_users_seeded
 
 
 async def _setup(engine: AsyncEngine) -> None:
-    """Seed the default persona and users row."""
-    await ensure_backfill(engine)
-    await ensure_users_seeded(engine)
+    """Seed the default persona. The `conn` fixture already seeds the user
+    id=1 row that the personal-table FKs and bootstrap tools depend on."""
+    await ensure_backfill(engine, user_id=1)
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +66,7 @@ async def test_persona_update_writes_history_row_with_bootstrap_author(
 
     persona = await personas_repo.get_default(conn, user_id=1)
     assert persona is not None
-    history = await history_repo.list_for_persona(conn, persona.id)
+    history = await history_repo.list_for_persona(conn, persona.id, user_id=1)
 
     # Should have at least one history row from the update
     bootstrap_rows = [h for h in history if h.author == "bootstrap"]
@@ -110,7 +109,7 @@ async def test_mark_bootstrap_complete_flips_flag(conn: AsyncEngine) -> None:
             )
         ).first()
     assert row is not None
-    assert row.bootstrap_completed == 1
+    assert row.bootstrap_completed is True
 
 
 @pytest.mark.asyncio
@@ -132,4 +131,4 @@ async def test_mark_bootstrap_complete_is_idempotent(conn: AsyncEngine) -> None:
             )
         ).first()
     assert row is not None
-    assert row.bootstrap_completed == 1
+    assert row.bootstrap_completed is True

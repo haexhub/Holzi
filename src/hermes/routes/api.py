@@ -284,9 +284,10 @@ async def api_chat(request: Request) -> Response:
 
     # Validate attachment ownership before persisting anything: every id
     # must reference an unlinked upload belonging to this conversation.
+    uid = current_user_id(request)
     if payload.attachment_ids:
         for aid in payload.attachment_ids:
-            att = await attachments.get(db, aid)
+            att = await attachments.get(db, aid, user_id=uid)
             if (
                 att is None
                 or att.conversation_id != convo.id
@@ -298,11 +299,16 @@ async def api_chat(request: Request) -> Response:
                 )
 
     user_msg = await messages.append(
-        db, conversation_id=convo.id, role="user", content=payload.message
+        db,
+        user_id=uid,
+        conversation_id=convo.id,
+        role="user",
+        content=payload.message,
     )
     if payload.attachment_ids:
         await attachments.link_to_message(
             db,
+            user_id=uid,
             attachment_ids=payload.attachment_ids,
             message_id=user_msg.id,
             conversation_id=convo.id,
@@ -332,6 +338,7 @@ async def _stream_web_agent_run(
     message) and /api/conversations/{id}/retry (after trimming the trailing
     assistant/tool tail) so retry is not a separate code path."""
     db: AsyncEngine = request.app.state.db
+    uid = current_user_id(request)
 
     tools = build_tool_catalog(
         db=db,
@@ -434,7 +441,7 @@ async def _stream_web_agent_run(
             # card entirely. The agent loop only branches on
             # `decision == "deny"`, so returning `allow_once` is the right
             # signal regardless of which standing scope matched.
-            if await approvals_repo.is_always_allowed(db, name):
+            if await approvals_repo.is_always_allowed(db, name, user_id=uid):
                 return ApprovalDecision(decision="allow_once")
             if name in session_approvals.get(convo.id, set()):
                 return ApprovalDecision(decision="allow_once")
@@ -470,7 +477,7 @@ async def _stream_web_agent_run(
             if decision.decision == "allow_session":
                 session_approvals.setdefault(convo.id, set()).add(name)
             elif decision.decision == "allow_always":
-                await approvals_repo.grant_always(db, name)
+                await approvals_repo.grant_always(db, name, user_id=uid)
             return decision
 
         # Subscribe to sandbox crashes for the lifetime of this stream so a
@@ -499,6 +506,7 @@ async def _stream_web_agent_run(
                 async with track_run(
                     db,
                     run_id=run_id,
+                    user_id=current_user_id(request),
                     conversation_id=convo.id,
                     channel=WEB_CHANNEL,
                     model=model,
@@ -507,6 +515,7 @@ async def _stream_web_agent_run(
                     await run_agent(
                         upstream=persona_upstream,
                         db=db,
+                        user_id=current_user_id(request),
                         conversation_id=convo.id,
                         system_prompt=persona_ctx.system_prompt,
                         model=model,
@@ -658,7 +667,7 @@ async def api_models(request: Request) -> ModelsResponse:
     which budgets to offer.
     """
     db: AsyncEngine = request.app.state.db
-    credentials = await llm_credentials_repo.list_all(db)
+    credentials = await llm_credentials_repo.list_all(db, user_id=current_user_id(request))
     encryptor = request.app.state.encryptor
     http: httpx.AsyncClient = request.app.state.external_http
 
@@ -800,7 +809,7 @@ async def api_list_standing_approvals(request: Request) -> StandingApprovalsResp
     only has to render it.
     """
     db: AsyncEngine = request.app.state.db
-    always_rows = await approvals_repo.list_always(db)
+    always_rows = await approvals_repo.list_always(db, user_id=current_user_id(request))
     session_state: dict[int, set[str]] = request.app.state.session_approvals
     session_entries = sorted(
         (
@@ -843,7 +852,9 @@ async def api_revoke_standing_approval(
     """
     if scope == "always":
         db: AsyncEngine = request.app.state.db
-        removed = await approvals_repo.revoke_always(db, tool_name)
+        removed = await approvals_repo.revoke_always(
+            db, tool_name, user_id=current_user_id(request)
+        )
         if not removed:
             raise HTTPException(
                 status_code=404, detail=ErrorCode.TOOL_NOT_IN_ALWAYS_ALLOWED.value
@@ -938,6 +949,7 @@ async def api_list_runs(
     db: AsyncEngine = request.app.state.db
     rows = await runs.list_runs(
         db,
+        user_id=current_user_id(request),
         conversation_id=conversation_id,
         status=status,
         limit=limit,
@@ -1034,14 +1046,14 @@ def _attachment_to_dict(a: Any) -> dict[str, Any]:
 
 
 async def _unlink_attachment_files_after(
-    db: AsyncEngine, conv_id: int, *, after_id: int
+    db: AsyncEngine, conv_id: int, *, user_id: int, after_id: int
 ) -> None:
     """Delete the on-disk blobs of attachments linked to messages after
     `after_id`. Their DB rows are removed by the messages CASCADE when the
     caller trims those turns; this reclaims the files so they don't leak in
     the scratch dir until the whole conversation is deleted."""
     leaked = await attachments.list_after_message(
-        db, conversation_id=conv_id, after_message_id=after_id
+        db, user_id=user_id, conversation_id=conv_id, after_message_id=after_id
     )
     for att in leaked:
         with contextlib.suppress(OSError):
@@ -1177,14 +1189,15 @@ async def api_get_conversation(
 ) -> dict[str, Any]:
     limit = _validate_limit(limit)
     db: AsyncEngine = request.app.state.db
-    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
+    uid = current_user_id(request)
+    convo = await conversations.get(db, conv_id, user_id=uid)
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
         )
-    msgs = await messages.list_by_conversation(db, conv_id, limit=limit)
+    msgs = await messages.list_by_conversation(db, conv_id, user_id=uid, limit=limit)
     atts_by_message: dict[int, list[Any]] = {}
-    for att in await attachments.list_by_conversation(db, conv_id):
+    for att in await attachments.list_by_conversation(db, conv_id, user_id=uid):
         if att.message_id is not None:
             atts_by_message.setdefault(att.message_id, []).append(att)
     return {
@@ -1206,7 +1219,8 @@ async def api_upload_attachment(
     file: UploadFile = File(...),  # noqa: B008 — FastAPI dependency default
 ) -> dict[str, Any]:
     db: AsyncEngine = request.app.state.db
-    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
+    uid = current_user_id(request)
+    convo = await conversations.get(db, conv_id, user_id=uid)
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1247,6 +1261,7 @@ async def api_upload_attachment(
 
     att = await attachments.create(
         db,
+        user_id=uid,
         conversation_id=conv_id,
         filename=attachments_mod.safe_display_filename(file.filename),
         content_type=content_type,
@@ -1330,7 +1345,8 @@ async def api_retry_conversation(request: Request, conv_id: int) -> Response:
     """
     db: AsyncEngine = request.app.state.db
 
-    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
+    uid = current_user_id(request)
+    convo = await conversations.get(db, conv_id, user_id=uid)
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1342,7 +1358,7 @@ async def api_retry_conversation(request: Request, conv_id: int) -> Response:
             detail=ErrorCode.CONVERSATION_NOT_WEB.value,
         )
 
-    last_user = await messages.last_user_message(db, conv_id)
+    last_user = await messages.last_user_message(db, conv_id, user_id=uid)
     if last_user is None:
         raise HTTPException(
             status_code=400,
@@ -1352,7 +1368,7 @@ async def api_retry_conversation(request: Request, conv_id: int) -> Response:
     # Drop the assistant/tool tail so run_agent regenerates from the same
     # context that produced the original reply (simplest persistence
     # strategy — no superseded_at bookkeeping).
-    await messages.delete_after(db, conv_id, after_id=last_user.id)
+    await messages.delete_after(db, conv_id, user_id=uid, after_id=last_user.id)
 
     return await _stream_web_agent_run(request, convo)
 
@@ -1378,7 +1394,8 @@ async def api_edit_and_regenerate(
     """
     db: AsyncEngine = request.app.state.db
 
-    convo = await conversations.get(db, conv_id, user_id=current_user_id(request))
+    uid = current_user_id(request)
+    convo = await conversations.get(db, conv_id, user_id=uid)
     if convo is None:
         raise HTTPException(
             status_code=404, detail=ErrorCode.CONVERSATION_NOT_FOUND.value
@@ -1390,7 +1407,7 @@ async def api_edit_and_regenerate(
             detail=ErrorCode.CONVERSATION_NOT_WEB.value,
         )
 
-    target = await messages.get(db, message_id)
+    target = await messages.get(db, message_id, user_id=uid)
     # A message outside this conversation is a 404 (not found *here*), so the
     # path's conv_id is authoritative and clients can't edit across threads.
     if target is None or target.conversation_id != conv_id:
@@ -1402,7 +1419,9 @@ async def api_edit_and_regenerate(
             status_code=400, detail=ErrorCode.MESSAGE_ONLY_USER_EDITABLE.value
         )
 
-    updated = await messages.update_content(db, message_id, content=body.content)
+    updated = await messages.update_content(
+        db, message_id, user_id=uid, content=body.content
+    )
     if updated is None:
         # Lost-the-race between the get() above and the update — the message
         # was deleted concurrently. Don't trim/regenerate on a phantom edit.
@@ -1413,8 +1432,8 @@ async def api_edit_and_regenerate(
     # corrected context (simplest persistence strategy — no superseded_at).
     # Unlink the on-disk files of any attachments on those later turns first:
     # delete_after's CASCADE reclaims the rows but not the scratch-dir blobs.
-    await _unlink_attachment_files_after(db, conv_id, after_id=message_id)
-    await messages.delete_after(db, conv_id, after_id=message_id)
+    await _unlink_attachment_files_after(db, conv_id, user_id=uid, after_id=message_id)
+    await messages.delete_after(db, conv_id, user_id=uid, after_id=message_id)
 
     return await _stream_web_agent_run(request, convo)
 
@@ -1453,18 +1472,19 @@ def _note_to_dict(n: Any) -> dict[str, Any]:
     }
 
 
-def _fts5_query(raw: str) -> str:
-    # FTS5 treats `"`, `:`, `*`, `(`, `)`, `-`, etc. as syntax, so a user's
-    # free-form search string would otherwise raise OperationalError at the DB
-    # boundary. Split on whitespace, drop any non-alnum chars per token, and
-    # quote each surviving token as a phrase — that gives multi-term AND
-    # matching without exposing FTS5 operator syntax to the UI.
+def _tsquery(raw: str) -> str:
+    # Postgres `to_tsquery` rejects raw user input — characters like `&`,
+    # `|`, `!`, `(`, `)`, `:`, `<->` are operator syntax. Split on
+    # whitespace, drop everything that isn't alnum or `_`, and emit each
+    # surviving token as a `tok:*` prefix-match. Tokens are OR-joined
+    # with `|` so multi-word queries widen recall (matches how chat
+    # search elsewhere behaves).
     tokens: list[str] = []
     for raw_token in raw.split():
         cleaned = "".join(c for c in raw_token if c.isalnum() or c == "_")
         if cleaned:
-            tokens.append(f'"{cleaned}"')
-    return " ".join(tokens)
+            tokens.append(f"{cleaned}:*")
+    return " | ".join(tokens)
 
 
 @router.get("/notes", response_model=list[NoteResponse])
@@ -1477,7 +1497,7 @@ async def api_list_notes(
     # Whitespace-only `q` is treated the same as an absent `q` — falling
     # through to list_all keeps `?q=` and `?q=%20%20` symmetric.
     if q and q.strip():
-        sanitised = _fts5_query(q)
+        sanitised = _tsquery(q)
         if not sanitised:
             return []
         items = await notes.find(db, user_id=user_id, query=sanitised, limit=limit)

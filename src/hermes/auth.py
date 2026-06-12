@@ -3,6 +3,7 @@ from collections.abc import Awaitable, Callable
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 
+from hermes.db import reset_current_user, set_current_user_token
 from hermes.logging import logger
 
 PUBLIC_PATHS: frozenset[str] = frozenset({"/healthz"})
@@ -27,7 +28,16 @@ async def bearer_auth_middleware(
 
     request.state.user_id = identity.user_id
     request.state.role = identity.role
-    return await call_next(request)
+
+    # Populate the ContextVar so `tx_for_user(engine)` (no explicit user_id
+    # kwarg) picks up the right user inside this request. The try/finally is
+    # critical -- Starlette can reuse the same async task for the response
+    # phase, and a leaked ContextVar would bleed across requests.
+    token = set_current_user_token(identity.user_id)
+    try:
+        return await call_next(request)
+    finally:
+        reset_current_user(token)
 
 
 def current_user_id(request: Request) -> int:

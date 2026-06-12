@@ -24,7 +24,7 @@ AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
 @pytest.fixture
-async def client():
+async def client(pg_db):
     async with (
         LifespanManager(app=hermes_main.app),
         httpx.AsyncClient(

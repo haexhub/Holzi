@@ -180,7 +180,7 @@ async def _resolve_first_pending_approval(
 
 
 @pytest.fixture
-async def client():
+async def client(pg_db):
     async with (
         LifespanManager(app),
         httpx.AsyncClient(
@@ -198,8 +198,8 @@ async def client():
 
 async def test_repo_grant_and_list_always(conn) -> None:
     """`grant_always` upserts and `list_always` returns granted_at/last_used_at."""
-    await approvals_repo.grant_always(conn, "mcp_install", now=1000)
-    rows = await approvals_repo.list_always(conn)
+    await approvals_repo.grant_always(conn, "mcp_install", user_id=1, now=1000)
+    rows = await approvals_repo.list_always(conn, user_id=1)
     assert [(r.tool_name, r.granted_at) for r in rows] == [
         ("mcp_install", 1000)
     ]
@@ -209,32 +209,32 @@ async def test_repo_grant_and_list_always(conn) -> None:
 
 async def test_repo_grant_always_is_idempotent(conn) -> None:
     """Re-granting the same tool refreshes `granted_at` without duplicate rows."""
-    await approvals_repo.grant_always(conn, "mcp_install", now=1000)
-    await approvals_repo.grant_always(conn, "mcp_install", now=2000)
-    rows = await approvals_repo.list_always(conn)
+    await approvals_repo.grant_always(conn, "mcp_install", user_id=1, now=1000)
+    await approvals_repo.grant_always(conn, "mcp_install", user_id=1, now=2000)
+    rows = await approvals_repo.list_always(conn, user_id=1)
     assert len(rows) == 1
     assert rows[0].granted_at == 2000
 
 
 async def test_repo_is_always_allowed(conn) -> None:
     assert (
-        await approvals_repo.is_always_allowed(conn, "mcp_install")
+        await approvals_repo.is_always_allowed(conn, "mcp_install", user_id=1)
     ) is False
-    await approvals_repo.grant_always(conn, "mcp_install", now=1000)
+    await approvals_repo.grant_always(conn, "mcp_install", user_id=1, now=1000)
     assert (
-        await approvals_repo.is_always_allowed(conn, "mcp_install")
+        await approvals_repo.is_always_allowed(conn, "mcp_install", user_id=1)
     ) is True
 
 
 async def test_repo_revoke_always(conn) -> None:
-    await approvals_repo.grant_always(conn, "mcp_install", now=1000)
-    removed = await approvals_repo.revoke_always(conn, "mcp_install")
+    await approvals_repo.grant_always(conn, "mcp_install", user_id=1, now=1000)
+    removed = await approvals_repo.revoke_always(conn, "mcp_install", user_id=1)
     assert removed is True
     assert (
-        await approvals_repo.is_always_allowed(conn, "mcp_install")
+        await approvals_repo.is_always_allowed(conn, "mcp_install", user_id=1)
     ) is False
     # Revoking a missing row returns False (caller surfaces as 404).
-    assert (await approvals_repo.revoke_always(conn, "mcp_install")) is False
+    assert (await approvals_repo.revoke_always(conn, "mcp_install", user_id=1)) is False
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +311,7 @@ async def test_get_standing_returns_always_and_session(
     client: httpx.AsyncClient,
 ) -> None:
     # Seed: an always-row directly via the repo, plus a session entry in state.
-    await approvals_repo.grant_always(app.state.db, "mcp_install", now=1000)
+    await approvals_repo.grant_always(app.state.db, "mcp_install", user_id=1, now=1000)
     app.state.session_approvals[42] = {"save_note"}
     try:
         resp = await client.get("/api/approvals/standing", headers=AUTH)
@@ -329,7 +329,7 @@ async def test_get_standing_returns_always_and_session(
             (42, "save_note")
         }
     finally:
-        await approvals_repo.revoke_always(app.state.db, "mcp_install")
+        await approvals_repo.revoke_always(app.state.db, "mcp_install", user_id=1)
         app.state.session_approvals.pop(42, None)
 
 
@@ -341,14 +341,14 @@ async def test_get_standing_requires_auth(client: httpx.AsyncClient) -> None:
 async def test_delete_standing_always_removes_row(
     client: httpx.AsyncClient,
 ) -> None:
-    await approvals_repo.grant_always(app.state.db, "mcp_install", now=1000)
+    await approvals_repo.grant_always(app.state.db, "mcp_install", user_id=1, now=1000)
     resp = await client.delete(
         "/api/approvals/standing/mcp_install?scope=always",
         headers=AUTH,
     )
     assert resp.status_code == 204
     assert (
-        await approvals_repo.is_always_allowed(app.state.db, "mcp_install")
+        await approvals_repo.is_always_allowed(app.state.db, "mcp_install", user_id=1)
     ) is False
 
 
@@ -398,7 +398,7 @@ async def test_chat_skips_approval_when_always_allowed(
 ) -> None:
     """A persisted always-grant pre-empts the approval gate: no
     `approval_required` event is emitted and the tool runs immediately."""
-    await approvals_repo.grant_always(app.state.db, "mcp_install", now=1000)
+    await approvals_repo.grant_always(app.state.db, "mcp_install", user_id=1, now=1000)
     _install_upstream_responses(
         [
             _tool_call_first_response(
@@ -435,7 +435,12 @@ async def test_chat_skips_approval_when_session_allowed(
     pre-empts the gate. New chats default to the existing conversation
     (none yet) — we create one explicitly and seed the session entry under
     its id."""
-    convo = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
+    # `bookmarked=True` ⇒ expires_at=NULL so the TTL sweeper (started by the
+    # lifespan) does not delete this anchor conversation out from under the
+    # chat request — an ancient `ts` would otherwise be immediately expired.
+    convo = await conversations.create(
+        app.state.db, user_id=1, channel="web", ts=1000, bookmarked=True
+    )
     app.state.session_approvals[convo.id] = {"mcp_install"}
     try:
         _install_upstream_responses(
@@ -475,8 +480,12 @@ async def test_chat_session_grant_does_not_carry_to_new_conversation(
 ) -> None:
     """Session grants are conversation-scoped. Seeding `convo_a` and chatting
     on `convo_b` still requires approval on `convo_b`."""
-    convo_a = await conversations.create(app.state.db, user_id=1, channel="web", ts=1000)
-    convo_b = await conversations.create(app.state.db, user_id=1, channel="web", ts=1001)
+    convo_a = await conversations.create(
+        app.state.db, user_id=1, channel="web", ts=1000, bookmarked=True
+    )
+    convo_b = await conversations.create(
+        app.state.db, user_id=1, channel="web", ts=1001, bookmarked=True
+    )
     app.state.session_approvals[convo_a.id] = {"mcp_install"}
     try:
         _install_upstream_responses(
@@ -585,7 +594,7 @@ async def test_chat_allow_always_persists_to_db(
 
     assert (
         await approvals_repo.is_always_allowed(
-            app.state.db, "mcp_install"
+            app.state.db, "mcp_install", user_id=1
         )
     ) is True
     # Simulate a restart: clear the in-memory session map.
@@ -593,7 +602,7 @@ async def test_chat_allow_always_persists_to_db(
     # The persisted always-grant still pre-empts the gate.
     assert (
         await approvals_repo.is_always_allowed(
-            app.state.db, "mcp_install"
+            app.state.db, "mcp_install", user_id=1
         )
     ) is True
 

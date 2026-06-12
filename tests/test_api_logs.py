@@ -22,7 +22,7 @@ AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
 @pytest.fixture
-async def client(monkeypatch, tmp_path: Path):
+async def client(pg_db, monkeypatch, tmp_path: Path):
     from hermes import config as hermes_config
 
     # Default each test to a file path inside tmp_path; tests that need
@@ -54,7 +54,7 @@ async def test_logs_requires_auth(client: httpx.AsyncClient) -> None:
 
 
 async def test_logs_503_when_log_file_unset(
-    monkeypatch, tmp_path: Path
+    pg_db, monkeypatch, tmp_path: Path
 ) -> None:
     """If `HERMES_LOG_FILE` is unset, the endpoint reports 503 rather
     than silently returning an empty list."""

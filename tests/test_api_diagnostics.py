@@ -26,7 +26,7 @@ CHECK_IDS = {"database", "llm", "scheduler", "workspace", "sandbox"}
 
 
 @pytest.fixture
-async def client():
+async def client(pg_db):
     async with (
         LifespanManager(app),
         httpx.AsyncClient(
@@ -103,12 +103,13 @@ async def test_diagnostics_with_active_llm_credential_does_not_leak_secrets(
     blob = app.state.encryptor.encrypt(plaintext)
     cred = await llm_repo.create_api_key(
         app.state.db,
+        user_id=1,
         provider="openai",
         display_name="Martin OpenAI",
         base_url=None,
         ciphertext=blob,
     )
-    await llm_repo.activate(app.state.db, cred.id)
+    await llm_repo.activate(app.state.db, cred.id, user_id=1)
 
     response = await client.get("/api/diagnostics", headers=AUTH)
     body = response.json()
@@ -297,12 +298,13 @@ async def test_diagnostics_truncates_long_display_name(
     blob = app.state.encryptor.encrypt("sk-test")
     cred = await llm_repo.create_api_key(
         app.state.db,
+        user_id=1,
         provider="openai",
         display_name=long_name,
         base_url=None,
         ciphertext=blob,
     )
-    await llm_repo.activate(app.state.db, cred.id)
+    await llm_repo.activate(app.state.db, cred.id, user_id=1)
 
     response = await client.get("/api/diagnostics", headers=AUTH)
     params = _check(response.json(), "llm")["params"]

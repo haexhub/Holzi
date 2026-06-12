@@ -17,6 +17,7 @@ import time
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from hermes.db import tx_for_user
 from hermes.repository.models import Persona, PersonaHistory
 from hermes.schema import persona_history as t_history
 
@@ -46,6 +47,7 @@ async def _do_write(
     conn: AsyncConnection,
     *,
     persona_id: int,
+    user_id: int,
     author: str,
     snapshot_json: str,
     now: int,
@@ -57,6 +59,7 @@ async def _do_write(
             author=author,
             snapshot_json=snapshot_json,
             created_at=now,
+            user_id=user_id,
         )
         .returning(
             t_history.c.id,
@@ -91,7 +94,8 @@ async def write_snapshot(
     If `conn` is supplied, the INSERT runs on that existing connection so
     the snapshot lands in the same transaction as the caller's write
     (used by the personas repo's `create`/`update`). When `conn` is
-    None, a fresh `engine.begin()` block is opened.
+    None, a fresh `tx_for_user` block is opened — the persona's own
+    `user_id` is propagated so RLS scopes the audit row to its owner.
     """
     now = ts if ts is not None else int(time.time())
     snapshot_json = _persona_snapshot_json(persona)
@@ -100,15 +104,17 @@ async def write_snapshot(
         return await _do_write(
             conn,
             persona_id=persona.id,
+            user_id=persona.user_id,
             author=author,
             snapshot_json=snapshot_json,
             now=now,
         )
 
-    async with engine.begin() as new_conn:
+    async with tx_for_user(engine, user_id=persona.user_id) as new_conn:
         return await _do_write(
             new_conn,
             persona_id=persona.id,
+            user_id=persona.user_id,
             author=author,
             snapshot_json=snapshot_json,
             now=now,
@@ -116,7 +122,7 @@ async def write_snapshot(
 
 
 async def list_for_persona(
-    engine: AsyncEngine, persona_id: int
+    engine: AsyncEngine, persona_id: int, *, user_id: int
 ) -> list[PersonaHistory]:
     """All history rows for `persona_id`, newest first.
 
@@ -128,17 +134,17 @@ async def list_for_persona(
         .where(t_history.c.persona_id == persona_id)
         .order_by(desc(t_history.c.created_at), desc(t_history.c.id))
     )
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(stmt)
         rows = result.all()
     return [_row_to_history(r) for r in rows]
 
 
 async def get(
-    engine: AsyncEngine, history_id: int
+    engine: AsyncEngine, history_id: int, *, user_id: int
 ) -> PersonaHistory | None:
     """Fetch one row by id, or None when no such row exists."""
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_history).where(t_history.c.id == history_id)
         )

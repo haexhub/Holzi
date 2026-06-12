@@ -1,0 +1,10 @@
+Alembic config for the Holzi Postgres + RLS schema (§1 of the SaaS plan).
+
+Online migrations connect as `holzi_owner` (full DDL). The app runtime
+connects as `holzi_app` (NOBYPASSRLS) — see src/hermes/db.py for the engine
+setup and tx_for_user.
+
+Running alembic from a shell only needs the owner DSN. Set it via either
+`HERMES_DATABASE_URL` in the environment (preferred) or `sqlalchemy.url`
+in alembic.ini. env.py does NOT import hermes.config, so the
+platform_admin env vars are not required for migrations.

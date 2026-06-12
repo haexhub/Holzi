@@ -17,6 +17,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from hermes.agent import run_agent
 from hermes.config import settings
+from hermes.db import reset_current_user, set_current_user_token
 from hermes.logging import logger
 from hermes.personas import get_effective_system_prompt
 from hermes.repository import conversations, messages
@@ -109,77 +110,91 @@ async def ws_agent(ws: WebSocket, token: str | None = None) -> None:
     db = ws.app.state.db
     upstream = ws.app.state.upstream
 
+    # The HTTP bearer_auth_middleware is BaseHTTPMiddleware -- it does NOT
+    # intercept WebSocket connections. Populate the ContextVar explicitly so
+    # `tx_for_user(engine)` picks up the right user for the lifetime of this
+    # connection. The try/finally guarantees the previous value is restored
+    # even on disconnect or unhandled exception.
+    ctx_token = set_current_user_token(identity.user_id)
     try:
-        # --- start_session ---------------------------------------------------
-        init_msg = await ws.receive_json()
-        if init_msg.get("type") != "start_session":
-            await ws.close(code=1002, reason="expected start_session")
-            return
+        try:
+            # --- start_session -----------------------------------------------
+            init_msg = await ws.receive_json()
+            if init_msg.get("type") != "start_session":
+                await ws.close(code=1002, reason="expected start_session")
+                return
 
-        model: str = init_msg.get("model") or settings.model
-        permission_mode: str = init_msg.get("permission_mode") or "ask"
-        tool_names: list[str] = init_msg.get("tools") or []
+            model: str = init_msg.get("model") or settings.model
+            permission_mode: str = init_msg.get("permission_mode") or "ask"
+            tool_names: list[str] = init_msg.get("tools") or []
 
-        conv = await conversations.create(
-            db, user_id=identity.user_id, channel=VSCODE_CHANNEL
-        )
-        system_prompt = await get_effective_system_prompt(
-            VSCODE_CHANNEL, db, user_id=identity.user_id
-        )
-        session = WsSession(ws=ws, conversation_id=conv.id, permission_mode=permission_mode)
+            conv = await conversations.create(
+                db, user_id=identity.user_id, channel=VSCODE_CHANNEL
+            )
+            system_prompt = await get_effective_system_prompt(
+                VSCODE_CHANNEL, db, user_id=identity.user_id
+            )
+            session = WsSession(ws=ws, conversation_id=conv.id, permission_mode=permission_mode)
 
-        logger.info(
-            "ws_agent_session_start",
-            conversation_id=conv.id,
-            model=model,
-            permission_mode=permission_mode,
-            tools=tool_names,
-        )
+            logger.info(
+                "ws_agent_session_start",
+                conversation_id=conv.id,
+                model=model,
+                permission_mode=permission_mode,
+                tools=tool_names,
+            )
 
-        # --- main message loop -----------------------------------------------
-        while True:
-            msg = await ws.receive_json()
-            msg_type = msg.get("type")
+            # --- main message loop -------------------------------------------
+            while True:
+                msg = await ws.receive_json()
+                msg_type = msg.get("type")
 
-            if msg_type == "message":
-                user_content = _build_user_content(msg)
-                await messages.append(
-                    db, conversation_id=conv.id, role="user", content=user_content
-                )
-
-                tools = _build_tools(tool_names, session) or None
-
-                async def on_chunk(delta: str) -> None:
-                    await ws.send_json({"type": "stream_chunk", "delta": delta})
-
-                agent_task = asyncio.create_task(
-                    run_agent(
-                        upstream=upstream,
-                        db=db,
+                if msg_type == "message":
+                    user_content = _build_user_content(msg)
+                    await messages.append(
+                        db,
+                        user_id=identity.user_id,
                         conversation_id=conv.id,
-                        system_prompt=system_prompt,
-                        model=model,
-                        tools=tools,
-                        on_chunk=on_chunk,
+                        role="user",
+                        content=user_content,
                     )
-                )
 
-                await _service_agent_turn(session, agent_task)
-                await ws.send_json({"type": "stream_done"})
+                    tools = _build_tools(tool_names, session) or None
 
-            else:
-                # tool_result + update_permission_mode (and any future inner
-                # message types) share one handler with the in-turn loop in
-                # _service_agent_turn so behaviour stays identical regardless
-                # of whether the client sends them mid-turn or between turns.
-                await _handle_inner_msg(session, msg)
+                    async def on_chunk(delta: str) -> None:
+                        await ws.send_json({"type": "stream_chunk", "delta": delta})
 
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:
-        logger.warning("ws_agent_error", error=str(exc))
-        with contextlib.suppress(Exception):
-            await ws.send_json({"type": "error", "code": "internal", "message": str(exc)})
+                    agent_task = asyncio.create_task(
+                        run_agent(
+                            upstream=upstream,
+                            db=db,
+                            user_id=identity.user_id,
+                            conversation_id=conv.id,
+                            system_prompt=system_prompt,
+                            model=model,
+                            tools=tools,
+                            on_chunk=on_chunk,
+                        )
+                    )
+
+                    await _service_agent_turn(session, agent_task)
+                    await ws.send_json({"type": "stream_done"})
+
+                else:
+                    # tool_result + update_permission_mode (and any future inner
+                    # message types) share one handler with the in-turn loop in
+                    # _service_agent_turn so behaviour stays identical regardless
+                    # of whether the client sends them mid-turn or between turns.
+                    await _handle_inner_msg(session, msg)
+
+        except WebSocketDisconnect:
+            pass
+        except Exception as exc:
+            logger.warning("ws_agent_error", error=str(exc))
+            with contextlib.suppress(Exception):
+                await ws.send_json({"type": "error", "code": "internal", "message": str(exc)})
+    finally:
+        reset_current_user(ctx_token)
 
 
 async def _service_agent_turn(

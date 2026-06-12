@@ -2,7 +2,7 @@
 
 These tools are used by the bootstrap-first-chat skill during onboarding.
 `persona_update` writes fragments to the default persona with author='bootstrap'.
-`mark_bootstrap_complete` flips users.bootstrap_completed to 1 (idempotent).
+`mark_bootstrap_complete` flips users.bootstrap_completed to true (idempotent).
 """
 import json
 from typing import Any
@@ -101,7 +101,7 @@ def _mark_bootstrap_complete(db: AsyncEngine) -> Tool:
     async def handler(args: dict[str, Any]) -> str:  # noqa: ARG001
         async with db.begin() as conn:
             await conn.execute(
-                text("UPDATE users SET bootstrap_completed = 1 WHERE id = 1")
+                text("UPDATE users SET bootstrap_completed = true WHERE id = 1")
             )
         return json.dumps({"ok": True})
 

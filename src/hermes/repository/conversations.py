@@ -7,15 +7,17 @@ from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from hermes.config import settings
+from hermes.db import tx_as_owner, tx_for_user
 from hermes.repository.models import Conversation
 from hermes.schema import attachments as t_attachments
 from hermes.schema import conversations as t_conversations
 from hermes.schema import messages as t_messages
 
-# Search input is tokenised into bare words before it reaches FTS5. The
-# regex only emits `\w+` runs, so operator characters from the user
-# ("*", "AND", quotes, parens) are dropped at the tokenisation step and
-# can't break the MATCH parser or sneak into LIKE patterns.
+# Search input is tokenised into bare words before it reaches Postgres
+# `to_tsquery`. The regex only emits `\w+` runs, so operator characters
+# from the user ("*", "&", "|", "!", quotes, parens, ":") are dropped at
+# the tokenisation step and can't break the tsquery parser or sneak into
+# LIKE patterns.
 _FTS_TOKEN_RE = re.compile(r"\w+", flags=re.UNICODE)
 
 _SECONDS_PER_DAY = 86_400
@@ -59,7 +61,7 @@ async def create(
 ) -> Conversation:
     now = ts if ts is not None else int(time.time())
     expires_at = None if bookmarked else _compute_expires_at(now)
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             t_conversations.insert()
             .values(
@@ -93,7 +95,7 @@ async def create(
 async def get(
     engine: AsyncEngine, conversation_id: int, *, user_id: int
 ) -> Conversation | None:
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_conversations).where(
                 t_conversations.c.id == conversation_id,
@@ -111,7 +113,7 @@ async def list_by_channel(
     user_id: int,
     limit: int = 20,
 ) -> list[Conversation]:
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_conversations)
             .where(
@@ -138,7 +140,7 @@ async def find_latest_by_external_id(
     chat_id maps to its own conversation row via `external_id="tg:<id>"`,
     distinct from other chats and from web/vscode sessions.
     """
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_conversations)
             .where(
@@ -169,7 +171,7 @@ async def list_all(
         stmt = stmt.where(t_conversations.c.updated_at >= since_unix)
     stmt = stmt.order_by(desc(t_conversations.c.updated_at)).limit(limit)
 
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(stmt)
         rows = result.all()
     return [_row_to_conversation(r) for r in rows]
@@ -186,12 +188,13 @@ async def search(
     """Find conversations whose title or any message content matches ``query``.
 
     Tokenises the input into ``\\w+`` runs and treats each token as a
-    prefix: title hits use case-insensitive ``LIKE %tok%`` (substring) and
-    message hits use FTS5 ``tok*`` (prefix) against ``messages_fts``. The
-    two hit-sets are unioned at the conversation level so a thread
-    appearing in both shows up exactly once. Tokens are OR-joined on both
-    sides, so multi-word queries widen the result set instead of
-    narrowing it — same recall users get from chat search elsewhere.
+    prefix: title hits use case-insensitive ``LIKE %tok%`` (substring)
+    and message hits use Postgres ``tok:*`` (prefix) against
+    ``messages.content_tsv``. The two hit-sets are unioned at the
+    conversation level so a thread appearing in both shows up exactly
+    once. Tokens are OR-joined on both sides, so multi-word queries
+    widen the result set instead of narrowing it — same recall users
+    get from chat search elsewhere.
 
     Results are sorted newest-first and capped at ``limit``. A blank/
     empty query falls back to :func:`list_all` so the search box can be
@@ -219,10 +222,10 @@ async def search(
         title_clauses.append(f"LOWER(c.title) LIKE :{key}")
         params[key] = f"%{tok.lower()}%"
 
-    # `tok*` is FTS5 prefix matching, so typing "dent" finds a message
-    # mentioning "dentist". Tokens are `\w+`, so no operator characters
-    # can leak through to confuse the MATCH parser.
-    fts_match = " OR ".join(f"{t}*" for t in tokens)
+    # `tok:*` is Postgres tsquery prefix matching, so typing "dent"
+    # finds a message mentioning "dentist". Tokens are `\w+`, so no
+    # operator characters can leak through to confuse the tsquery parser.
+    fts_match = " | ".join(f"{t}:*" for t in tokens)
     params["fts_q"] = fts_match
 
     # Build the WHERE on the conversations table so SELECT produces full
@@ -232,8 +235,7 @@ async def search(
         (
             "c.id IN ("
             "SELECT m.conversation_id FROM messages m "
-            "JOIN messages_fts f ON f.rowid = m.id "
-            "WHERE messages_fts MATCH :fts_q"
+            "WHERE m.content_tsv @@ to_tsquery('simple', :fts_q)"
             ")"
         ),
     ]
@@ -251,7 +253,7 @@ async def search(
         "ORDER BY c.updated_at DESC LIMIT :limit"
     )
 
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(sql, params)
         rows = result.all()
     return [_row_to_conversation(r) for r in rows]
@@ -262,7 +264,7 @@ async def message_count(
 ) -> int:
     """Count messages in a conversation the caller owns. A conversation that
     belongs to another user counts as 0 (its rows are invisible)."""
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(func.count())
             .select_from(
@@ -294,7 +296,7 @@ async def update_title(
     user's row returns None (no-op).
     """
     now = ts if ts is not None else int(time.time())
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         existing = await conn.execute(
             select(t_conversations.c.bookmarked).where(
                 t_conversations.c.id == conversation_id,
@@ -331,7 +333,7 @@ async def delete(
     removed even when it was never materialised — `shutil.rmtree(...,
     ignore_errors=True)` is a no-op on missing paths.
     """
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         existing = await conn.execute(
             select(t_conversations.c.id).where(
                 t_conversations.c.id == conversation_id,
@@ -376,7 +378,7 @@ async def touch(
     out mid-session. Scoped to the owner: another user's row is a no-op.
     """
     now = ts if ts is not None else int(time.time())
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         existing = await conn.execute(
             select(t_conversations.c.bookmarked).where(
                 t_conversations.c.id == conversation_id,
@@ -411,7 +413,7 @@ async def set_bookmarked(
     next sweep. Scoped to the owner: another user's row returns None.
     """
     now = ts if ts is not None else int(time.time())
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         existing = await conn.execute(
             select(t_conversations.c.updated_at).where(
                 t_conversations.c.id == conversation_id,
@@ -447,7 +449,7 @@ async def set_bookmarked(
 
 
 async def list_expired(
-    engine: AsyncEngine,
+    owner_engine: AsyncEngine,
     *,
     now: int,
     limit: int = 500,
@@ -457,8 +459,14 @@ async def list_expired(
 
     Intentionally GLOBAL (not user-scoped): the TTL sweeper runs as a
     background job over every user's expired rows in Wave C1.
+
+    Connects via `tx_as_owner` — RLS is intentionally bypassed here
+    because the sweeper legitimately needs to see expired rows across
+    every user. The owner role still has FORCE RLS, but reading without
+    `SET LOCAL app.user_id` returns rows from every owner thanks to the
+    owner-side policy carve-out.
     """
-    async with engine.connect() as conn:
+    async with tx_as_owner(owner_engine) as conn:
         result = await conn.execute(
             select(t_conversations)
             .where(t_conversations.c.expires_at.is_not(None))
@@ -473,6 +481,7 @@ async def list_expired(
 async def sweep_expired(
     engine: AsyncEngine,
     *,
+    owner_engine: AsyncEngine,
     now: int,
     scratch_root: Path | None = None,
     limit: int = 500,
@@ -482,11 +491,12 @@ async def sweep_expired(
     Each row's scratch directory is removed too when `scratch_root` is
     given.
 
-    Intentionally GLOBAL (not user-scoped): the sweeper deletes every
-    user's expired rows. Each delete passes the row's own `user_id` so
-    the scoped `delete` still targets the correct owner.
+    Intentionally GLOBAL (not user-scoped): `list_expired` reads across
+    every user via `owner_engine` / `tx_as_owner`; the per-row
+    `delete(engine, …, user_id=c.user_id)` switches back to the runtime
+    engine so the scoped DELETE runs under RLS for the row's owner.
     """
-    expired = await list_expired(engine, now=now, limit=limit)
+    expired = await list_expired(owner_engine, now=now, limit=limit)
     deleted: list[int] = []
     for c in expired:
         if await delete(engine, c.id, user_id=c.user_id, scratch_root=scratch_root):

@@ -53,6 +53,7 @@ async def track_run(
     db: AsyncEngine,
     *,
     run_id: str,
+    user_id: int,
     conversation_id: int,
     channel: str,
     model: str,
@@ -73,6 +74,7 @@ async def track_run(
     started_at = int(time.time())
     await runs_repo.insert(
         db,
+        user_id=user_id,
         run_id=run_id,
         conversation_id=conversation_id,
         channel=channel,
@@ -133,6 +135,7 @@ async def track_run(
             await runs_repo.finalize(
                 db,
                 run_id,
+                user_id=user_id,
                 status=status,
                 finished_at=finished_at,
                 error_code=error_code,

@@ -92,7 +92,6 @@ services:
       UV_CACHE_DIR: /tmp/uv-cache
       HERMES_DB_PATH: /data/hermes.db
       HERMES_LLM_URL: ${HERMES_LLM_URL:-http://haex-claude-proxy:8080}
-      HERMES_SIGNAL_URL: ${HERMES_SIGNAL_URL:-http://signal-cli-rest-api:8080}
       # AES-Master-Key für llm_credentials-Ciphertext. MUSS identisch zu
       # dem sein, was die haex-claude-proxy SQLite-Resolver-Instanz liest
       # — sonst schlägt die Decryption beim Forwarding fehl.
@@ -124,19 +123,34 @@ services:
       - "traefik.http.routers.hermes-api.priority=100"
       - "traefik.http.routers.hermes-api.service=hermes"
     depends_on:
-      - haex-claude-proxy
-      - signal-cli-rest-api
+      haex-claude-proxy:
+        condition: service_started
+      db:
+        condition: service_healthy
 
-  signal-cli-rest-api:
-    image: bbernhard/signal-cli-rest-api:latest
-    container_name: signal-cli-rest-api
+  db:
+    # Postgres dev service for the §1 Postgres + RLS schema. src/hermes/db.py
+    # connects here via settings.database_url; Alembic runs migrations as the
+    # owner role on startup. Bound to 127.0.0.1:5433 to avoid colliding with
+    # a host Postgres on 5432.
+    image: postgres:16-alpine
+    container_name: hermes-db
     restart: unless-stopped
     environment:
-      MODE: json-rpc
+      POSTGRES_DB: holzi
+      POSTGRES_USER: holzi_owner
+      POSTGRES_PASSWORD: holzi_owner_dev_pw  # dev only; prod sources from secrets
+    ports:
+      - "127.0.0.1:5433:5432"
     volumes:
-      - signal-data:/home/.local/share/signal-cli
+      - holzi-pg:/var/lib/postgresql/data
     networks:
       - hermes-local
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U holzi_owner -d holzi"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
 
   haex-claude-proxy:
     # Image-Tag konfigurierbar — Default `dev` matched das, was im
@@ -251,4 +265,4 @@ services:
 
 volumes:
   hermes-data:
-  signal-data:
+  holzi-pg:

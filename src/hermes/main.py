@@ -2,7 +2,6 @@ import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
@@ -13,22 +12,16 @@ from starlette.types import Receive, Scope, Send
 from hermes import __version__
 from hermes.agent import Tool
 from hermes.auth import bearer_auth_middleware
-from hermes.config import conversation_scratch_root, settings
+from hermes.config import conversation_scratch_root, get_data_dir, settings
 from hermes.crypto import Encryptor, resolve_master_key
-from hermes.db import init_db
+from hermes.db import init_db, make_owner_engine
 from hermes.identity import SessionResolver
 from hermes.logging import configure_logging, logger
 from hermes.mcp_manager import McpServerManager
 from hermes.mcp_server import mcp_session_manager, tool_manifest
 from hermes.oauth import ClaudeOAuthDriver
-from hermes.personas import (
-    _drop_persona_skills_table,
-    _migrate_personas_add_credential_columns,
-    _migrate_prompt_to_fragments,
-    _migrate_skills_add_enabled,
-    ensure_bootstrap_skill_seeded,
-)
 from hermes.personas import ensure_backfill as ensure_personas_backfill
+from hermes.personas import ensure_bootstrap_skill_seeded
 from hermes.repository import sandbox_crashes as sandbox_crashes_repo
 from hermes.repository import workspaces as workspaces_repo
 from hermes.routes.api import router as api_router
@@ -53,7 +46,7 @@ from hermes.scheduler import AgentTaskScheduler, ConversationSweepScheduler
 from hermes.starter_skills import ensure_starter_skills_seeded
 from hermes.tool_catalog import build_tool_catalog
 from hermes.upstream import build_fallback_client, rebuild_upstream_from_db
-from hermes.users import ensure_users_seeded
+from hermes.users import ensure_platform_admin_seeded
 
 configure_logging()
 
@@ -96,11 +89,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info(
         "hermes_starting",
         version=__version__,
-        db_path=settings.db_path,
+        database_url=settings.database_url,
         llm_url=settings.llm_url,
         model=settings.model,
     )
     app.state.db = None
+    app.state.owner_db = None
     app.state.identity_resolver = None
     # run_id → asyncio.Event for in-flight /api/chat turns. See
     # routes/api.py and hermes/agent.py for the contract.
@@ -133,41 +127,51 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.sandbox_backend = None
 
     try:
-        app.state.db = await init_db(settings.db_path)
-        app.state.identity_resolver = SessionResolver(app.state.db)
+        # Alembic-managed schema (§1 Postgres+RLS). `init_db()` runs every
+        # outstanding migration as the `holzi_owner` role, then returns an
+        # engine bound to `holzi_app` (NOBYPASSRLS) for per-request flow.
+        app.state.db = await init_db()
+        # Separate engine connected as `holzi_owner` for lifespan seeding +
+        # global sweepers (list_due / sweep_expired). Disposed in the finally.
+        app.state.owner_db = await make_owner_engine()
+        # Resolve sessions via the OWNER engine, not the holzi_app engine.
+        # `sessions` is RLS-locked (0003), but the resolver maps a bearer to a
+        # user_id *before* any user is known, so `app.user_id` is still unset
+        # (GUC default '0') and an RLS-bound read would see zero rows -> every
+        # request 401s. This is the pre-identity bootstrap read the design doc
+        # describes ("resolve -> THEN SET LOCAL app.user_id").
+        #
+        # The bypass works because `holzi_owner` is a BYPASSRLS/superuser role
+        # (the Postgres image makes POSTGRES_USER a superuser), so it ignores
+        # the policies even though they are FORCEd. This is NOT the FORCE
+        # mechanism — FORCE would in fact bite a NON-superuser owner. If
+        # `holzi_owner` is ever hardened to NOSUPERUSER NOBYPASSRLS, this read
+        # would see zero rows and every request would 401, so that hardening
+        # must ship with a real resolver bypass (SECURITY DEFINER fn, or
+        # dropping `sessions` from RLS). The lookup is a fixed `sessions JOIN
+        # users` selecting (user_id, role) filtered by token_hash + session
+        # expiry — see identity.SessionResolver.resolve.
+        app.state.identity_resolver = SessionResolver(app.state.owner_db)
 
-        # Plan 36: one-shot migration — copy the legacy `personas.prompt`
-        # column into `identity` and drop it. No-op on fresh and
-        # already-migrated DBs. Must run BEFORE ensure_personas_backfill
-        # so the repo layer (Task 2+) never sees the old column.
-        await _migrate_prompt_to_fragments(app.state.db)
+        # §1: seed the env-driven platform_admin row + a never-expiring
+        # session keyed on HERMES_PLATFORM_ADMIN_TOKEN. Idempotent —
+        # rotating the env token drops the previous bootstrap session so
+        # the old token stops working. Runs against the OWNER engine
+        # because at boot there is no resolved user yet.
+        admin_user_id = await ensure_platform_admin_seeded(app.state.owner_db)
 
-        # Plan 37: drop legacy persona_skills table + add skills.enabled.
-        # Must run before any resolver/repo code that reads skills.
-        await _drop_persona_skills_table(app.state.db)
-        await _migrate_skills_add_enabled(app.state.db)
+        # Plan 29-A: seed the admin's default persona + per-channel prompt
+        # rows before anything that resolves system prompts can run
+        # (workers, scheduler, /api/chat). Idempotent — re-runs on
+        # existing DBs only insert what's missing. Scoped to the admin
+        # (§1 single-org); per-user backfill on signup is a §2 concern.
+        await ensure_personas_backfill(app.state.db, user_id=admin_user_id)
 
-        # Plan 29-D: add llm_credential_id + model to personas if missing.
-        await _migrate_personas_add_credential_columns(app.state.db)
-
-        # Plan 37: seed the single-user row. Must run BEFORE
-        # ensure_personas_backfill — Plan 35 §C1 gives personas a
-        # `user_id` FK to users, so the admin (id=1) row must exist before
-        # the backfill inserts the admin's default persona. Idempotent —
-        # INSERT OR IGNORE.
-        await ensure_users_seeded(app.state.db)
-
-        # Plan 29-A: seed the default persona + per-channel prompt rows
-        # before anything that resolves system prompts can run (workers,
-        # scheduler, /api/chat). Idempotent — re-runs on existing DBs
-        # only insert what's missing. Plan 35 §C1: seeds the admin's
-        # (user_id=1) default persona, hence the users-seed ordering above.
-        await ensure_personas_backfill(app.state.db)
-
+        # `skills` is a global table (no RLS) — no user_id needed.
         await ensure_bootstrap_skill_seeded(app.state.db)
 
-        # Plan 38: seed the 8 curated starter skills. Idempotent —
-        # INSERT OR IGNORE per slug; user-edited bodies are preserved.
+        # Plan 38: seed the 8 curated starter skills. Idempotent — ON
+        # CONFLICT (slug) DO NOTHING preserves user-edited bodies.
         await ensure_starter_skills_seeded(app.state.db)
 
         # Plan 25: backfill workspaces from HERMES_WORKSPACE_ROOTS. The env
@@ -190,13 +194,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     slugs=inserted,
                 )
 
-        # Master key lives next to the DB so backups capture both. Pure
-        # in-memory DBs (test path) fall back to a temp file under cwd.
-        key_file = (
-            Path(settings.db_path).resolve().parent
-            if settings.db_path != ":memory:"
-            else Path.cwd()
-        ) / "master.key"
+        # Master key lives in the data directory; backups should capture
+        # `${HERMES_DATA_DIR}` to roll the key forward together with the
+        # DB-side ciphertext.
+        key_file = get_data_dir() / "master.key"
         master = resolve_master_key(
             secret_key_env=settings.secret_key, key_file_path=key_file
         )
@@ -208,6 +209,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await rebuild_upstream_from_db(
             app,
             db=app.state.db,
+            user_id=admin_user_id,
             encryptor=app.state.encryptor,
             fallback_llm_url=settings.llm_url,
             fallback_llm_api_key=settings.llm_api_key,
@@ -269,6 +271,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # the scheduler on a stale client.
         app.state.scheduler = AgentTaskScheduler(
             app.state.db,
+            owner_db=app.state.owner_db,
             encryptor=app.state.encryptor,
             fallback_proxy_url=settings.llm_url,
             tool_factory=lambda: build_tool_catalog(
@@ -288,7 +291,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         scratch_root = conversation_scratch_root()
         scratch_root.mkdir(parents=True, exist_ok=True)
         app.state.conversation_sweeper = ConversationSweepScheduler(
-            app.state.db, scratch_root
+            app.state.db, scratch_root, owner_db=app.state.owner_db
         )
         await app.state.conversation_sweeper.start()
 
@@ -363,6 +366,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.upstream.aclose()
         if app.state.db is not None:
             await app.state.db.dispose()
+        if app.state.owner_db is not None:
+            await app.state.owner_db.dispose()
         logger.info("hermes_stopping")
 
 

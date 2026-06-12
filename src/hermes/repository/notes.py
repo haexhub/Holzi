@@ -1,9 +1,10 @@
 import time
 
 from sqlalchemy import desc, select, text
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from hermes.db import tx_for_user
 from hermes.repository.models import Note
 from hermes.schema import notes as t_notes
 
@@ -29,7 +30,7 @@ async def upsert(
     ts: int | None = None,
 ) -> Note:
     now = ts if ts is not None else int(time.time())
-    insert_stmt = sqlite_insert(t_notes).values(
+    insert_stmt = pg_insert(t_notes).values(
         user_id=user_id, key=key, content=content, tags=tags, updated_at=now
     )
     # Conflict target is the per-user (user_id, key) constraint — on a fresh
@@ -50,7 +51,7 @@ async def upsert(
         t_notes.c.updated_at,
         t_notes.c.user_id,
     )
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(upsert_stmt)
         row = result.first()
     if row is None:
@@ -59,7 +60,7 @@ async def upsert(
 
 
 async def get(engine: AsyncEngine, key: str, *, user_id: int) -> Note | None:
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_notes).where(
                 t_notes.c.key == key,
@@ -76,7 +77,7 @@ async def list_all(
     user_id: int,
     limit: int = 100,
 ) -> list[Note]:
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             select(t_notes)
             .where(t_notes.c.user_id == user_id)
@@ -90,7 +91,7 @@ async def list_all(
 async def delete(engine: AsyncEngine, key: str, *, user_id: int) -> bool:
     """Remove a note the caller owns. A note belonging to another user is a
     no-op (returns False) — the `user_id` filter is part of the DELETE WHERE."""
-    async with engine.begin() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             t_notes.delete().where(
                 t_notes.c.key == key,
@@ -107,17 +108,21 @@ async def find(
     query: str,
     limit: int = 10,
 ) -> list[Note]:
-    # FTS5 join — raw SQL via `text()`, parameters bound. `user_id` is not
-    # indexed in `notes_fts` (only key/content/tags are searchable); we scope
-    # by joining back to `notes` and filtering on `n.user_id` so user A's
-    # search can never surface user B's notes.
+    """Full-text search over notes (key + content + tags), using the
+    generated `search_tsv` GIN index. `query` is a Postgres `tsquery`
+    expression — callers tokenise free-form user input first. The
+    `n.user_id` filter is defense-in-depth on top of RLS: RLS already
+    scopes the row set, but the explicit predicate lets the planner skip
+    rows owned by other users without consulting policy.
+    """
     sql = text(
-        "SELECT n.id, n.key, n.content, n.tags, n.updated_at, n.user_id "
-        "FROM notes n JOIN notes_fts f ON f.rowid = n.id "
-        "WHERE notes_fts MATCH :q AND n.user_id = :user_id "
-        "ORDER BY rank LIMIT :limit"
+        "SELECT id, key, content, tags, updated_at, user_id "
+        "FROM notes "
+        "WHERE search_tsv @@ to_tsquery('simple', :q) AND user_id = :user_id "
+        "ORDER BY ts_rank(search_tsv, to_tsquery('simple', :q)) DESC "
+        "LIMIT :limit"
     )
-    async with engine.connect() as conn:
+    async with tx_for_user(engine, user_id=user_id) as conn:
         result = await conn.execute(
             sql, {"q": query, "limit": limit, "user_id": user_id}
         )

@@ -11,7 +11,7 @@ AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
 @pytest.fixture
-async def client():
+async def client(pg_db):
     async with (
         LifespanManager(app),
         httpx.AsyncClient(
@@ -62,7 +62,7 @@ async def test_create_persists_encrypted_blob(client: httpx.AsyncClient) -> None
         headers=AUTH,
     )
     cred_id = response.json()["id"]
-    row = await repo.get(app.state.db, cred_id)
+    row = await repo.get(app.state.db, cred_id, user_id=1)
     assert row is not None
     # Ciphertext stored, plaintext not — round-trip via the same encryptor
     # the lifespan booted up.
@@ -161,7 +161,9 @@ async def test_activate_rejects_pending_oauth_credential(
     from hermes.main import app
     from hermes.repository import llm_credentials as repo
 
-    cred = await repo.create_oauth_pending(app.state.db, display_name="Pending")
+    cred = await repo.create_oauth_pending(
+        app.state.db, user_id=1, display_name="Pending"
+    )
 
     r = await client.patch(
         f"/api/llm/credentials/{cred.id}/activate", headers=AUTH

@@ -1,296 +1,124 @@
-"""Database bootstrap.
+"""Database bootstrap (Postgres + RLS).
 
-Owns the single `AsyncEngine` for the app. Consumers (route handlers,
-scheduler tick) open their own short-lived `AsyncConnection` via
-`engine.begin()` so that each logical operation sits in its own
-transaction. Sharing a single long-lived connection across concurrent
-tasks is unsafe per SQLAlchemy's ownership model — two coroutines
-committing on the same connection would race.
-
-Schema lives in two places:
-- `schema.py` — SQLAlchemy Core `Table` definitions for the regular
-  tables. Applied via `metadata.create_all()`.
-- `schema.sql` — SQLite-specific bits SQLAlchemy doesn't model: FTS5
-  virtual tables and their sync triggers. Applied as raw SQL after the
-  metadata create.
+`init_db()` runs Alembic to `head` (using the owner role) and returns an
+AsyncEngine that connects as `holzi_app` — the role with NOBYPASSRLS, the
+one RLS actually bites. Per-request code uses `tx_for_user(engine)` to open
+a transaction with `SET LOCAL app.user_id = $1` applied; the resolved
+user_id is read from the `current_user_id` ContextVar populated by the
+auth middleware.
 """
-from importlib.resources import files
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator
+from contextvars import ContextVar, Token
+from urllib.parse import urlsplit, urlunsplit
 
-from sqlalchemy import event, text
-from sqlalchemy.engine import Engine
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from sqlalchemy.pool import StaticPool
+from alembic.config import Config
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
-from hermes.schema import metadata
+from alembic import command
+from hermes.config import settings
 
-_FTS_SCHEMA_SQL = files("hermes").joinpath("schema.sql").read_text(encoding="utf-8")
+_current_user_id: ContextVar[int | None] = ContextVar("_current_user_id", default=None)
 
 
-@event.listens_for(Engine, "connect")
-def _sqlite_set_pragmas(dbapi_connection, _record) -> None:
-    """Apply per-connection SQLite PRAGMAs on every pool checkout.
+def set_current_user_token(user_id: int) -> Token:
+    """Bind `user_id` to this task's ContextVar; returns a Token to reset."""
+    return _current_user_id.set(user_id)
 
-    `PRAGMA foreign_keys` is per-connection, not per-database — without
-    this every new connection from the pool would silently disable FK
-    enforcement and lose the integrity guarantees the schema relies on.
+
+def reset_current_user(token: Token) -> None:
+    """Restore the prior ContextVar value (call in the request's finally)."""
+    _current_user_id.reset(token)
+
+
+def get_current_user() -> int | None:
+    return _current_user_id.get()
+
+
+def _owner_url() -> str:
+    return settings.database_url
+
+
+def _runtime_url() -> str:
+    if settings.runtime_database_url:
+        return settings.runtime_database_url
+    # Derive: same host/port/db, swap role + password.
+    parts = urlsplit(settings.database_url)
+    if not parts.hostname:
+        raise RuntimeError(f"cannot derive runtime URL from {settings.database_url!r}")
+    netloc = f"holzi_app:{settings.runtime_role_password}@{parts.hostname}"
+    if parts.port:
+        netloc += f":{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+async def init_db() -> AsyncEngine:
+    """Run Alembic to head as owner, then return the holzi_app engine.
+
+    Alembic command runs synchronously; we hop into a thread to keep the
+    event loop responsive.
     """
-    cursor = dbapi_connection.cursor()
-    try:
-        cursor.execute("PRAGMA foreign_keys=ON")
-    finally:
-        cursor.close()
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", _owner_url())
+    await asyncio.to_thread(command.upgrade, cfg, "head")
+    return create_async_engine(_runtime_url(), pool_pre_ping=True)
 
 
-async def init_db(path: str) -> AsyncEngine:
-    """Open an `AsyncEngine`, apply schema, return it.
-
-    Re-running against an existing DB is safe — `metadata.create_all`
-    issues `CREATE TABLE IF NOT EXISTS` and the FTS5 schema is also
-    idempotent.
-
-    Callers acquire connections via `async with engine.begin() as conn:`
-    (auto-commits on success, rolls back on exception) for writes, or
-    `engine.connect()` for read-only operations.
+async def make_owner_engine() -> AsyncEngine:
+    """Separate engine connected as `holzi_owner`. Used by lifespan seeding and
+    the global sweepers (via `tx_as_owner`), and — since the RLS bootstrap fix —
+    by the per-request `SessionResolver` lookup (main.py), which connects
+    directly without `tx_as_owner`. So this engine now takes request-path
+    traffic, not just rare boot/sweeper calls. Disposed by the lifespan
+    teardown. `pool_size=2` is fine at §1 single-org scale; revisit if resolver
+    concurrency grows (e.g. a dedicated read-only resolver pool).
     """
-    if path == ":memory:":
-        # `:memory:` databases are per-connection by default — every new
-        # checkout from the pool would open a fresh empty DB. StaticPool
-        # plus check_same_thread=False keeps a single shared in-memory DB
-        # alive for the lifetime of the engine. **Warning**: StaticPool
-        # serialises every operation through one connection, so any
-        # concurrent caller (e.g. the agent-task scheduler running in
-        # parallel with a request) will race on transaction state. Use
-        # file-based paths for anything beyond toy/scripts; the test
-        # suite explicitly switches to tmp_path SQLite files for this
-        # reason.
-        engine = create_async_engine(
-            "sqlite+aiosqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-    else:
-        engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
-    try:
-        async with engine.begin() as conn:
-            if path != ":memory:":
-                # journal_mode is per-DB and persists in the file; one-time
-                # set is enough. foreign_keys is per-connection — handled
-                # by the global connect listener above.
-                await conn.execute(text("PRAGMA journal_mode = WAL"))
-            await conn.run_sync(metadata.create_all)
-            await _apply_lightweight_migrations(conn)
-            for stmt in _split_statements(_FTS_SCHEMA_SQL):
-                await conn.execute(text(stmt))
-    except BaseException:
-        await engine.dispose()
-        raise
-    return engine
+    return create_async_engine(_owner_url(), pool_pre_ping=True, pool_size=2)
 
 
-async def _apply_lightweight_migrations(conn) -> None:
-    """Apply additive column adds that `metadata.create_all` won't touch
-    on an existing table. SQLite has no `ADD COLUMN IF NOT EXISTS`, so
-    we check `PRAGMA table_info` first.
+@contextlib.asynccontextmanager
+async def tx_for_user(
+    engine: AsyncEngine, *, user_id: int | None = None
+) -> AsyncIterator[AsyncConnection]:
+    """Open a transaction with `SET LOCAL app.user_id = $1`.
 
-    Keep this list short — anything non-trivial deserves a proper
-    migration tool (Alembic) instead of growing this function.
+    Resolution order: explicit `user_id` arg > ContextVar > raise.
+    The middleware populates the ContextVar; repository code that runs
+    outside a request (lifespan seeding, the scheduler) must pass `user_id`
+    explicitly. A None resolution is a programming error — RLS would silently
+    return zero rows, which is the worst possible failure mode.
     """
-    cols = await conn.execute(text("PRAGMA table_info(llm_credentials)"))
-    existing = {row[1] for row in cols.all()}
-    if "model" not in existing:
-        await conn.execute(text("ALTER TABLE llm_credentials ADD COLUMN model TEXT"))
-
-    cols = await conn.execute(text("PRAGMA table_info(conversations)"))
-    existing = {row[1] for row in cols.all()}
-    if "bookmarked" not in existing:
+    uid = user_id if user_id is not None else _current_user_id.get()
+    if uid is None:
+        raise RuntimeError(
+            "tx_for_user requires a resolved user_id "
+            "(ContextVar empty and no explicit kwarg)"
+        )
+    async with engine.begin() as conn:
+        # `SET LOCAL` doesn't accept bind parameters (parser-level restriction),
+        # so route through `set_config(name, value, is_local=true)` which does.
         await conn.execute(
-            text(
-                "ALTER TABLE conversations ADD COLUMN bookmarked "
-                "INTEGER NOT NULL DEFAULT 0"
-            )
+            text("SELECT set_config('app.user_id', :u, true)"),
+            {"u": str(uid)},
         )
-    if "expires_at" not in existing:
-        await conn.execute(
-            text("ALTER TABLE conversations ADD COLUMN expires_at INTEGER")
-        )
-        # Backfill `expires_at` for rows that existed before this migration —
-        # otherwise the sweep skips every legacy conversation (it filters
-        # `expires_at IS NOT NULL`) and the feature is silently inert on
-        # already-deployed DBs. Import-locally to avoid an import cycle
-        # between db.py and config.py.
-        from hermes.config import settings
-
-        await conn.execute(
-            text(
-                "UPDATE conversations "
-                "SET expires_at = updated_at + :window "
-                "WHERE expires_at IS NULL AND bookmarked = 0"
-            ),
-            {"window": settings.conversation_ttl_days * 86_400},
-        )
-    # Plan 35 §C1: scope conversations by owning user. On a pre-C1 DB the
-    # column is missing (create_all won't ALTER an existing table); add it and
-    # backfill every legacy row to the seeded admin (id=1). The per-user index
-    # lives here (not in schema.py) so it's created AFTER the column exists on
-    # both fresh and existing DBs — see schema.py for the rationale.
-    if "user_id" not in existing:
-        await conn.execute(
-            text("ALTER TABLE conversations ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
-        )
-    await conn.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS conv_user_updated "
-            "ON conversations(user_id, updated_at DESC)"
-        )
-    )
-
-    # Plan 35 §C1: scope notes (the agent's memory store) by owning user.
-    # Same shape as conversations above — on a pre-C1 DB the column is
-    # missing (create_all won't ALTER an existing table); add it and backfill
-    # every legacy row to the seeded admin (id=1). The per-user index lives
-    # here (not in schema.py) so it's created AFTER the column exists on both
-    # fresh and existing DBs. We deliberately do NOT touch the old global
-    # `notes.key` unique index on existing DBs — SQLite can't easily drop it
-    # and for single-user C1 a stricter global-unique key is harmless.
-    cols = await conn.execute(text("PRAGMA table_info(notes)"))
-    notes_cols = {row[1] for row in cols.all()}
-    if "user_id" not in notes_cols:
-        await conn.execute(
-            text("ALTER TABLE notes ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
-        )
-    await conn.execute(
-        text("CREATE INDEX IF NOT EXISTS notes_user ON notes(user_id, updated_at DESC)")
-    )
-
-    # Plan 35 §C1: scope agent_tasks by owning user. Same shape as
-    # conversations/notes above — on a pre-C1 DB the column is missing
-    # (create_all won't ALTER an existing table); add it and backfill every
-    # legacy row to the seeded admin (id=1). The per-user index lives here
-    # (not in schema.py) so it's created AFTER the column exists on both fresh
-    # and existing DBs. The existing global `agent_tasks_enabled_due` index is
-    # kept untouched — the scheduler's GLOBAL `list_due` (serving every user)
-    # relies on it.
-    cols = await conn.execute(text("PRAGMA table_info(agent_tasks)"))
-    agent_tasks_cols = {row[1] for row in cols.all()}
-    if "user_id" not in agent_tasks_cols:
-        await conn.execute(
-            text("ALTER TABLE agent_tasks ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
-        )
-    await conn.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS agent_tasks_user_enabled_due "
-            "ON agent_tasks(user_id, enabled, due_at)"
-        )
-    )
-
-    # Plan 35 §C1: scope personas by owning user + make the single-default
-    # invariant PER user. Same column shape as conversations/notes/agent_tasks
-    # above (add + backfill to admin id=1 on a pre-C1 DB). The per-user index
-    # leads with `user_id, is_default` so `get_default(user_id=...)` is a
-    # covering lookup. NOTE: the global `personas.name` unique index from the
-    # old schema survives on existing DBs (harmless for single-user C1).
-    #
-    # The single-default TRIGGERs are the wrinkle: the OLD global versions
-    # already exist on a pre-C1 DB, so schema.sql's `CREATE TRIGGER IF NOT
-    # EXISTS` won't replace them. DROP them here (after the column exists) so
-    # schema.sql — applied AFTER this migration in init_db — recreates the
-    # per-user versions. Idempotent: harmless to DROP+recreate on every boot.
-    cols = await conn.execute(text("PRAGMA table_info(personas)"))
-    personas_cols = {row[1] for row in cols.all()}
-    if "user_id" not in personas_cols:
-        await conn.execute(
-            text("ALTER TABLE personas ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
-        )
-    await conn.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS personas_user_default "
-            "ON personas(user_id, is_default)"
-        )
-    )
-    await conn.execute(
-        text("DROP TRIGGER IF EXISTS personas_single_default_insert")
-    )
-    await conn.execute(
-        text("DROP TRIGGER IF EXISTS personas_single_default_update")
-    )
-
-    # Plan 16: agent_tasks replaces reminders + todos. Drop the legacy tables
-    # on upgrade so re-running metadata.create_all() doesn't recreate them
-    # via leftover SQLAlchemy references in old code paths. The data was
-    # bot-internal scratch state (Signal pings + the agent's todo list) —
-    # acceptable loss in exchange for one canonical scheduled-task concept.
-    await conn.execute(text("DROP INDEX IF EXISTS reminders_due_pending"))
-    await conn.execute(text("DROP TABLE IF EXISTS reminders"))
-    await conn.execute(text("DROP TABLE IF EXISTS todos"))
-
-    # Plan 34: messenger surface removed. Drop the messenger_accounts table
-    # and prune any leftover conversations/messages/attachments tied to
-    # the deprecated 'signal' / 'telegram' channels. FK cascades take care
-    # of children (messages, attachments, agent_runs).
-    await conn.execute(
-        text("DROP INDEX IF EXISTS messenger_accounts_active_per_provider")
-    )
-    await conn.execute(text("DROP TABLE IF EXISTS messenger_accounts"))
-    await conn.execute(
-        text(
-            "DELETE FROM conversations WHERE channel IN ('signal', 'telegram')"
-        )
-    )
-    await conn.execute(
-        text(
-            "DELETE FROM channel_prompts WHERE channel IN ('signal', 'telegram')"
-        )
-    )
-
-    cols = await conn.execute(text("PRAGMA table_info(agent_runs)"))
-    existing = {row[1] for row in cols.all()}
-    if "agent_task_id" not in existing:
-        await conn.execute(
-            text("ALTER TABLE agent_runs ADD COLUMN agent_task_id INTEGER")
-        )
-
-    # Plan 35 §C1: extend the minimal `users` table with identity columns on
-    # existing DBs. The `sessions` table + its index are auto-created by
-    # metadata.create_all, so only these ALTERs need handling here.
-    cols = await conn.execute(text("PRAGMA table_info(users)"))
-    existing = {row[1] for row in cols.all()}
-    if "email" not in existing:
-        await conn.execute(text("ALTER TABLE users ADD COLUMN email TEXT"))
-    if "role" not in existing:
-        await conn.execute(
-            text("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'")
-        )
-        # The pre-existing single-user seed row (id=1) becomes the admin.
-        await conn.execute(text("UPDATE users SET role = 'admin' WHERE id = 1"))
-    if "parent_user_id" not in existing:
-        await conn.execute(text("ALTER TABLE users ADD COLUMN parent_user_id INTEGER"))
+        yield conn
 
 
-def _split_statements(sql: str) -> list[str]:
-    """Split a SQL script into individual statements, respecting BEGIN/END
-    blocks (which contain semicolons of their own — used by FTS5 triggers).
+@contextlib.asynccontextmanager
+async def tx_as_owner(owner_engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
+    """Escape-hatch for lifespan bootstrap (seed platform admin) and the
+    scheduler's GLOBAL queries (e.g. `list_expired`, `agent_tasks list_due`)
+    that must span every user. Connects as `holzi_owner`, which is a
+    BYPASSRLS/superuser role (the Postgres image makes POSTGRES_USER a
+    superuser), so it sees ALL rows across users regardless of the FORCEd
+    policies — exactly what the global sweepers need. NOTE: this relies on the
+    owner being superuser/BYPASSRLS; if `holzi_owner` is ever hardened to
+    NOSUPERUSER NOBYPASSRLS, FORCE would filter these queries by the GUC
+    default ('0') and the sweepers would silently process nothing. The
+    bootstrap inserts users while connected as owner, then uses `tx_for_user`
+    for everything after.
     """
-    statements: list[str] = []
-    buf: list[str] = []
-    in_block = False
-    for raw_line in sql.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("--"):
-            continue
-        buf.append(line)
-        upper = line.upper()
-        if "BEGIN" in upper and not in_block:
-            in_block = True
-            continue
-        if in_block:
-            if upper.startswith("END;"):
-                in_block = False
-                statements.append(" ".join(buf))
-                buf = []
-            continue
-        if line.endswith(";"):
-            statements.append(" ".join(buf))
-            buf = []
-    if buf:
-        statements.append(" ".join(buf))
-    return [s.rstrip(";").strip() for s in statements if s.strip(";").strip()]
+    async with owner_engine.begin() as conn:
+        yield conn

@@ -1,8 +1,10 @@
 # Hermes
 
 Personal AI assistant. The `hermes-server` FastAPI backend powers the
-[holzi-frontend](https://github.com/haexhub/holzi-frontend) Web UI, plus
-optional Signal and Telegram bridges. Memory lives in SQLite + FTS5,
+[holzi-frontend](https://github.com/haexhub/holzi-frontend) Web UI.
+Memory lives in Postgres with per-user Row-Level Security — see
+[`docs/plans/2026-06-11-saas-coding-agent-design.md`](docs/plans/2026-06-11-saas-coding-agent-design.md)
+for the multi-tenant design; full-text search uses `tsvector` GIN indexes.
 LLM access is OpenAI-compatible (Anthropic OAuth via the bundled
 `haex-claude-proxy`, OpenAI, OpenRouter, Google, or any custom
 endpoint).
@@ -26,15 +28,25 @@ make install
 
 # 2. Set up secrets
 cp .env.example .env
-echo "HERMES_AUTH_TOKEN=$(make -s token)" >> .env
+echo "HERMES_PLATFORM_ADMIN_TOKEN=$(make -s token)" >> .env
 echo "HERMES_SECRET_KEY=$(openssl rand -hex 32)" >> .env
-# Optional: edit .env to set HERMES_SIGNAL_NUMBER (E.164), HERMES_DOMAIN,
-# HERMES_LOG_FILE, etc.
+# Edit .env to set HERMES_PLATFORM_ADMIN_EMAIL (and optionally
+# HERMES_DOMAIN, HERMES_LOG_FILE, etc.). The dev defaults for
+# HERMES_DATABASE_URL already point at the compose `db` service.
 
-# 3. Bring up the local dev-stack (backend + LLM proxy + signal-cli)
-make up-local            # backend only
-make up-local-full       # backend + holzi-frontend (Nuxt dev with HMR)
+# 3. Bring up the local dev-stack (Postgres + backend + LLM proxy)
+make up-local            # backend + db
+make up-local-full       # backend + db + holzi-frontend (Nuxt dev with HMR)
 make logs-local
+```
+
+Memory lives in Postgres with per-user Row-Level Security; the `db`
+service comes up as part of `make up-local`. To run the backend outside
+Compose (`make dev`), bring up just Postgres first and apply migrations
+— see [`docs/postgres-dev.md`](docs/postgres-dev.md):
+
+```bash
+docker compose -f docker-compose.local.yml up -d db
 ```
 
 The dev-stack routes through a bundled Traefik on `*.localhost` (RFC
@@ -51,8 +63,8 @@ Port 80 already in use? Set `HERMES_LOCAL_WEB_PORT=11080` in `.env` and
 the URLs become `http://app.localhost:11080` etc.
 
 On first load the UI shows a login screen — paste the value of
-`HERMES_AUTH_TOKEN` from your `.env` (the same `make token` output).
-It is persisted in `localStorage` and sent as
+`HERMES_PLATFORM_ADMIN_TOKEN` from your `.env` (the same `make token`
+output). It is persisted in `localStorage` and sent as
 `Authorization: Bearer <token>` on every API call.
 
 Then add an LLM credential at `/settings/llm` — see
@@ -72,26 +84,6 @@ PROXY_NETWORK_EXTERNAL=false make up-traefik
 You'll need `HERMES_DOMAIN` and `LETSENCRYPT_EMAIL` set in `.env` for
 ACME-HTTP-01 to work. Everything else is identical to the dev-stack
 configuration.
-
-## Linking Signal (one-time)
-
-The Signal worker is disabled unless `HERMES_SIGNAL_NUMBER` is set.
-Signal is connected as a **primary device** in v1 (linked secondary
-devices in signal-cli don't receive Note-to-Self sync messages — see
-[`docs/troubleshooting.md`](docs/troubleshooting.md) under "Signal
-Note-to-Self silent" for the workaround). The pairing flow lives at
-`/settings/messengers` in the UI:
-
-1. Start the stack (`make up-local` or `make up`). The
-   `signal-cli-rest-api` container needs to be running.
-2. Open `/settings/messengers` and click **Link Signal**. The UI shows
-   the QR. Scan it from Signal → Settings → Linked devices → Add
-   device.
-3. Set `HERMES_SIGNAL_NUMBER` in `.env` to the linked number (E.164,
-   e.g. `+491701234567`) and restart: `make down-local && make up-local`.
-
-For the Telegram bridge, paste a BotFather token at
-`/settings/messengers` — no `.env` change needed.
 
 ## Repo layout
 
@@ -123,14 +115,14 @@ For the Telegram bridge, paste a BotFather token at
 - `make down-local` / `make logs-local` / `make ps-local` — dev-stack lifecycle
 - `make sandbox-image` — rebuild the sandbox image after editing `Dockerfile.sandbox`
 - `make frontend-reinstall` — recreate the frontend container with a fresh `node_modules` (run after `package.json`/lockfile changes in `../holzi-frontend`)
-- `make token` — emit a fresh 32-byte hex token for `HERMES_AUTH_TOKEN`
-- `make clean` — `compose down -v`, **destroys `hermes.db`**
+- `make token` — emit a fresh 32-byte hex token for `HERMES_PLATFORM_ADMIN_TOKEN`
+- `make clean` — `compose down -v`, **destroys the Postgres data volume**
 
 ## Diagnostics
 
 `GET /api/diagnostics` (bearer-gated) returns a redacted snapshot of
-six subsystem checks (database, LLM credential, messenger, scheduler,
-workspace roots, sandbox runtime). The Web UI surfaces the same data
+five subsystem checks (database, LLM credential, scheduler, workspace
+roots, sandbox runtime). The Web UI surfaces the same data
 at `/settings/diagnostics`, with a "Letzte Fehlläufe" panel backed by
 `GET /api/runs?status=error`. When anything reports `warning` or
 `error`, [`docs/troubleshooting.md`](docs/troubleshooting.md) has the
