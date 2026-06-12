@@ -206,25 +206,6 @@ beabsichtigt — kein silent fallback.
 """
 
 
-async def _drop_persona_skills_table(engine: AsyncEngine) -> None:
-    """One-shot: drop the Plan-33 `persona_skills` table if it still
-    exists. Idempotent.
-    """
-    async with engine.connect() as conn:
-        tables = (
-            await conn.execute(
-                text(
-                    "SELECT name FROM sqlite_master WHERE type='table' "
-                    "AND name='persona_skills'"
-                )
-            )
-        ).all()
-    if not tables:
-        return
-    async with engine.begin() as conn:
-        await conn.execute(text("DROP TABLE persona_skills"))
-
-
 async def ensure_backfill(engine: AsyncEngine, *, user_id: int) -> None:
     """Seed `user_id`'s default persona + every channel row.
 

@@ -1,9 +1,24 @@
 import os
 
-os.environ.setdefault("HERMES_PLATFORM_ADMIN_TOKEN", "test-token-for-pytest")
-os.environ.setdefault("HERMES_PLATFORM_ADMIN_EMAIL", "admin@test.local")
+# FORCE (not setdefault) the admin identity the API tests authenticate with:
+# 36 test files hardcode the bearer `test-token-for-pytest`, so the suite OWNS
+# this value. A HERMES_PLATFORM_ADMIN_TOKEN exported in the dev shell (the resume
+# command sets it to `dev-token`) would otherwise win and 401 every authenticated
+# API/WS test while the app seeds the admin under the shell's token.
+os.environ["HERMES_PLATFORM_ADMIN_TOKEN"] = "test-token-for-pytest"
+os.environ["HERMES_PLATFORM_ADMIN_EMAIL"] = "admin@test.local"
 os.environ.setdefault("HERMES_LOG_LEVEL", "WARNING")
-# DATABASE_URL is provided per-test by the testcontainers fixture (Task 18).
+
+# DATABASE_URL is provided per-test by the testcontainers fixtures (Task 18).
+# A HERMES_DATABASE_URL / HERMES_RUNTIME_DATABASE_URL exported in the dev shell
+# (the resume command points them at the compose DB on :5433) must NOT leak into
+# the test session: the testcontainers fixtures own the DSN, and env.py now
+# prefers os.getenv("HERMES_DATABASE_URL") over alembic.ini, so a leaked value
+# would migrate/route the WRONG database and the suite would mass-fail. Drop them
+# up front so the run is hermetic regardless of shell state (pg_db re-sets them
+# per test via monkeypatch).
+os.environ.pop("HERMES_DATABASE_URL", None)
+os.environ.pop("HERMES_RUNTIME_DATABASE_URL", None)
 
 import secrets  # noqa: E402
 
@@ -73,14 +88,20 @@ def _migrated_pg(_pg_container):
     policies, and the `ALTER DATABASE holzi SET app.user_id TO '0'` GUC.
     """
     owner_url = _pg_container["owner_url"]
-    # Mutate the singleton in place for the upgrade ONLY — do NOT importlib.reload
-    # hermes.config (that rebinds a new object db.py/main.py never see). env.py
-    # forces sqlalchemy.url := settings.database_url at command.upgrade time, so
-    # the cfg.set_main_option below is redundant; what actually matters is the
-    # singleton value. Restore it afterwards so this session-scoped fixture does
-    # not leak the container DSN onto the global singleton for tests that don't
-    # use pg_db — pg_db re-pins it per test via auto-restoring monkeypatch.
+    # Point Alembic at the test container for this one-time migration. env.py
+    # (post-CodeRabbit rework) resolves the DSN as
+    #   os.getenv("HERMES_DATABASE_URL") or alembic.ini's sqlalchemy.url
+    # and no longer imports hermes.config.settings. So a HERMES_DATABASE_URL
+    # exported in the shell (the dev resume command points it at the compose DB
+    # on :5433) would WIN over cfg.set_main_option below and migrate the WRONG
+    # database, leaving the testcontainer empty -> the whole suite errors with
+    # "relation ... does not exist". Force the env var to the container URL for
+    # the upgrade, then restore it. Also pin settings.database_url for any code
+    # that still reads the singleton. Do NOT importlib.reload hermes.config
+    # (rebinds a new object db.py/main.py never see).
+    prev_env_url = os.environ.get("HERMES_DATABASE_URL")
     prev_database_url = settings.database_url
+    os.environ["HERMES_DATABASE_URL"] = owner_url
     settings.database_url = owner_url
     try:
         cfg = Config("alembic.ini")
@@ -88,6 +109,10 @@ def _migrated_pg(_pg_container):
         command.upgrade(cfg, "head")
     finally:
         settings.database_url = prev_database_url
+        if prev_env_url is None:
+            os.environ.pop("HERMES_DATABASE_URL", None)
+        else:
+            os.environ["HERMES_DATABASE_URL"] = prev_env_url
 
     return _pg_container
 
