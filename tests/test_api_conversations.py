@@ -1,6 +1,4 @@
 import httpx
-import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.config import conversation_scratch_root, settings
 from hermes.main import app
@@ -11,23 +9,6 @@ AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 _DAY = 86_400
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        # Several tests anchor conversations at an ancient `ts=1000`, which
-        # makes `expires_at` already in the past. The lifespan's background
-        # ConversationSweepScheduler would race the test and DELETE those
-        # rows out from under the request. Stop it so the sweep can't fire
-        # during the test (no test in this file exercises the sweeper).
-        if app.state.conversation_sweeper is not None:
-            await app.state.conversation_sweeper.stop()
-        yield c
 
 
 async def test_api_conversations_requires_auth(client: httpx.AsyncClient) -> None:

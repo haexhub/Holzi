@@ -11,8 +11,6 @@ import time
 from datetime import UTC, datetime
 
 import httpx
-import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.main import app
 from hermes.repository import conversations as conversations_repo
@@ -22,16 +20,6 @@ VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 async def _seed_run(

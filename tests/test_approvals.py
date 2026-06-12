@@ -22,7 +22,6 @@ from typing import Any
 
 import httpx
 import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.agent import ApprovalDecision
 from hermes.main import app
@@ -179,16 +178,6 @@ async def _resolve_first_pending_approval(
     raise AssertionError("no approval became pending")
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 # ---------------------------------------------------------------------------

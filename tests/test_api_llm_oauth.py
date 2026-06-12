@@ -13,7 +13,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.crypto import EncryptedBlob
 from hermes.main import app
@@ -122,16 +121,6 @@ class _FakeClaudeSession:
         self.proc._exit.set()
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 def _install_driver(session: _FakeClaudeSession) -> ClaudeOAuthDriver:

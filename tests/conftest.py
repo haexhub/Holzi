@@ -239,15 +239,91 @@ async def app_with_pg(pg_db):
 
 
 @pytest.fixture
-async def client(app_with_pg):
-    """httpx AsyncClient bound to the lifespan-booted app via ASGITransport."""
-    import httpx
+async def client(pg_db):
+    """httpx AsyncClient bound to the per-test lifespan-booted app.
 
-    transport = httpx.ASGITransport(app=app_with_pg)
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://testserver"
-    ) as c:
+    Boots the full app lifespan with `LifespanManager(app)` against the
+    per-test container DB (`pg_db` already pointed `settings` at it).
+    Stops the conversation sweeper unconditionally — tests sometimes
+    anchor conversations at `ts=1000` so `expires_at` is in the past,
+    and the background sweeper would race the test and DELETE the rows
+    mid-request. Stopping it is a no-op for tests that don't care.
+    """
+    import httpx
+    from asgi_lifespan import LifespanManager
+
+    from hermes.main import app
+
+    async with (
+        LifespanManager(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as c,
+    ):
+        if app.state.conversation_sweeper is not None:
+            await app.state.conversation_sweeper.stop()
         yield c
+
+
+@pytest.fixture
+def configure_workspaces(client):
+    """Seed `workspaces` rows so `_active_root_slugs(db)` accepts them.
+
+    Plan 25-A made the table the source of truth for workspace membership;
+    every workspace route checks `workspaces.list_active(db)` at request
+    time. The display_name doubles as the slug — no humanised name needed
+    for these tests. DB engine is per-test (TRUNCATE between tests), so
+    no explicit teardown is required.
+
+    Depends on `client` so the app lifespan has booted and seeded
+    `app.state.db` by the time `_set()` is called.
+    """
+    from hermes.main import app
+    from hermes.repository import workspaces as workspaces_repo
+
+    async def _set(slugs: list[str]) -> None:
+        for slug in slugs:
+            await workspaces_repo.create(
+                app.state.db, workspace_id=slug, display_name=slug
+            )
+
+    return _set
+
+
+@pytest.fixture
+async def install_sandbox(client):
+    """Install a FakeSandboxBackend-backed manager on `app.state` and tear
+    it down so the next test starts with the default `None` manager.
+
+    Depends on `client` so the app lifespan has booted by the time the
+    test calls the returned `_install()` to swap in the fake.
+    """
+    from hermes.main import app
+    from hermes.sandbox import ResourceLimits, SandboxManager
+    from hermes.sandbox.fake import FakeSandboxBackend
+
+    installed: list[SandboxManager] = []
+
+    def _install() -> tuple[SandboxManager, FakeSandboxBackend]:
+        backend = FakeSandboxBackend()
+        mgr = SandboxManager(
+            backend=backend,
+            image="hermes-sandbox:test",
+            network="none",
+            default_limits=ResourceLimits(
+                cpus=1.0, memory_mb=512, disk_mb=1024
+            ),
+        )
+        app.state.sandbox_manager = mgr
+        installed.append(mgr)
+        return mgr, backend
+
+    yield _install
+
+    for mgr in installed:
+        await mgr.shutdown()
+    app.state.sandbox_manager = None
 
 
 @pytest.fixture(autouse=True)
@@ -293,18 +369,25 @@ def _patch_persona_context_for_app_tests(request, monkeypatch) -> None:
     (e.g., `test_personas_resolver.py`) import from the original module,
     not from `routes.api`, so they are unaffected by this patch.
     """
-    import hermes.routes.api as api_mod
+    # `routes.api` is a package; the names below live on the submodules that
+    # actually USE them. Patching the package's re-exports would have no effect
+    # on the submodule-local references — so we target the submodules directly.
     from hermes.main import app
     from hermes.personas import PersonaContext, get_effective_system_prompt
     from hermes.repository.models import LlmCredential
+    from hermes.routes.api import chat as api_chat_mod
+    from hermes.routes.api import chat_stream as api_chat_stream_mod
 
     # `build_client_for_credential` always returns the test mock so tests that
     # set `app.state.upstream` don't need to worry about credential-bound
-    # client creation. This patch applies to ALL integration tests.
+    # client creation. This patch applies to ALL integration tests. The symbol
+    # is referenced from chat_stream (`_stream_web_agent_run`) and chat
+    # (re-export for backward-compat / `api_models` fallback path).
     def _fake_build_client(cred, **kwargs):
         return app.state.upstream
 
-    monkeypatch.setattr(api_mod, "build_client_for_credential", _fake_build_client)
+    monkeypatch.setattr(api_chat_stream_mod, "build_client_for_credential", _fake_build_client)
+    monkeypatch.setattr(api_chat_mod, "build_client_for_credential", _fake_build_client)
 
     # `resolve_persona_context` requires an active credential in the DB.
     # Tests marked `real_persona_context` seed their own credential and opt
@@ -363,7 +446,9 @@ def _patch_persona_context_for_app_tests(request, monkeypatch) -> None:
             model=model,
         )
 
-    monkeypatch.setattr(api_mod, "resolve_persona_context", _fake_resolve_persona_context)
+    monkeypatch.setattr(
+        api_chat_stream_mod, "resolve_persona_context", _fake_resolve_persona_context
+    )
 
     async def _fake_resolve_chat_context_meta(channel: str, engine, *, user_id: int):
         from hermes.config import settings
@@ -377,4 +462,6 @@ def _patch_persona_context_for_app_tests(request, monkeypatch) -> None:
             model,
         )
 
-    monkeypatch.setattr(api_mod, "resolve_chat_context_meta", _fake_resolve_chat_context_meta)
+    monkeypatch.setattr(
+        api_chat_mod, "resolve_chat_context_meta", _fake_resolve_chat_context_meta
+    )

@@ -26,8 +26,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.agent import ApprovalDecision, Tool, _redact_persisted_tool_calls
 from hermes.crypto import Encryptor
@@ -183,21 +181,6 @@ async def _fake_connect(server: Any, secrets: Any) -> AsyncIterator[_FakeSession
     yield _FakeSession()
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-        ) as c,
-    ):
-        manager = app.state.mcp_servers_manager
-        original = manager._connect
-        manager._connect = _fake_connect
-        try:
-            yield c
-        finally:
-            manager._connect = original
 
 
 # --- (a) approval event + (b) persisted records + sequence -----------------

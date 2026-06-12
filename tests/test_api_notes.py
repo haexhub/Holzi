@@ -1,6 +1,4 @@
 import httpx
-import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.main import app
 from hermes.repository import notes
@@ -9,16 +7,6 @@ VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 async def test_api_notes_requires_auth(client: httpx.AsyncClient) -> None:

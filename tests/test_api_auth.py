@@ -1,6 +1,4 @@
 import httpx
-import pytest
-from asgi_lifespan import LifespanManager
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
@@ -11,16 +9,6 @@ VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 def test_auth_me_returns_admin_identity(pg_db) -> None:

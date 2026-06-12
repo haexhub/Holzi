@@ -7,8 +7,6 @@ ordering, shape, limit clamping — is exercised without depending on a
 real Podman backend.
 """
 import httpx
-import pytest
-from asgi_lifespan import LifespanManager
 
 from hermes.main import app
 from hermes.repository import sandbox_crashes as repo
@@ -17,16 +15,6 @@ VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 async def test_sandbox_crashes_requires_auth(client: httpx.AsyncClient) -> None:

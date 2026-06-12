@@ -1,24 +1,10 @@
 """Tests for GET /api/models."""
 import httpx
-import pytest
-from asgi_lifespan import LifespanManager
-
-from hermes.main import app
 
 VALID_TOKEN = "test-token-for-pytest"
 AUTH = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
 
-@pytest.fixture
-async def client(pg_db):
-    async with (
-        LifespanManager(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as c,
-    ):
-        yield c
 
 
 async def test_models_requires_auth(client):
@@ -49,7 +35,10 @@ async def test_models_returns_list(client):
 async def test_models_fallback_when_provider_unreachable(client, monkeypatch):
     """When /v1/models raises a network error, the credential's own model
     appears as a fallback entry so the picker is never empty."""
-    import hermes.routes.api as api_module
+    # The symbol is consumed inside the `chat` submodule (re-export for the
+    # `api_models` fallback path) — patching the package itself wouldn't reach
+    # the submodule-local reference.
+    from hermes.routes.api import chat as api_module
 
     class _FailingClient:
         async def __aenter__(self):
