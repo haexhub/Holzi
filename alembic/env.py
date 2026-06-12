@@ -7,12 +7,15 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 from hermes.schema import metadata
 
-# Resolve the DSN from a migration-safe source: prefer alembic.ini's
-# `sqlalchemy.url`, fall back to the same env var the app reads. Avoid
-# importing `hermes.config.settings` here — that triggers pydantic-settings
-# validation (platform_admin_token / _email required), which is irrelevant
-# to running migrations and would break `alembic upgrade` in CI / images
-# that only have DB credentials.
+# Resolve the DSN from a migration-safe source: prefer the same env var
+# the app reads, fall back to `alembic.ini`'s `sqlalchemy.url`. The shipped
+# `alembic.ini` carries a placeholder DSN (`driver://user:pass@localhost/...`),
+# so HERMES_DATABASE_URL must win whenever it's set — otherwise migrations
+# run against the placeholder and fail. Avoid importing
+# `hermes.config.settings` here — that triggers pydantic-settings validation
+# (platform_admin_token / _email required), which is irrelevant to running
+# migrations and would break `alembic upgrade` in CI / images that only have
+# DB credentials.
 config = context.config
 
 _ini_url = config.get_main_option("sqlalchemy.url")

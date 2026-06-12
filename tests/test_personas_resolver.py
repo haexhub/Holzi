@@ -54,13 +54,14 @@ async def _seed_default_persona(
         is_default=True,
     )
     async with engine.begin() as txn:
-        await txn.execute(
+        result = await txn.execute(
             text(
                 "UPDATE users SET bootstrap_completed = :bc, created_at = :ts "
                 "WHERE id = 1"
             ),
             {"bc": bootstrap_completed, "ts": int(time.time())},
         )
+        assert result.rowcount == 1, "fixture must seed users.id = 1"
     return persona
 
 
@@ -216,13 +217,14 @@ async def test_composition_falls_back_to_default_persona_when_channel_persona_un
     await channels_repo.ensure_seeded(conn)
     # Seed users so bootstrap hint is suppressed.
     async with conn.begin() as txn:
-        await txn.execute(
+        result = await txn.execute(
             text(
                 "UPDATE users SET bootstrap_completed = true, created_at = :ts "
                 "WHERE id = 1"
             ),
             {"ts": int(time.time())},
         )
+        assert result.rowcount == 1, "fixture must seed users.id = 1"
     # Non-default persona that should NOT win.
     await personas_repo.create(
         conn,
@@ -259,13 +261,14 @@ async def test_channel_specific_persona_wins_over_global_default(
     await channels_repo.ensure_seeded(conn)
     # Seed users so bootstrap hint is suppressed.
     async with conn.begin() as txn:
-        await txn.execute(
+        result = await txn.execute(
             text(
                 "UPDATE users SET bootstrap_completed = true, created_at = :ts "
                 "WHERE id = 1"
             ),
             {"ts": int(time.time())},
         )
+        assert result.rowcount == 1, "fixture must seed users.id = 1"
     await personas_repo.create(
         conn,
         user_id=1,

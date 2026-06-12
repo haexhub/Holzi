@@ -226,8 +226,10 @@ async def test_delete_non_default_returns_true(conn: AsyncEngine) -> None:
     # The default persona survives.
     assert await repo.get(conn, default.id, user_id=1) is not None
 
-    # FK CASCADE wipes history rows for the deleted persona.
-    assert await history_repo.list_for_persona(conn, other.id, user_id=2) == []
+    # FK CASCADE wipes history rows for the deleted persona. Query as the
+    # owner (user 1) — if we asked as user 2, RLS would mask the rows and
+    # the assertion would pass even when cascade was broken.
+    assert await history_repo.list_for_persona(conn, other.id, user_id=1) == []
 
 
 @pytest.mark.asyncio
