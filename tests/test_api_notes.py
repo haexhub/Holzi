@@ -63,6 +63,26 @@ async def test_api_notes_post_missing_field_returns_422(
     assert response.status_code == 422
 
 
+async def test_api_notes_post_rejects_comma_in_tag(client: httpx.AsyncClient) -> None:
+    # Tags are persisted comma-joined; a comma inside a tag would split it on
+    # read, so it's rejected at the boundary instead of silently corrupting.
+    response = await client.post(
+        "/api/notes",
+        headers=AUTH,
+        json={"key": "k", "content": "v", "tags": ["ops,prod"]},
+    )
+    assert response.status_code == 422
+
+
+async def test_api_notes_put_rejects_comma_in_tag(client: httpx.AsyncClient) -> None:
+    response = await client.put(
+        "/api/notes/k",
+        headers=AUTH,
+        json={"content": "v", "tags": ["ops,prod"]},
+    )
+    assert response.status_code == 422
+
+
 async def test_api_notes_put_updates(client: httpx.AsyncClient) -> None:
     await notes.upsert(app.state.db, user_id=1, key="k", content="old")
     response = await client.put(
