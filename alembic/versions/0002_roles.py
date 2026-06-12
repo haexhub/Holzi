@@ -3,6 +3,8 @@ Revision ID: 0002
 Revises: 0001
 """
 
+import os
+
 from alembic import op
 
 revision = "0002"
@@ -22,21 +24,28 @@ RUNTIME_TABLES = [
 
 
 def upgrade() -> None:
-    # Idempotent role creation. Password comes from a settings-supplied
-    # SQL parameter so dev/prod can differ. Alembic doesn't bind via psycopg
-    # for DO blocks — embed the literal but keep the dev value low-trust.
-    op.execute("""
+    # The holzi_app role password is operator-supplied via env — NEVER hardcoded.
+    # The SAME var backs settings.runtime_role_password (config.py), so the role
+    # created here and the DSN the app connects with stay in sync. CREATE/ALTER
+    # ROLE is DDL and cannot bind parameters, so the value is embedded as a SQL
+    # literal with single quotes escaped (operator config, not user input).
+    pw = os.getenv("HERMES_RUNTIME_ROLE_PASSWORD")
+    if not pw:
+        raise RuntimeError(
+            "HERMES_RUNTIME_ROLE_PASSWORD must be set to run migration 0002 — "
+            "it is the holzi_app role password; no default is baked in."
+        )
+    pw_lit = "'" + pw.replace("'", "''") + "'"
+    op.execute(f"""
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'holzi_app') THEN
-                CREATE ROLE holzi_app
-                    LOGIN
-                    NOSUPERUSER
-                    NOBYPASSRLS
-                    PASSWORD 'holzi_app_dev_pw';
+                CREATE ROLE holzi_app LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD {pw_lit};
             END IF;
         END$$;
     """)
+    # Sync the password on every apply — covers a pre-existing role and rotation.
+    op.execute(f"ALTER ROLE holzi_app PASSWORD {pw_lit};")
     op.execute("GRANT CONNECT ON DATABASE holzi TO holzi_app;")
     op.execute("GRANT USAGE ON SCHEMA public TO holzi_app;")
     for t in RUNTIME_TABLES:
